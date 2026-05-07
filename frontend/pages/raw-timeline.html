@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'none'; connect-src 'self'; object-src 'none'; base-uri 'self'" />
+    <title>RedqueenX Raw Timeline</title>
+    <link rel="icon" type="image/x-icon" href="/trinity.ico?v=1" sizes="any" />
+    <link rel="shortcut icon" type="image/x-icon" href="/trinity.ico?v=1" />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="timeline-shell">
+      <header class="timeline-topbar">
+        <div class="brand-row">
+          <div class="brand-mark" aria-label="RedqueenX"></div>
+          <div>
+            <h1>Raw Timeline</h1>
+            <p>Every visible tweet captured by Playwright before scoring, even when scoring rejects it</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <a class="nav-link" href="/timeline">Timeline</a>
+          <a class="nav-link" href="/admin">Admin</a>
+        </div>
+      </header>
+      <p id="raw-timeline-status" class="timeline-status"></p>
+      <section id="raw-timeline" class="timeline raw-timeline"></section>
+    </main>
+    <script src="/assets/raw-timeline.js" defer></script>
+  </body>
+</html>

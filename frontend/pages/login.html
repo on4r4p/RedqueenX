@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RedqueenX Login</title>
+    <link rel="icon" type="image/x-icon" href="/trinity.ico?v=1" sizes="any" />
+    <link rel="shortcut icon" type="image/x-icon" href="/trinity.ico?v=1" />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="login-shell">
+      <section class="login-panel">
+        <div class="brand-mark" aria-label="RedqueenX"></div>
+        <h1>RedqueenX Admin</h1>
+        <p>Bot settings</p>
+        <form id="login-form" class="form-grid">
+          <label>
+            <span>Password</span>
+            <input name="password" type="password" autocomplete="current-password" autofocus />
+          </label>
+          <button type="submit">Login</button>
+        </form>
+        <p id="login-error" class="error-text" hidden></p>
+      </section>
+    </main>
+    <script src="/assets/login.js" defer></script>
+  </body>
+</html>

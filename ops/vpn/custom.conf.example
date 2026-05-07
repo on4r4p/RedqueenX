@@ -1,0 +1,12 @@
+# Copy your provider .ovpn file here, or point VPN_CONFIG directly to the downloaded .ovpn file.
+# This file is only an example placeholder.
+client
+dev tun
+proto udp
+remote vpn.example.com 1194
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+verb 3

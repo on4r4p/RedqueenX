@@ -1,0 +1,1199 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RedqueenX Admin</title>
+  <link rel="icon" type="image/x-icon" href="/trinity.ico?v=1" sizes="any" />
+  <link rel="shortcut icon" type="image/x-icon" href="/trinity.ico?v=1" />
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+
+<body>
+  <main class="admin-shell">
+    <header class="topbar">
+      <div class="brand-row">
+        <div class="brand-mark" aria-label="RedqueenX"></div>
+        <div>
+          <h1>Admin</h1>
+          <p>Lists, imports, counters and service settings</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="run-toolbar">
+          <button type="button" data-run-action="start">Start</button>
+          <button type="button" data-run-action="pause" class="secondary-button">Pause</button>
+          <button type="button" data-run-action="resume" class="secondary-button">Resume</button>
+          <button type="button" data-run-action="stop" class="secondary-button">Stop</button>
+          <p id="run-status-line" class="muted"></p>
+        </div>
+        <a class="nav-link" href="/timeline">Timeline</a>
+        <a class="nav-link" href="/raw-timeline">Raw Timeline</a>
+      </div>
+    </header>
+
+    <section id="x-session-alert-header" class="x-session-alert-header is-hidden" role="alert">
+      <div>
+        <p class="alert-kicker">X Session Alert</p>
+        <h2 id="x-session-alert-title">X manual verification required</h2>
+        <p id="x-session-alert-detail"></p>
+        <pre id="x-session-alert-commands" class="alert-command-block"></pre>
+      </div>
+      <div class="x-session-alert-actions">
+        <button id="x-session-alert-login" type="button" class="secondary-button">Launch visible X login</button>
+        <p id="x-session-alert-login-status" class="manual-login-status"></p>
+        <textarea id="x-session-alert-note" rows="2" placeholder="Resolution note required before unlocking"></textarea>
+        <button id="x-session-alert-resolve" type="button" class="danger-button">Mark resolved</button>
+      </div>
+    </section>
+
+    <div class="admin-layout">
+      <aside class="admin-sidebar">
+        <nav class="admin-nav" aria-label="Admin">
+          <button class="admin-nav-button is-active" type="button" data-admin-section-target="lists">Lists</button>
+          <button class="admin-nav-button" type="button" data-admin-section-target="session">Show current
+            session</button>
+          <button class="admin-nav-button" type="button" data-admin-section-target="session-alerts">Session
+            Alerts</button>
+          <button class="admin-nav-button" type="button" data-admin-section-target="settings">Settings</button>
+          <details id="admin-nav-more" class="admin-nav-more">
+            <summary class="admin-nav-button">More ...</summary>
+            <div class="admin-nav-more-items">
+              <button class="admin-nav-button" type="button" data-admin-section-target="tests">Tests</button>
+              <button class="admin-nav-button" type="button" data-admin-section-target="database">Database</button>
+              <button class="admin-nav-button" type="button" data-admin-section-target="env">Env</button>
+            </div>
+          </details>
+        </nav>
+      </aside>
+
+      <div class="admin-content">
+        <section id="admin-section-lists" class="admin-section is-active">
+          <section class="admin-grid">
+            <form id="list-form" class="panel form-grid">
+              <h2>Edit a list</h2>
+              <label>
+                <span>List</span>
+                <select id="edit-kind" name="kind">
+                  <option value="keyword">Keywords</option>
+                  <option value="following">Followed users</option>
+                  <option value="friend">Friends</option>
+                  <option value="banned_user">Banned users</option>
+                  <option value="banned_word">Banned words</option>
+                  <option value="rss_feed">RSS feeds</option>
+                  <option value="no_result">No.Result</option>
+                  <option value="search_terms_used">SearchTerms.Used</option>
+                </select>
+              </label>
+              <label>
+                <span>Value</span>
+                <input id="entry-value" name="value" type="text" autocomplete="off" />
+              </label>
+              <p id="selected-entry-line" class="muted">No entry selected.</p>
+              <div class="button-row">
+                <button name="action" value="add" type="submit">Add</button>
+                <button id="save-selected-button" name="action" value="update" type="submit" class="secondary-button"
+                  disabled>Save</button>
+                <button id="delete-selected-button" name="action" value="delete" type="submit" class="secondary-button"
+                  disabled>Delete</button>
+                <button id="clear-selection-button" type="button" class="secondary-button" disabled>Clear
+                  selection</button>
+              </div>
+            </form>
+
+            <section class="panel list-panel">
+              <header class="section-header">
+                <h2>Active content</h2>
+                <div class="list-panel-tools">
+                  <p id="active-list-label" class="muted"></p>
+                  <label class="list-search-field">
+                    <span>Search</span>
+                    <input id="list-search" type="search" autocomplete="off" />
+                  </label>
+                </div>
+              </header>
+              <div id="list-content" class="list-content"></div>
+            </section>
+          </section>
+
+          <section class="panel import-panel">
+            <h2>Import</h2>
+            <p class="muted">Choose one or more files from your computer, import them, then save their content to
+              SQLite.</p>
+            <label>
+              <span>Local files</span>
+              <input id="import-local-file" type="file" multiple />
+            </label>
+            <label>
+              <span>Data type</span>
+              <select id="import-kind">
+                <option value="keyword">Keywords</option>
+                <option value="following">Followed users</option>
+                <option value="friend">Friends</option>
+                <option value="banned_user">Banned users</option>
+                <option value="banned_word">Banned words</option>
+                <option value="rss_feed">RSS feeds</option>
+                <option value="rss_sent">RssSave history</option>
+                <option value="tweet_sent">Already seen tweets</option>
+                <option value="text_sent">Already seen texts</option>
+                <option value="no_result">No-results</option>
+                <option value="request_log">Request logs</option>
+                <option value="total_api_call">Total API counter</option>
+                <option value="update_status_call">Update status counter</option>
+                <option value="current_session">Current session</option>
+                <option value="search_terms_used">Search terms used</option>
+                <option value="hidden_session">Hidden session</option>
+              </select>
+            </label>
+            <div class="button-row">
+              <button id="load-file-button" type="button">Import</button>
+              <button id="save-import-button" type="button" class="secondary-button" disabled>Save to
+                SQLite</button>
+              <button id="save-all-import-button" type="button" class="secondary-button">Import and save selected
+                files</button>
+            </div>
+            <p id="import-file-detail" class="muted"></p>
+          </section>
+        </section>
+
+        <section id="admin-section-session" class="admin-section">
+          <section id="session-panel" class="panel session-panel">
+            <header class="section-header">
+              <h2>Current session</h2>
+              <div class="button-row compact-row">
+                <div class="session-filter-group" aria-label="Log level">
+                  <span>Level</span>
+                  <label class="inline-check">
+                    <input type="checkbox" data-session-level="info" />
+                    <span>Info</span>
+                  </label>
+                  <label class="inline-check">
+                    <input type="checkbox" data-session-level="prob" />
+                    <span>Info + Prob</span>
+                  </label>
+                  <label class="inline-check">
+                    <input type="checkbox" data-session-level="debug" checked />
+                    <span>Info + Prob + Dbg</span>
+                  </label>
+                </div>
+                <div class="session-filter-group" aria-label="Tweet details">
+                  <span>Tweet</span>
+                  <label class="inline-check">
+                    <input id="session-tweet-content" type="checkbox" />
+                    <span>Text</span>
+                  </label>
+                  <label class="inline-check">
+                    <input id="session-tweet-score" type="checkbox" />
+                    <span>Score</span>
+                  </label>
+                  <label class="inline-check">
+                    <input id="session-tweet-favorites" type="checkbox" />
+                    <span>Favorites</span>
+                  </label>
+                  <label class="inline-check">
+                    <input id="session-tweet-retweets" type="checkbox" />
+                    <span>Retweets</span>
+                  </label>
+                </div>
+                <label class="inline-check">
+                  <input id="session-auto-refresh" type="checkbox" checked />
+                  <span>Auto</span>
+                </label>
+                <label class="inline-check">
+                  <input id="session-stick-bottom" type="checkbox" />
+                  <span>Stick bottom</span>
+                </label>
+                <label class="inline-check">
+                  <input id="session-include-admin-polling" type="checkbox" />
+                  <span>Admin req</span>
+                </label>
+                <button id="session-refresh-button" type="button" class="secondary-button">Refresh</button>
+                <button id="session-fullscreen-button" type="button" class="secondary-button">Full screen</button>
+              </div>
+            </header>
+            <div class="session-summary">
+              <div class="metric">
+                <span>Run</span>
+                <strong id="session-run-status" class="metric-text">No active run</strong>
+              </div>
+              <div class="metric">
+                <span>File</span>
+                <strong id="session-file-path" class="metric-text">-</strong>
+              </div>
+              <div class="metric">
+                <span>Last update</span>
+                <strong id="session-updated-at" class="metric-text">-</strong>
+              </div>
+              <div class="metric">
+                <span>Searched keyword</span>
+                <strong id="session-current-keyword" class="metric-text">-</strong>
+              </div>
+              <div class="metric">
+                <span>Session keywords</span>
+                <strong id="session-keyword-progress" class="metric-text">0 / 0</strong>
+              </div>
+              <div class="metric">
+                <span id="session-api-left-label">API before pause</span>
+                <strong id="session-api-left" class="metric-text">-</strong>
+              </div>
+              <div class="metric">
+                <span>Scored tweets</span>
+                <strong id="session-accepted-tweets" class="metric-text">0</strong>
+              </div>
+              <div class="metric">
+                <span id="session-next-reset-label">Next API window</span>
+                <strong id="session-next-reset" class="metric-text">-</strong>
+              </div>
+            </div>
+            <pre id="session-log" class="session-log">No runtime event.</pre>
+            <section class="session-keywords-panel">
+              <header class="section-header">
+                <div>
+                  <h3>Loaded session keywords</h3>
+                  <p id="session-keywords-summary" class="muted">No keyword plan loaded.</p>
+                </div>
+                <button id="session-keywords-refresh-button" type="button" class="secondary-button">Refresh
+                  keywords</button>
+              </header>
+              <div id="session-keywords-list" class="session-keywords-list"></div>
+            </section>
+
+            <section class="session-counters-panel">
+              <header class="section-header">
+                <div>
+                  <h3>Counters</h3>
+                  <p id="counters-updated-at" class="muted"></p>
+                </div>
+              </header>
+              <div id="metrics" class="metrics metrics-wide"></div>
+            </section>
+          </section>
+        </section>
+
+        <section id="admin-section-tests" class="admin-section">
+          <section class="panel">
+            <header class="section-header">
+              <div>
+                <h2>Tests</h2>
+                <p class="muted">Run targeted checks and inspect Playwright snapshots.</p>
+              </div>
+            </header>
+            <div class="test-card-grid">
+              <article class="test-card">
+                <div>
+                  <h3>Visible X login VPN preflight</h3>
+                  <p>Checks the same VPN namespace and IP leak diagnostics used before Launch visible X login. It does
+                    not open X.</p>
+                </div>
+                <button type="button" class="secondary-button" data-admin-test="visible-x-login-vpn">Run test</button>
+              </article>
+              <article class="test-card">
+                <div>
+                  <h3>Media cache test</h3>
+                  <p>Checks media cache records, TTL cleanup, and timeline media decoration without loading external X
+                    media.</p>
+                </div>
+                <button type="button" class="secondary-button" data-admin-test="media-cache">Run test</button>
+              </article>
+              <article class="test-card">
+                <div>
+                  <h3>Typecheck</h3>
+                  <p>Runs TypeScript checks without emitting files.</p>
+                </div>
+                <button type="button" class="secondary-button" data-admin-test="typecheck">Run test</button>
+              </article>
+              <article class="test-card">
+                <div>
+                  <h3>All unit tests</h3>
+                  <p>Runs the full Vitest suite.</p>
+                </div>
+                <button type="button" class="secondary-button" data-admin-test="unit">Run test</button>
+              </article>
+              <article class="test-card">
+                <div>
+                  <h3>Build</h3>
+                  <p>Compiles the project with the production TypeScript build.</p>
+                </div>
+                <button type="button" class="secondary-button" data-admin-test="build">Run test</button>
+              </article>
+              <article class="test-card">
+                <div>
+                  <h3>Without-API smoke</h3>
+                  <p>Runs one Playwright browser search through the VPN namespace and prints the smoke summary.</p>
+                </div>
+                <button type="button" class="secondary-button" data-admin-test="without-api-smoke">Run test</button>
+              </article>
+            </div>
+            <pre id="admin-test-output" class="session-log test-output">No test run from admin yet.</pre>
+          </section>
+          <section class="panel snapshot-panel">
+            <header class="section-header">
+              <div>
+                <h2>Playwright snapshots</h2>
+                <p class="muted">Full page text captured before and after browser searches.</p>
+              </div>
+              <button id="browser-snapshots-refresh-button" type="button" class="secondary-button">Refresh
+                snapshots</button>
+            </header>
+            <section class="admin-grid">
+              <section>
+                <p id="browser-snapshots-count" class="muted">No snapshots loaded.</p>
+                <div id="browser-snapshots-list" class="list-content snapshot-list"></div>
+              </section>
+              <section>
+                <div id="browser-snapshot-meta" class="snapshot-meta muted">Select a snapshot.</div>
+                <pre id="browser-snapshot-full-text"
+                  class="session-log snapshot-full-text">Full snapshot text will appear here.</pre>
+              </section>
+            </section>
+          </section>
+        </section>
+
+        <section id="admin-section-session-alerts" class="admin-section">
+          <section class="panel session-alerts-panel">
+            <header class="section-header">
+              <div>
+                <h2>Session Alerts</h2>
+                <p class="muted">Manual verification locks for X browser accounts.</p>
+              </div>
+              <button id="session-alerts-refresh-button" type="button" class="secondary-button">Refresh</button>
+            </header>
+            <div id="session-alerts-summary" class="metrics metrics-wide"></div>
+          </section>
+
+          <section class="admin-grid">
+            <section class="panel list-panel">
+              <header class="section-header">
+                <h2>Alerts</h2>
+                <p id="session-alerts-count" class="muted"></p>
+              </header>
+              <div id="session-alerts-list" class="list-content session-alert-list"></div>
+            </section>
+
+            <section class="panel session-alert-detail-panel">
+              <header class="section-header">
+                <h2>Alert details</h2>
+              </header>
+              <div id="session-alert-detail" class="session-alert-detail">
+                <p class="muted">Select an alert.</p>
+              </div>
+              <label>
+                <span>Resolution note</span>
+                <textarea id="session-alert-detail-note" rows="4"
+                  placeholder="Required: explain how the human solved the X verification from the usual IP/VPN profile."></textarea>
+              </label>
+              <div class="button-row">
+                <button id="session-alert-detail-login" type="button" class="secondary-button" disabled>Launch visible X
+                  login</button>
+                <button id="session-alert-detail-resolve" type="button" class="danger-button" disabled>Mark selected
+                  resolved</button>
+              </div>
+              <p id="session-alert-detail-login-status" class="manual-login-status"></p>
+            </section>
+          </section>
+        </section>
+
+        <section id="admin-section-settings" class="admin-section">
+          <form id="server-access-form" class="panel settings-form">
+            <h2>RedqueenX</h2>
+            <p class="muted">Whitelist limits HTTPS access when it is not empty. Blacklist always blocks matching IPv4
+              addresses.</p>
+            <p id="server-access-current-ip" class="muted"></p>
+            <div class="settings-grid server-access-grid">
+              <label>
+                <span>IPv4 whitelist</span>
+                <textarea name="whitelist" rows="5" spellcheck="false" placeholder="127.0.0.1"></textarea>
+              </label>
+              <label>
+                <span>IPv4 blacklist</span>
+                <textarea name="blacklist" rows="5" spellcheck="false" placeholder="203.0.113.10"></textarea>
+              </label>
+            </div>
+            <button type="submit">Save server access</button>
+          </form>
+          <form id="scoring-form" class="panel settings-form">
+            <h2>Scoring</h2>
+            <div class="wide-field scoring-field">
+              <label>
+                <span>Allowed languages</span>
+                <input id="scoring-allowed-languages" name="allowedLanguages" type="text" autocomplete="off" />
+              </label>
+              <label class="inline-check scoring-check-toggle">
+                <input name="enableAllowedLanguages" type="checkbox" />
+                <span>Check enabled</span>
+              </label>
+            </div>
+            <div class="settings-grid">
+              <div class="scoring-field">
+                <label>
+                  <span>Minimum search results</span>
+                  <input name="minimumSearchResults" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMinimumSearchResults" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Rejection luck factor</span>
+                  <input name="luckFactorDenominator" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableLuckFactor" type="checkbox" />
+                  <span>Use luck factor</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Minimum tweet length</span>
+                  <input name="minimumTweetLength" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMinimumTweetLength" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Minimum retweets</span>
+                  <input name="minimumTweetRetweets" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMinimumTweetRetweets" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Maximum retweets</span>
+                  <input name="maximumTweetRetweets" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMaximumTweetRetweets" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Minimum favorites</span>
+                  <input name="minimumTweetFavorites" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMinimumTweetFavorites" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Maximum favorites</span>
+                  <input name="maximumTweetFavorites" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMaximumTweetFavorites" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Minimum followers</span>
+                  <input name="minimumUserFollowers" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMinimumUserFollowers" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Minimum tweet score</span>
+                  <input name="minimumTweetScore" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMinimumTweetScore" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Maximum tweet age days</span>
+                  <input name="maximumTweetAgeDays" type="number" min="0" step="0.25" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMaximumTweetAgeDays" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Maximum hashtags</span>
+                  <input name="maximumHashtags" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMaximumHashtags" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Maximum mentions</span>
+                  <input name="maximumMentions" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMaximumMentions" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+              <div class="scoring-field">
+                <label>
+                  <span>Maximum tweets by user</span>
+                  <input name="maximumTweetsByUser" type="number" min="0" step="1" />
+                </label>
+                <label class="inline-check scoring-check-toggle">
+                  <input name="enableMaximumTweetsByUser" type="checkbox" />
+                  <span>Check enabled</span>
+                </label>
+              </div>
+            </div>
+            <button type="submit">Save constants</button>
+          </form>
+          <form id="search-without-api-form" class="panel settings-form">
+            <h2>Search without Api</h2>
+            <label class="switch-field">
+              <span>Search without Api</span>
+              <input name="SEARCH_WITHOUT_API_ENABLED" type="checkbox" />
+              <span class="switch-control" aria-hidden="true"></span>
+            </label>
+            <fieldset id="search-without-api-controls" class="settings-fieldset" disabled>
+              <fieldset class="settings-subsection">
+                <legend>Browser profile</legend>
+                <div class="settings-grid">
+                  <label>
+                    <span>Browser profile path</span>
+                    <input name="SEARCH_WITHOUT_API_PROFILE_DIR" type="text" placeholder="./runtime/playwright-profile"
+                      autocomplete="off" data-path-picker="directory" data-path-picker-start="./runtime" />
+                  </label>
+                  <label>
+                    <span>Search start URL</span>
+                    <input name="SEARCH_WITHOUT_API_START_URL" type="text" placeholder="https://x.com/search"
+                      autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>Show local browser live</span>
+                    <select name="SEARCH_WITHOUT_API_SHOW_BROWSER_LOCAL">
+                      <option value="false">false</option>
+                      <option value="true">true</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Chromium executable path</span>
+                    <input name="PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH" type="text" placeholder="/usr/bin/chromium"
+                      autocomplete="off" data-path-picker="file" data-path-picker-start="/usr/bin" />
+                  </label>
+                  <label>
+                    <span>Disable Chromium sandbox</span>
+                    <select name="PLAYWRIGHT_DISABLE_SANDBOX">
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset class="settings-subsection">
+                <legend>Human timing</legend>
+                <div class="settings-grid">
+                  <label>
+                    <span>Typing delay min ms</span>
+                    <input name="SEARCH_WITHOUT_API_KEY_DELAY_MIN_MS" type="number" min="0" step="100"
+                      placeholder="500" />
+                  </label>
+                  <label>
+                    <span>Typing delay max ms</span>
+                    <input name="SEARCH_WITHOUT_API_KEY_DELAY_MAX_MS" type="number" min="0" step="100"
+                      placeholder="5000" />
+                  </label>
+                  <label>
+                    <span>Search delay min seconds</span>
+                    <input name="SEARCH_WITHOUT_API_SEARCH_DELAY_MIN_SECONDS" type="number" min="0" step="1"
+                      placeholder="5" />
+                  </label>
+                  <label>
+                    <span>Search delay max seconds</span>
+                    <input name="SEARCH_WITHOUT_API_SEARCH_DELAY_MAX_SECONDS" type="number" min="0" step="1"
+                      placeholder="120" />
+                  </label>
+                  <label>
+                    <span>Tweet hover min seconds</span>
+                    <input name="SEARCH_WITHOUT_API_TWEET_HOVER_MIN_SECONDS" type="number" min="0" step="1"
+                      placeholder="1" />
+                  </label>
+                  <label>
+                    <span>Tweet hover max seconds</span>
+                    <input name="SEARCH_WITHOUT_API_TWEET_HOVER_MAX_SECONDS" type="number" min="0" step="1"
+                      placeholder="15" />
+                  </label>
+                  <label>
+                    <span>Mouse movement profile</span>
+                    <select name="SEARCH_WITHOUT_API_MOUSE_PROFILE">
+                      <option value="smooth1">smooth1</option>
+                      <option value="smooth2">smooth2</option>
+                      <option value="smooth3">smooth3</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Save snapshots on normal runs</span>
+                    <select name="SEARCH_WITHOUT_API_SAVE_SNAPSHOTS">
+                      <option value="false">false</option>
+                      <option value="true">true</option>
+                    </select>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset class="settings-subsection">
+                <legend>Search pacing</legend>
+                <div class="settings-grid">
+                  <label>
+                    <span>Keywords per session</span>
+                    <input name="SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT" type="number" min="0" step="1"
+                      placeholder="50" />
+                  </label>
+                  <label>
+                    <span>Random keyword count</span>
+                    <select name="SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM">
+                      <option value="false">false</option>
+                      <option value="true">true</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Randomize keyword order</span>
+                    <select name="SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER">
+                      <option value="false">false</option>
+                      <option value="true">true</option>
+                    </select>
+                  </label>
+                  <div class="setting-note wide">
+                    Searches before pause is automatic: half of the loaded session keywords, rounded up.
+                  </div>
+                  <label>
+                    <span>Pause min minutes</span>
+                    <input name="SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES" type="number" min="0" step="1"
+                      placeholder="15" />
+                  </label>
+                  <label>
+                    <span>Pause max minutes</span>
+                    <input name="SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES" type="number" min="0" step="1"
+                      placeholder="120" />
+                  </label>
+                  <label>
+                    <span>Legacy max scrolls</span>
+                    <input name="SEARCH_WITHOUT_API_MAX_SCROLLS" type="number" min="1" step="1" placeholder="20" />
+                  </label>
+                  <label>
+                    <span>Legacy scroll delay ms</span>
+                    <input name="SEARCH_WITHOUT_API_SCROLL_DELAY_MS" type="number" min="0" step="100"
+                      placeholder="1200" />
+                  </label>
+                  <label>
+                    <span>Scroll pause min ms</span>
+                    <input name="SEARCH_WITHOUT_API_SCROLL_DELAY_MIN_MS" type="number" min="0" step="100"
+                      placeholder="5000" />
+                  </label>
+                  <label>
+                    <span>Scroll pause max ms</span>
+                    <input name="SEARCH_WITHOUT_API_SCROLL_DELAY_MAX_MS" type="number" min="0" step="100"
+                      placeholder="12000" />
+                  </label>
+                  <label>
+                    <span>Result scrolls min</span>
+                    <input name="SEARCH_WITHOUT_API_SCROLLS_MIN" type="number" min="0" step="1" placeholder="0" />
+                  </label>
+                  <label>
+                    <span>Result scrolls max</span>
+                    <input name="SEARCH_WITHOUT_API_SCROLLS_MAX" type="number" min="0" step="1" placeholder="23" />
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset class="settings-subsection">
+                <legend>X media cache</legend>
+                <p class="muted">Downloaded media is fetched only by the VPN namespace worker. The timeline receives
+                  local /media-cache URLs only, never the original X media URLs.</p>
+                <div class="settings-grid">
+                  <label>
+                    <span>Download X media through VPN</span>
+                    <select name="SEARCH_WITHOUT_API_MEDIA_CACHE_ENABLED">
+                      <option value="false">false</option>
+                      <option value="true">true</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Media cache directory</span>
+                    <input name="SEARCH_WITHOUT_API_MEDIA_CACHE_DIR" type="text" placeholder="./runtime/media-cache"
+                      autocomplete="off" data-path-picker="directory" data-path-picker-start="./runtime" />
+                  </label>
+                  <label>
+                    <span>Keep cached media hours</span>
+                    <input name="SEARCH_WITHOUT_API_MEDIA_CACHE_TTL_HOURS" type="number" min="0" step="1"
+                      placeholder="24" />
+                  </label>
+                  <label>
+                    <span>Cache size MB</span>
+                    <input name="SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_MB" type="number" min="1" step="1"
+                      placeholder="256" />
+                  </label>
+                  <label>
+                    <span>Max file MB</span>
+                    <input name="SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB" type="number" min="1" step="1"
+                      placeholder="15" />
+                  </label>
+                  <label>
+                    <span>Download delay min ms</span>
+                    <input name="SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS" type="number" min="0" step="100"
+                      placeholder="800" />
+                  </label>
+                  <label>
+                    <span>Download delay max ms</span>
+                    <input name="SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS" type="number" min="0" step="100"
+                      placeholder="3000" />
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset class="settings-subsection">
+                <legend>Linux namespace / OpenVPN</legend>
+                <div class="settings-grid">
+                  <label>
+                    <span>Namespace name</span>
+                    <input name="VPN_NETNS_NAME" type="text" placeholder="redqueenx-vpn" autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>Host interface</span>
+                    <input name="VPN_HOST_IFACE" type="text" placeholder="auto" autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>Namespace CIDR</span>
+                    <input name="VPN_NETNS_CIDR" type="text" placeholder="10.200.0.0/24" autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>Host veth IP</span>
+                    <input name="VPN_NETNS_HOST_IP" type="text" placeholder="10.200.0.1" autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>Namespace veth IP</span>
+                    <input name="VPN_NETNS_GUEST_IP" type="text" placeholder="10.200.0.2" autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>OpenVPN profile</span>
+                    <select id="openvpn-profile-select">
+                      <option value="">No profile selected</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>OpenVPN config path</span>
+                    <input name="VPN_CONFIG" type="text" placeholder="./ops/vpn/client.ovpn" autocomplete="off"
+                      data-path-picker="file" data-path-picker-start="./ops/vpn" data-path-copy-to="./ops/vpn"
+                      data-path-picker-extensions=".ovpn" />
+                  </label>
+                  <label>
+                    <span>OpenVPN remote host</span>
+                    <input name="VPN_REMOTE_HOST" type="text" placeholder="vpn.example.com" autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>OpenVPN remote port</span>
+                    <input name="VPN_REMOTE_PORT" type="number" min="1" max="65535" step="1" placeholder="1194" />
+                  </label>
+                  <label>
+                    <span>OpenVPN protocol</span>
+                    <select name="VPN_REMOTE_PROTO">
+                      <option value="udp">udp</option>
+                      <option value="tcp">tcp</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="openvpn-profile-detail" class="openvpn-profile-detail muted"></p>
+                <div class="sudo-bridge-panel">
+                  <div>
+                    <strong>Root helper</strong>
+                    <p id="openvpn-sudo-detail" class="muted">Check whether admin Start/Resume can prepare the VPN
+                      namespace without a sudo password prompt.</p>
+                  </div>
+                  <button id="openvpn-sudo-status-button" type="button" class="secondary-button">Check helper</button>
+                </div>
+                <div class="button-row compact-row">
+                  <button id="openvpn-settings-save-button" type="button" class="secondary-button">Apply OpenVPN
+                    settings</button>
+                  <button id="openvpn-auth-button" type="button" class="secondary-button">Create / update auth
+                    file</button>
+                  <button id="openvpn-shutdown-button" type="button" class="secondary-button danger-button">Shutdown
+                    VPN</button>
+                </div>
+              </fieldset>
+
+              <fieldset class="settings-subsection">
+                <legend>X browser account</legend>
+                <p class="muted">One X browser session can be linked to one or many OpenVPN profiles. Login is done
+                  manually on this computer through the VPN namespace, then RedqueenX reuses the saved browser session.
+                </p>
+                <div class="settings-grid">
+                  <label>
+                    <span>Linked account</span>
+                    <select id="x-browser-account-select">
+                      <option value="">No account linked</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>X account identifier</span>
+                    <input id="x-browser-identifier" type="text" placeholder="@new_redqueenx_account"
+                      autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>Storage state path</span>
+                    <input id="x-browser-storage-state" type="text" readonly placeholder="Save an account first" />
+                  </label>
+                  <label class="toggle-line">
+                    <input id="x-browser-link-all-profiles" type="checkbox" />
+                    <span>Link all imported OpenVPN profiles to this X account</span>
+                  </label>
+                </div>
+                <p id="x-browser-session-validation" class="x-session-validation">No browser session saved yet.</p>
+                <p id="x-browser-account-detail" class="openvpn-profile-detail muted"></p>
+                <p class="muted">Local login command: <code id="x-browser-login-command">Save an account first.</code>
+                </p>
+                <div class="button-row compact-row">
+                  <button id="x-browser-account-save" type="button" class="secondary-button">Save X account
+                    link</button>
+                  <button id="x-browser-account-delete" type="button" class="secondary-button" disabled>Delete
+                    link</button>
+                </div>
+              </fieldset>
+
+              <fieldset class="settings-subsection">
+                <legend>VPN diagnostics</legend>
+                <div class="settings-grid">
+                  <label>
+                    <span>Host IPv4 leak check</span>
+                    <select name="VPN_CHECK_HOST_IPV4_LEAK">
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>IPv6 leak check</span>
+                    <select name="VPN_CHECK_IPV6">
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Strict diagnostics</span>
+                    <select name="VPN_DIAGNOSTIC_STRICT">
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Run Playwright diagnostics</span>
+                    <select name="VPN_DIAGNOSTIC_PLAYWRIGHT">
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Skip X login network precheck</span>
+                    <select name="X_LOGIN_SKIP_NETWORK_PRECHECK">
+                      <option value="false">false</option>
+                      <option value="true">true</option>
+                    </select>
+                  </label>
+                </div>
+              </fieldset>
+              <button type="submit">Save Search without Api settings</button>
+            </fieldset>
+          </form>
+          <form id="x-api-form" class="panel settings-form">
+            <h2>X API settings</h2>
+            <label class="switch-field">
+              <span>X API search</span>
+              <input name="X_API_ENABLED" type="checkbox" />
+              <span class="switch-control" aria-hidden="true"></span>
+            </label>
+            <fieldset id="x-api-controls" class="settings-fieldset">
+              <div class="settings-grid">
+                <label>
+                  <span>Remaining API credit USD</span>
+                  <input name="X_API_CREDIT_USD" type="number" min="0" step="0.01" />
+                </label>
+                <label>
+                  <span>Total credit used USD</span>
+                  <input name="X_API_TOTAL_CREDIT_USED_USD" type="number" min="0" step="0.01" />
+                </label>
+                <label>
+                  <span>Daily budget USD</span>
+                  <input name="X_DAILY_SPEND_LIMIT_USD" type="number" min="0" step="0.01" />
+                </label>
+                <label>
+                  <span>Budget per run USD</span>
+                  <input name="X_RUN_SPEND_LIMIT_USD" type="number" min="0" step="0.01" />
+                </label>
+                <label>
+                  <span>Max searches/day</span>
+                  <input name="X_MAX_SEARCHES_PER_DAY" type="number" min="0" step="1" />
+                </label>
+                <label>
+                  <span>Max posts read/day</span>
+                  <input name="X_MAX_POSTS_READ_PER_DAY" type="number" min="0" step="1" />
+                </label>
+                <label>
+                  <span>Max count-first/day</span>
+                  <input name="X_MAX_COUNT_CALLS_PER_DAY" type="number" min="0" step="1" />
+                </label>
+                <label>
+                  <span>Keywords per query</span>
+                  <input name="X_KEYWORDS_PER_QUERY" type="number" min="1" max="16" step="1" />
+                </label>
+                <label>
+                  <span>Count-first</span>
+                  <select name="X_COUNT_FIRST_MODE">
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Calls per window</span>
+                  <input name="X_SEARCH_API_CALL_LIMIT" type="number" min="1" step="1" />
+                </label>
+                <label>
+                  <span>Minutes per window</span>
+                  <input name="X_SEARCH_API_WINDOW_MINUTES" type="number" min="1" step="1" />
+                </label>
+                <label>
+                  <span>Cost per post read USD</span>
+                  <input name="X_COST_POST_READ_USD" type="number" min="0" step="0.001" />
+                </label>
+                <label>
+                  <span>Cost per user read USD</span>
+                  <input name="X_COST_USER_READ_USD" type="number" min="0" step="0.001" />
+                </label>
+                <label>
+                  <span>Cost per media read USD</span>
+                  <input name="X_COST_MEDIA_READ_USD" type="number" min="0" step="0.001" />
+                </label>
+                <label>
+                  <span>Cost per manual action USD</span>
+                  <input name="X_COST_USER_INTERACTION_USD" type="number" min="0" step="0.001" />
+                </label>
+                <label>
+                  <span>Cost per count-first USD</span>
+                  <input name="X_COST_COUNT_CALL_USD" type="number" min="0" step="0.001" />
+                </label>
+              </div>
+              <div class="button-row">
+                <button type="submit">Save X settings</button>
+                <button id="reset-x-counters-button" type="button" class="secondary-button">Reset local X
+                  counters</button>
+                <button id="reset-x-budget-button" type="button" class="secondary-button">Reset today's local X
+                  budget</button>
+              </div>
+            </fieldset>
+          </form>
+        </section>
+
+        <section id="admin-section-env" class="admin-section">
+          <form id="env-form" class="panel settings-form">
+            <h2>.env variables</h2>
+            <p class="muted">Changes are saved to .env, then the server restarts automatically.</p>
+            <fieldset class="env-section">
+              <legend>Serveur env</legend>
+              <div class="settings-grid">
+                <label>
+                  <span>ADMIN_HOST</span>
+                  <input name="ADMIN_HOST" type="text" autocomplete="off" />
+                </label>
+                <label>
+                  <span>ADMIN_PORT</span>
+                  <input name="ADMIN_PORT" type="number" min="1" max="65535" step="1" />
+                </label>
+                <label>
+                  <span>DATABASE_URL</span>
+                  <input name="DATABASE_URL" type="text" autocomplete="off" data-path-picker="file"
+                    data-path-picker-start="." />
+                </label>
+                <label>
+                  <span>CURRENT_SESSION_FILE</span>
+                  <input name="CURRENT_SESSION_FILE" type="text" autocomplete="off" data-path-picker="file"
+                    data-path-picker-start="./runtime" />
+                </label>
+                <label>
+                  <span>RSS_FALLBACK_FEED_LIMIT</span>
+                  <input name="RSS_FALLBACK_FEED_LIMIT" type="number" min="1" step="1" />
+                </label>
+                <label>
+                  <span>ADMIN_PASSWORD</span>
+                  <input name="ADMIN_PASSWORD" type="password" autocomplete="new-password" />
+                </label>
+                <label>
+                  <span>SESSION_SECRET</span>
+                  <input name="SESSION_SECRET" type="password" autocomplete="new-password" />
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset class="env-section">
+              <legend>X Api env</legend>
+              <div class="settings-grid">
+                <label>
+                  <span>ENABLE_X_WRITE</span>
+                  <select name="ENABLE_X_WRITE">
+                    <option value="false">false</option>
+                    <option value="true">true</option>
+                  </select>
+                </label>
+                <label>
+                  <span>X_BEARER_TOKEN</span>
+                  <input name="X_BEARER_TOKEN" type="password" autocomplete="off" />
+                </label>
+                <label>
+                  <span>X_API_KEY</span>
+                  <input name="X_API_KEY" type="password" autocomplete="off" />
+                </label>
+                <label>
+                  <span>X_API_SECRET</span>
+                  <input name="X_API_SECRET" type="password" autocomplete="off" />
+                </label>
+                <label>
+                  <span>X_ACCESS_TOKEN</span>
+                  <input name="X_ACCESS_TOKEN" type="password" autocomplete="off" />
+                </label>
+                <label>
+                  <span>X_ACCESS_SECRET</span>
+                  <input name="X_ACCESS_SECRET" type="password" autocomplete="off" />
+                </label>
+                <label>
+                  <span>X_CLIENT_ID</span>
+                  <input name="X_CLIENT_ID" type="password" autocomplete="off" />
+                </label>
+                <label>
+                  <span>X_CLIENT_SECRET</span>
+                  <input name="X_CLIENT_SECRET" type="password" autocomplete="off" />
+                </label>
+              </div>
+            </fieldset>
+            <button type="submit">Save .env</button>
+          </form>
+        </section>
+
+        <section id="admin-section-database" class="admin-section">
+          <section class="panel">
+            <header class="section-header">
+              <h2>SQLite database</h2>
+              <div class="button-row">
+                <button id="database-refresh-button" type="button" class="secondary-button">Refresh</button>
+                <button id="database-integrity-button" type="button" class="secondary-button">Integrity check</button>
+                <button id="database-analyze-button" type="button" class="secondary-button">Analyze</button>
+                <button id="database-vacuum-button" type="button" class="secondary-button">Vacuum</button>
+              </div>
+            </header>
+            <div id="database-summary" class="metrics metrics-wide"></div>
+          </section>
+
+          <section class="database-grid">
+            <section class="panel list-panel">
+              <header class="section-header">
+                <h2>Tables</h2>
+                <p id="database-table-count" class="muted"></p>
+              </header>
+              <div id="database-tables" class="list-content database-table-list"></div>
+            </section>
+
+            <section class="panel database-detail-panel">
+              <header class="section-header">
+                <h2 id="database-table-title">Table details</h2>
+                <div class="button-row">
+                  <button id="database-download-json-button" type="button" class="secondary-button" disabled>Download
+                    JSON</button>
+                  <button id="database-download-csv-button" type="button" class="secondary-button" disabled>Download
+                    CSV</button>
+                  <button id="database-clear-table-button" type="button" class="secondary-button danger-button"
+                    disabled>Empty table</button>
+                </div>
+              </header>
+              <div id="database-table-summary" class="metrics"></div>
+              <div class="database-subsection">
+                <h2>Schema</h2>
+                <pre id="database-schema" class="database-code">Select a table.</pre>
+              </div>
+              <div class="database-subsection">
+                <h2>Columns</h2>
+                <div id="database-columns" class="database-scroll"></div>
+              </div>
+              <div class="database-subsection">
+                <h2>Indexes</h2>
+                <div id="database-indexes" class="database-scroll"></div>
+              </div>
+              <div class="database-subsection">
+                <h2>Foreign keys</h2>
+                <div id="database-foreign-keys" class="database-scroll"></div>
+              </div>
+              <div class="database-subsection">
+                <h2>Preview</h2>
+                <div id="database-preview" class="database-scroll"></div>
+              </div>
+            </section>
+          </section>
+        </section>
+      </div>
+    </div>
+
+    <p id="status-line" class="status-line"></p>
+    <div id="path-picker-modal" class="path-picker-modal" aria-hidden="true">
+      <div class="path-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="path-picker-title">
+        <header class="section-header">
+          <div>
+            <h2 id="path-picker-title">Choose path</h2>
+            <p id="path-picker-current" class="muted"></p>
+          </div>
+          <button id="path-picker-close" type="button" class="secondary-button">Close</button>
+        </header>
+        <div id="path-picker-roots" class="button-row compact-row"></div>
+        <div class="button-row compact-row">
+          <button id="path-picker-parent" type="button" class="secondary-button">Parent folder</button>
+          <button id="path-picker-use-current" type="button" class="secondary-button">Use current folder</button>
+        </div>
+        <div id="path-picker-entries" class="path-picker-entries"></div>
+      </div>
+    </div>
+    <div id="openvpn-auth-modal" class="path-picker-modal" aria-hidden="true">
+      <div class="path-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="openvpn-auth-title">
+        <header class="section-header">
+          <div>
+            <h2 id="openvpn-auth-title">OpenVPN auth file</h2>
+            <p id="openvpn-auth-profile" class="muted"></p>
+          </div>
+          <button id="openvpn-auth-close" type="button" class="secondary-button">Close</button>
+        </header>
+        <form id="openvpn-auth-form" class="settings-form">
+          <div class="settings-grid auth-grid">
+            <label>
+              <span>OpenVPN username</span>
+              <input name="username" type="text" autocomplete="username" />
+            </label>
+            <label>
+              <span>OpenVPN password</span>
+              <input name="password" type="password" autocomplete="current-password" />
+            </label>
+          </div>
+          <div class="button-row compact-row">
+            <button type="submit">Save auth file</button>
+            <button id="openvpn-auth-cancel" type="button" class="secondary-button">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </main>
+  <script src="/assets/admin.js" defer></script>
+</body>
+
+</html>
