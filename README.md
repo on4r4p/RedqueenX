@@ -7,30 +7,6 @@ The project supports two operating modes:
 - **X API mode**: uses official X API credentials and budget limits.
 - **Search without API mode**: uses Playwright through a Linux network namespace and OpenVPN so only the browser worker uses the VPN network.
 
-## Security Before Publishing
-
-Never commit local secrets or runtime data.
-
-The following files and folders must stay local:
-
-- `.env`
-- `redqueenx.sqlite*` or any other `*.sqlite*` / `*.db*`
-- `runtime/`
-- `runtime/x-auth/`
-- `playwright/.auth/`
-- `ops/vpn/*.ovpn`
-- `ops/vpn/*.auth`
-- `ops/vpn/auth.txt`
-- `oldpython/`
-
-Run this before publishing or opening a pull request:
-
-```bash
-npm run security:check
-```
-
-The check fails if Git is about to publish local environment files, SQLite databases, VPN credentials, Playwright/X session cookies, or legacy private material.
-
 ## Local Installation
 
 ```bash
@@ -171,7 +147,7 @@ The admin UI can create or update the auth file for the selected profile.
 
 ## X Browser Sessions
 
-For Search without API mode, each X browser account is linked to one or more VPN profiles. The saved browser state lives in `runtime/x-auth/` and is ignored by Git.
+For Search without API mode, each X browser account is linked to one or more VPN profiles. The saved browser state lives in `runtime/x-auth/`.
 
 To create or refresh a session manually:
 
@@ -202,7 +178,7 @@ The worker refuses to run if diagnostics detect a host IP leak or cannot verify 
 
 ## SQLite
 
-The database is generated automatically by the app. Do not publish a local database.
+The database is generated automatically by the app.
 
 For a fresh user:
 
@@ -233,7 +209,3 @@ runtime/netns-openvpn-autostart.log
 ```
 
 If a run is blocked by an X session alert, resolve the account manually from the usual VPN/IP profile first, then mark the alert as resolved in admin.
-
-## AWS Notes
-
-AWS deployment should keep the admin HTTPS endpoint reachable on the server's normal network while only the Playwright without-API worker uses the VPN namespace. Reverse proxy, HTTPS, domain name, webhook deployment, and tighter access control are deployment concerns and should be configured separately from local development.
