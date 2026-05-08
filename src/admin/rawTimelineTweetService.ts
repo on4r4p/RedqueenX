@@ -31,6 +31,14 @@ export interface RawTimelineDecisionUpdate {
   reasons: string[];
 }
 
+export interface RawTimelineTweetPage {
+  items: RawTimelineTweetItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 type RawTimelineTweetRow = {
   run_id: string;
   tweet_id: string;
@@ -159,17 +167,38 @@ export class RawTimelineTweetService {
     return save(decisions);
   }
 
-  latest(limit = 80): RawTimelineTweetItem[] {
+  latest(limit = 80, offset = 0): RawTimelineTweetItem[] {
     const safeLimit = Math.max(1, Math.min(limit, 300));
+    const safeOffset = Math.max(0, Math.floor(offset));
     const rows = this.database
       .prepare(`
         SELECT *
         FROM raw_timeline_tweets
         ORDER BY captured_at DESC, run_id DESC, tweet_id DESC
         LIMIT ?
+        OFFSET ?
       `)
-      .all(safeLimit) as RawTimelineTweetRow[];
+      .all(safeLimit, safeOffset) as RawTimelineTweetRow[];
     return rows.map(mapRawTweetRow);
+  }
+
+  page(options: { limit?: number; offset?: number } = {}): RawTimelineTweetPage {
+    const limit = Math.max(1, Math.min(options.limit ?? 80, 300));
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const total = this.count();
+    const items = this.latest(limit, offset);
+    return {
+      items,
+      total,
+      limit,
+      offset,
+      hasMore: offset + items.length < total
+    };
+  }
+
+  count(): number {
+    const row = this.database.prepare("SELECT COUNT(*) AS total FROM raw_timeline_tweets").get() as { total: number };
+    return row.total;
   }
 }
 

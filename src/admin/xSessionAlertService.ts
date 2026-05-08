@@ -214,8 +214,9 @@ export function defaultManualVerificationRecommendation(accountId: number): stri
     "No more scraping or login will run for this X account until this alert is resolved.",
     "Log in manually from the usual IP/VPN profile used by this X account.",
     "Let the human solve CAPTCHA/2FA/challenge manually.",
-    "Return here, mark the alert as resolved with a note, then save a fresh session.",
-    `Recommended local commands: npm run setup:local; npm run netns:x-login -- --account-id ${accountId} --resolve-alert; npm run netns:diagnose; npm run netns:worker.`
+    "The visible login flow saves a fresh browser session automatically as soon as login is detected.",
+    "Return here after the session is saved, then mark the alert as resolved with a note.",
+    `Recommended local commands: npm run setup:local; npm run netns:x-login -- --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save; npm run netns:diagnose; npm run netns:worker.`
   ].join(" ");
 }
 

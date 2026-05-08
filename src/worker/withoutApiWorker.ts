@@ -156,10 +156,10 @@ async function main() {
       throw new Error(`X browser session for ${account.xIdentifier} is not ready. Run npm run netns:x-login -- --account-id ${account.id}.`);
     }
 
-    const keywordPlan = args.smoke ? await planSmokeKeywords(args.keyword) : planBrowserKeywords(lists, config);
     if (args.smoke && runs.current()) {
       throw new Error("Smoke test refuses to start while another run is active. Stop the current run first.");
     }
+    const keywordPlan = args.smoke ? await planSmokeKeywords(args.keyword) : planBrowserKeywords(lists, config);
     run = args.runId ? runs.get(args.runId) : runs.current();
     if (!run) {
       run = runs.start(createBrowserRunStats(keywordPlan.keywords.length, config, keywordPlan.availableKeywords));
@@ -168,23 +168,40 @@ async function main() {
       run = runs.resume(run.id);
     }
 
-    const keywords = keywordPlan.keywords;
-    runs.replaceKeywords(run.id, keywords);
-    runs.updateStats(run.id, createBrowserRunStats(keywords.length, config, keywordPlan.availableKeywords));
+    const existingStats = parseRunStats(run.statsJson);
+    const existingKeywords = args.smoke ? [] : runs.keywords(run.id, 5_000).map((item) => item.keyword);
+    const canResumeExistingPlan =
+      existingKeywords.length > 0 &&
+      existingStats.completedKeywords < existingKeywords.length &&
+      existingStats.remainingKeywords > 0;
+    const keywords = canResumeExistingPlan ? existingKeywords : keywordPlan.keywords;
+    if (!canResumeExistingPlan) {
+      runs.replaceKeywords(run.id, keywords);
+      runs.updateStats(run.id, createBrowserRunStats(keywords.length, config, keywordPlan.availableKeywords));
+    } else {
+      runs.updateStats(run.id, { currentKeyword: null, nextApiResetAt: null });
+    }
     await record(
       "info",
-      args.smoke ? "browser.search.smoke.plan" : "browser.search.plan",
-      args.smoke ? "Without-API smoke test plan prepared" : "Without-API browser search plan prepared",
+      args.smoke ? "browser.search.smoke.plan" : canResumeExistingPlan ? "browser.search.plan.resumed" : "browser.search.plan",
+      args.smoke
+        ? "Without-API smoke test plan prepared"
+        : canResumeExistingPlan
+          ? "Without-API browser search resumed from existing keyword plan"
+          : "Without-API browser search plan prepared",
       {
       runId: run.id,
       accountId: account.id,
       xIdentifier: account.xIdentifier,
       vpnProfilePath: config.vpnConfig,
       totalKeywords: keywords.length,
-      availableKeywords: keywordPlan.availableKeywords,
-      sessionKeywordLimit: keywordPlan.configuredLimit,
-      randomSessionKeywordLimit: keywordPlan.randomized,
-      randomizeKeywordOrder: keywordPlan.orderRandomized,
+      completedKeywords: canResumeExistingPlan ? existingStats.completedKeywords : 0,
+      remainingKeywords: canResumeExistingPlan ? existingStats.remainingKeywords : keywords.length,
+      resumedExistingPlan: canResumeExistingPlan,
+      availableKeywords: canResumeExistingPlan ? existingStats.availableKeywords : keywordPlan.availableKeywords,
+      sessionKeywordLimit: canResumeExistingPlan ? existingStats.sessionKeywordLimit : keywordPlan.configuredLimit,
+      randomSessionKeywordLimit: canResumeExistingPlan ? existingStats.sessionKeywordLimitRandom : keywordPlan.randomized,
+      randomizeKeywordOrder: canResumeExistingPlan ? existingStats.randomizeKeywordOrder : keywordPlan.orderRandomized,
         oneKeywordPerSearch: true,
         smokeTest: Boolean(args.smoke),
         smokeKeywordPool: args.smoke ? SMOKE_KEYWORDS : undefined
@@ -238,7 +255,7 @@ async function main() {
       });
       accounts.markStatus(account.id, "needs_login");
       if (run) {
-        safeStopRun(runs, run.id);
+        safePauseRun(runs, run.id);
       }
       await record("prob", "x.manual_verification.required", "X manual verification required; browser worker stopped", {
         alertId: alert.id,
@@ -253,7 +270,7 @@ async function main() {
         details: summarizeAlertDetails(error.details),
         commands: [
           "npm run setup:local",
-          `npm run netns:x-login -- --account-id ${account.id} --resolve-alert`,
+          `npm run netns:x-login -- --account-id ${account.id} --resolve-alert --auto-save-on-login --hold-open-after-save`,
           "npm run netns:diagnose",
           "npm run netns:worker"
         ]
@@ -581,6 +598,16 @@ async function runBrowserSearchLoop(input: {
       await interruptibleDelay(input.runs, input.runId, pauseMinutes * 60_000);
       searchesInWindow = 0;
       searchesBeforePause = searchesBeforePauseForKeywords(input.keywords.length - completedKeywords);
+      input.runs.updateStats(input.runId, {
+        nextApiResetAt: null,
+        apiCallsUsed: searchesInWindow,
+        apiCallLimit: searchesBeforePause,
+        apiCallsRemaining: searchesBeforePause
+      });
+      await input.record("info", "browser.search.pause_window.completed", "Without-API search pacing pause completed; run continues", {
+        runId: input.runId,
+        searchesBeforePause
+      });
     } else if (completedKeywords < input.keywords.length) {
       const baseDelay = randomDelayMs(
         input.config.searchWithoutApiSearchDelayMinSeconds * 1000,
@@ -1090,7 +1117,7 @@ function safePathSegment(value: string): string {
 async function assertNoManualVerification(page: Page, publicIpv4: string | null): Promise<void> {
   const detected = await detectManualVerification(page);
   if (detected) {
-    const details = await captureManualVerificationDetails(page, detected.type, detected.reason, detected.signals);
+    const details = await captureManualVerificationDetails(page, detected.type, detected.reason, detected.signals, detected.pageState);
     throw new ManualVerificationRequiredError(detected.type, detected.reason, publicIpv4, details);
   }
 }
@@ -1099,7 +1126,8 @@ async function captureManualVerificationDetails(
   page: Page,
   alertType: XSessionAlertType,
   reason: string,
-  detectionSignals: string[]
+  detectionSignals: string[],
+  detectionPageState: { articleCount: number; tweetTextCount: number; nonTweetVisibleText: string }
 ): Promise<Record<string, unknown>> {
   const capturedAt = new Date().toISOString();
   const url = page.url();
@@ -1121,6 +1149,10 @@ async function captureManualVerificationDetails(
     title,
     reason,
     detectionSignals,
+    detectionTextSource: "page text excluding tweet articles",
+    articleCount: detectionPageState.articleCount,
+    tweetTextCount: detectionPageState.tweetTextCount,
+    nonTweetVisibleText: truncateText(detectionPageState.nonTweetVisibleText, 4_000),
     visibleText: truncateText(bodyText, 4_000),
     htmlSnippet: truncateText(html, 4_000),
     snapshotPath,
@@ -1167,6 +1199,9 @@ function summarizeAlertDetails(details: Record<string, unknown>): Record<string,
     title: details.title,
     reason: details.reason,
     detectionSignals: details.detectionSignals,
+    detectionTextSource: details.detectionTextSource,
+    articleCount: details.articleCount,
+    tweetTextCount: details.tweetTextCount,
     bodyTextLength: details.bodyTextLength,
     htmlLength: details.htmlLength,
     snapshotPath: details.snapshotPath
@@ -1450,6 +1485,17 @@ function safeStopRun(runs: RunService, runId: string): void {
     const run = runs.get(runId);
     if (run && (run.status === "running" || run.status === "paused")) {
       runs.stop(runId);
+    }
+  } catch {
+    // The worker is already shutting down.
+  }
+}
+
+function safePauseRun(runs: RunService, runId: string): void {
+  try {
+    const run = runs.get(runId);
+    if (run?.status === "running") {
+      runs.pause(runId);
     }
   } catch {
     // The worker is already shutting down.

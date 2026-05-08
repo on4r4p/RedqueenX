@@ -25,7 +25,25 @@
         </div>
       </header>
       <p id="timeline-status" class="timeline-status"></p>
+      <nav id="timeline-pagination" class="timeline-pagination is-hidden" aria-label="Timeline pagination" data-timeline-pagination>
+        <button type="button" class="tweet-action-button" data-page-action="prev">Previous</button>
+        <span data-pagination-label></span>
+        <button type="button" class="tweet-action-button" data-page-action="next">Next</button>
+        <label class="timeline-page-size">
+          Per page
+          <input data-page-size type="number" min="1" max="200" step="1" value="50" aria-label="Timeline items per page" />
+        </label>
+      </nav>
       <section id="timeline" class="timeline"></section>
+      <nav id="timeline-pagination-bottom" class="timeline-pagination timeline-pagination-bottom is-hidden" aria-label="Timeline pagination bottom" data-timeline-pagination>
+        <button type="button" class="tweet-action-button" data-page-action="prev">Previous</button>
+        <span data-pagination-label></span>
+        <button type="button" class="tweet-action-button" data-page-action="next">Next</button>
+        <label class="timeline-page-size">
+          Per page
+          <input data-page-size type="number" min="1" max="200" step="1" value="50" aria-label="Timeline items per page" />
+        </label>
+      </nav>
     </main>
     <script src="/assets/timeline.js" defer></script>
   </body>

@@ -155,6 +155,8 @@ let latestListCounts = {};
 let browserSnapshotRuns = [];
 let selectedBrowserSnapshot = null;
 let sessionShouldStickBottom = true;
+let sessionNextResetAt = null;
+let sessionNextResetTimer = null;
 let statusLineTimer = null;
 const buttonFeedbackTimers = new WeakMap();
 const manualLoginPollTimers = new Map();
@@ -1786,6 +1788,14 @@ function activeAdminSection() {
   return active?.id.replace("admin-section-", "") || "lists";
 }
 
+async function openCurrentSessionSection() {
+  showAdminSection("session");
+  updateSessionPolling();
+  await refreshStats();
+  await refreshCurrentSession();
+  await refreshSessionKeywords();
+}
+
 function renderRunStatus(run) {
   if (!runStatusLine) return;
   if (!run) {
@@ -1853,12 +1863,12 @@ function formatXSessionAlertCommands(alert) {
   return [
     "Terminal fallback:",
     "  npm run setup:local",
-    `  npm run netns:x-login -- --account-id ${alert.accountId} --resolve-alert`,
+    `  npm run netns:x-login -- --account-id ${alert.accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`,
     "  npm run netns:diagnose",
     "  npm run netns:worker",
     "",
     "Admin button:",
-    "  Launch visible X login opens Chrome through the VPN namespace and auto-saves when login is detected."
+    "  Launch visible X login opens Chrome through the VPN namespace and captures/saves the browser session as soon as login is detected."
   ].join("\n");
 }
 
@@ -1889,12 +1899,56 @@ async function resolveXSessionAlert(alertId, note, feedbackTarget, noteElement) 
   });
   if (!result) return;
   showButtonFeedback(feedbackTarget, "Resolved.");
-  setStatus("X session alert resolved. Save a fresh X browser session before scraping again.");
+  setStatus("X session alert resolved. The fresh X browser session was captured by the visible login flow.");
   selectedXSessionAlertId = null;
   if (xSessionAlertNote) xSessionAlertNote.value = "";
   if (sessionAlertDetailNote) sessionAlertDetailNote.value = "";
   await refreshXSessionAlerts();
   await refreshXBrowserAccounts();
+  await maybeOfferResumeInterruptedRun({ afterXSessionAlert: true });
+}
+
+async function maybeOfferResumeInterruptedRun(options = {}) {
+  const data = await jsonFetch("/admin/runs/current");
+  const run = data?.run;
+  if (!run || run.status !== "paused") {
+    return;
+  }
+  const stats = parseRunStats(run.statsJson);
+  const remaining = Math.max(0, Number(stats.remainingKeywords ?? 0));
+  if (remaining <= 0) {
+    return;
+  }
+  const promptLines = options.afterXSessionAlert
+    ? [
+        "Recover last session?",
+        "",
+        "The X alert interrupted the previous without-API session.",
+        `Run: ${run.id}`,
+        `Progress: ${stats.completedKeywords} / ${stats.totalKeywords}`,
+        `Remaining keywords: ${remaining}`,
+        "",
+        "OK: recover from the saved keyword position.",
+        "Cancel: keep the run paused."
+      ]
+    : [
+        "Recover last session?",
+        "",
+        "The interrupted without-API run is still paused.",
+        `Run: ${run.id}`,
+        `Progress: ${stats.completedKeywords} / ${stats.totalKeywords}`,
+        `Remaining keywords: ${remaining}`,
+        "",
+        "OK: recover from the saved keyword position.",
+        "Cancel: keep the run paused."
+      ];
+  const shouldResume = window.confirm(promptLines.join("\n"));
+  if (shouldResume) {
+    await runAction("resume");
+  } else {
+    setStatus("Last session kept paused.");
+    await openCurrentSessionSection();
+  }
 }
 
 async function launchXSessionAlertLogin(alertId, feedbackTarget) {
@@ -1909,7 +1963,7 @@ async function launchXSessionAlertLogin(alertId, feedbackTarget) {
     ? `Visible X login is already running for ${result.alert?.xIdentifier || "this alert"}.`
     : `Visible X login launched for ${result.alert?.xIdentifier || "this alert"}.`;
   showButtonFeedback(feedbackTarget, result.alreadyRunning ? "Already running." : "Launched.");
-  setStatus(`${message} Solve the X verification in Chrome, then return here and mark the alert resolved with a note.`);
+  setStatus(`${message} Solve the X verification in Chrome; RedqueenX will capture and save the session automatically, then you can mark the alert resolved with a note.`);
   pollXSessionAlertLoginStatus(alertId, feedbackTarget);
   await refreshCurrentSession();
 }
@@ -2096,6 +2150,10 @@ function formatXSessionAlertEvidence(alert) {
     return '<div class="alert-evidence"><p><strong>Evidence:</strong> No browser evidence was captured for this alert.</p></div>';
   }
   const signals = Array.isArray(details.detectionSignals) ? details.detectionSignals : [];
+  const visibleText = typeof details.visibleText === "string" ? details.visibleText : "";
+  const nonTweetVisibleText = typeof details.nonTweetVisibleText === "string" ? details.nonTweetVisibleText : "";
+  const htmlSnippet = typeof details.htmlSnippet === "string" ? details.htmlSnippet : "";
+  const alertId = String(alert.id);
   return `
     <div class="alert-evidence">
       <p><strong>Evidence captured from Playwright:</strong></p>
@@ -2104,13 +2162,56 @@ function formatXSessionAlertEvidence(alert) {
         <div><dt>Page title</dt><dd>${escapeHtml(String(details.title || "-"))}</dd></div>
         <div><dt>Detected reason</dt><dd>${escapeHtml(String(details.reason || "-"))}</dd></div>
         <div><dt>Detection signals</dt><dd>${escapeHtml(signals.length ? signals.join(" | ") : "-")}</dd></div>
+        <div><dt>Detection source</dt><dd>${escapeHtml(String(details.detectionTextSource || "page text excluding tweet articles"))}</dd></div>
+        <div><dt>Tweet articles</dt><dd>${escapeHtml(String(details.articleCount ?? "-"))}</dd></div>
+        <div><dt>Tweet text nodes</dt><dd>${escapeHtml(String(details.tweetTextCount ?? "-"))}</dd></div>
         <div><dt>Snapshot file</dt><dd>${escapeHtml(String(details.snapshotPath || "-"))}</dd></div>
         <div><dt>Body chars</dt><dd>${escapeHtml(String(details.bodyTextLength ?? "-"))}</dd></div>
         <div><dt>HTML chars</dt><dd>${escapeHtml(String(details.htmlLength ?? "-"))}</dd></div>
       </dl>
-      <p class="muted">Visible text and HTML previews are hidden in admin. Use the snapshot file when full evidence is needed.</p>
+      <details>
+        <summary>Detection text used by the alert</summary>
+        <pre class="alert-command-block">${escapeHtml(nonTweetVisibleText || "(empty)")}</pre>
+      </details>
+      <details>
+        <summary>Visible text preview</summary>
+        <pre class="alert-command-block">${escapeHtml(visibleText || "(empty)")}</pre>
+      </details>
+      <details>
+        <summary>HTML snippet preview</summary>
+        <pre class="alert-command-block">${escapeHtml(htmlSnippet || "(empty)")}</pre>
+      </details>
+      ${
+        details.snapshotPath
+          ? `<button class="secondary-button" type="button" data-alert-snapshot-id="${escapeAttribute(alertId)}">Open captured snapshot file</button>
+             <pre class="alert-command-block" data-alert-snapshot-output="${escapeAttribute(alertId)}">Snapshot file content will appear here.</pre>`
+          : ""
+      }
     </div>
   `;
+}
+
+async function loadXSessionAlertSnapshot(alertId, button) {
+  if (!alertId) return;
+  const output = sessionAlertDetail?.querySelector(`[data-alert-snapshot-output="${CSS.escape(String(alertId))}"]`);
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Loading snapshot...";
+  }
+  try {
+    const result = await jsonFetch(`/admin/x-session-alerts/${encodeURIComponent(alertId)}/snapshot`);
+    if (output) {
+      output.textContent = result?.raw || JSON.stringify(result?.snapshot || {}, null, 2);
+      output.scrollTop = 0;
+    }
+    setStatus(`Loaded X session alert snapshot: ${result?.path || "snapshot"}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText || "Open captured snapshot file";
+    }
+  }
 }
 
 function findXSessionAlert(alertId) {
@@ -2152,7 +2253,7 @@ async function refreshCurrentSession() {
   sessionKeywordProgress.textContent = formatSessionKeywordProgress(stats, data.runtimeModes);
   sessionApiLeft.textContent = formatSearchesBeforePause(stats, data.runtimeModes);
   sessionAcceptedTweets.textContent = `${stats.acceptedTweets} OK / ${stats.rejectedTweets} rejected`;
-  sessionNextReset.textContent = stats.nextApiResetAt ? new Date(stats.nextApiResetAt).toLocaleString() : "-";
+  setSessionNextReset(stats.nextApiResetAt, data.runtimeModes);
   sessionLog.textContent = data.session.lines.length
     ? data.session.lines.join("\n")
     : "No runtime event.";
@@ -2161,6 +2262,39 @@ async function refreshCurrentSession() {
   } else {
     sessionLog.scrollTop = Math.min(previousScrollTop, sessionLog.scrollHeight);
   }
+}
+
+function setSessionNextReset(value, runtimeModes = {}) {
+  sessionNextResetAt = value ? Date.parse(value) : null;
+  renderSessionNextReset(runtimeModes);
+  if (sessionNextResetTimer) {
+    clearInterval(sessionNextResetTimer);
+    sessionNextResetTimer = null;
+  }
+  if (sessionNextResetAt && Number.isFinite(sessionNextResetAt)) {
+    sessionNextResetTimer = setInterval(() => renderSessionNextReset(currentRuntimeModes), 1000);
+  }
+}
+
+function renderSessionNextReset(runtimeModes = currentRuntimeModes) {
+  if (!sessionNextReset) return;
+  if (!sessionNextResetAt || !Number.isFinite(sessionNextResetAt)) {
+    sessionNextReset.textContent = "-";
+    return;
+  }
+  const remainingMs = sessionNextResetAt - Date.now();
+  const dateText = new Date(sessionNextResetAt).toLocaleString();
+  if (remainingMs <= 0) {
+    sessionNextReset.textContent = runtimeModes.searchWithoutApiEnabled ? "Resuming now..." : `Due now (${dateText})`;
+    return;
+  }
+  const seconds = Math.ceil(remainingMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const restSeconds = seconds % 60;
+  const countdown = `${minutes}:${String(restSeconds).padStart(2, "0")}`;
+  sessionNextReset.textContent = runtimeModes.searchWithoutApiEnabled
+    ? `${countdown} remaining - ${dateText}`
+    : `${dateText} (${countdown})`;
 }
 
 async function refreshSessionKeywords() {
@@ -2844,23 +2978,27 @@ function setupEnvSecretToggles() {
 
 async function runAction(action) {
   if (action === "start") {
+    showAdminSection("session");
+    updateSessionPolling();
     const result = await jsonFetch("/admin/runs", { method: "POST" });
     if (result) {
       setStatus(`Run started: ${result.run.id}`);
     }
-    showAdminSection("session");
-    await refreshStats();
-    await refreshCurrentSession();
-    await refreshSessionKeywords();
+    await openCurrentSessionSection();
     return;
   }
 
+  if (action === "resume") {
+    showAdminSection("session");
+    updateSessionPolling();
+  }
   const result = await jsonFetch(`/admin/runs/current/${action}`, { method: "POST" });
   if (result) {
     setStatus(`Run ${result.run.status}: ${result.run.id}`);
   }
   if (action === "resume") {
-    showAdminSection("session");
+    await openCurrentSessionSection();
+    return;
   }
   await refreshStats();
   if (activeAdminSection() === "session") {
@@ -3203,6 +3341,11 @@ sessionAlertDetailLogin?.addEventListener("click", () => {
   launchXSessionAlertLogin(sessionAlertDetailLogin.dataset.alertId, sessionAlertDetailLogin).catch((error) =>
     setStatus(error.message)
   );
+});
+sessionAlertDetail?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-alert-snapshot-id]");
+  if (!button) return;
+  loadXSessionAlertSnapshot(button.dataset.alertSnapshotId, button).catch((error) => setStatus(error.message));
 });
 sessionRefreshButton.addEventListener("click", () => {
   refreshCurrentSession().catch((error) => setStatus(error.message));

@@ -205,7 +205,7 @@ function formatManualVerificationLine(line: string): string {
       : accountId
         ? [
             "  npm run setup:local",
-            `  npm run netns:x-login -- --account-id ${accountId} --resolve-alert`,
+            `  npm run netns:x-login -- --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`,
             "  npm run netns:diagnose",
             "  npm run netns:worker"
           ].join("\n")
@@ -231,7 +231,7 @@ function formatManualVerificationLine(line: string): string {
       "",
       "What to do:",
       recommendation,
-      commands ? `\nRecommended commands after the human has solved it:\n${commands}` : "",
+      commands ? `\nRecommended commands for visible login and session capture:\n${commands}` : "",
       "============================================================"
     ]
       .filter((part) => part !== "")

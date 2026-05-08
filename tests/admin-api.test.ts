@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAdminApi } from "../src/admin/api";
 import { openMemoryDatabase } from "../src/db/database";
+import { RunService } from "../src/admin/runService";
 import { XBrowserAccountService } from "../src/admin/xBrowserAccountService";
 import { XSessionAlertService } from "../src/admin/xSessionAlertService";
 
@@ -142,10 +143,17 @@ describe("admin api", () => {
 
     const publicTimelineData = await app.inject({ method: "GET", url: "/timeline/data" });
     expect(publicTimelineData.statusCode).toBe(200);
-    expect(publicTimelineData.json()).toEqual({ items: [], actionsEnabled: false });
+    expect(publicTimelineData.json()).toEqual({
+      items: [],
+      pagination: { total: 0, limit: 50, offset: 0, hasMore: false },
+      actionsEnabled: false
+    });
     const rawTimelineData = await app.inject({ method: "GET", url: "/raw-timeline/data" });
     expect(rawTimelineData.statusCode).toBe(200);
-    expect(rawTimelineData.json()).toEqual({ items: [] });
+    expect(rawTimelineData.json()).toEqual({
+      items: [],
+      pagination: { total: 0, limit: 50, offset: 0, hasMore: false }
+    });
 
     const adminPageDenied = await app.inject({
       method: "GET",
@@ -312,7 +320,7 @@ describe("admin api", () => {
       skippedInTest: true,
       commands: {
         setup: "npm run setup:local",
-        manualLogin: `npm run netns:x-login -- --account-id ${account.id} --resolve-alert`
+        manualLogin: `npm run netns:x-login -- --account-id ${account.id} --resolve-alert --auto-save-on-login --hold-open-after-save`
       }
     });
     const manualLoginStatus = await app.inject({
@@ -338,6 +346,29 @@ describe("admin api", () => {
       payload: { note: "" }
     });
     expect(resolveWithoutNote.statusCode).toBe(400);
+    const resolveBeforeCapture = await app.inject({
+      method: "POST",
+      url: `/admin/x-session-alerts/${openAlert.id}/resolve`,
+      headers: authHeaders,
+      payload: { note: "Human solved the challenge from the usual VPN IP." }
+    });
+    expect(resolveBeforeCapture.statusCode).toBe(409);
+    expect(resolveBeforeCapture.json().error).toContain("Capture and save a fresh X browser session");
+    expect(resolveBeforeCapture.json().commands.manualLogin).toContain("--auto-save-on-login");
+
+    const capturedStorageStatePath = path.resolve(account.storageStatePath);
+    fs.writeFileSync(capturedStorageStatePath, JSON.stringify({ cookies: [], origins: [] }), "utf8");
+    accountService.markLogin(account.id, "203.0.113.42");
+    const manualLoginStatusAfterCapture = await app.inject({
+      method: "GET",
+      url: `/admin/x-session-alerts/${openAlert.id}/manual-login/status`,
+      headers: authHeaders
+    });
+    expect(manualLoginStatusAfterCapture.statusCode).toBe(200);
+    expect(manualLoginStatusAfterCapture.json()).toMatchObject({
+      state: "saved",
+      saved: true
+    });
     const resolveWithNote = await app.inject({
       method: "POST",
       url: `/admin/x-session-alerts/${openAlert.id}/resolve`,
@@ -346,6 +377,7 @@ describe("admin api", () => {
     });
     expect(resolveWithNote.statusCode).toBe(200);
     expect(resolveWithNote.json().alert).toMatchObject({ id: openAlert.id, status: "resolved" });
+    fs.rmSync(capturedStorageStatePath, { force: true });
     expect(adminPage.body).not.toContain('id="reset-no-results-button"');
     expect(adminPage.body).toContain('id="reset-x-counters-button"');
     expect(adminPage.body).toContain('id="reset-x-budget-button"');
@@ -917,6 +949,39 @@ describe("admin api", () => {
     expect(stoppedAfterSearchWithoutApi.statusCode).toBe(200);
     expect(stoppedAfterSearchWithoutApi.json().run).toBeNull();
 
+    const withoutApiRun = new RunService(database).start({
+      sessionKeywordLimit: 12,
+      totalKeywords: 12,
+      remainingKeywords: 12,
+      availableKeywords: 12,
+      apiCallLimit: 6,
+      apiWindowMinutes: 120
+    });
+    const xApiDisableDuringWithoutApiRun = await app.inject({
+      method: "PATCH",
+      url: "/admin/settings/x-api",
+      headers: authHeaders,
+      payload: {
+        values: {
+          X_API_ENABLED: "false"
+        }
+      }
+    });
+    expect(xApiDisableDuringWithoutApiRun.statusCode).toBe(200);
+    const keptWithoutApiRun = await app.inject({
+      method: "GET",
+      url: "/admin/runs/current",
+      headers: authHeaders
+    });
+    expect(keptWithoutApiRun.statusCode).toBe(200);
+    expect(keptWithoutApiRun.json().run).toMatchObject({ id: withoutApiRun.id, status: "running" });
+    const stopKeptWithoutApiRun = await app.inject({
+      method: "POST",
+      url: "/admin/runs/current/stop",
+      headers: authHeaders
+    });
+    expect(stopKeptWithoutApiRun.statusCode).toBe(200);
+
     const xApiEnableAfterSearchWithoutApi = await app.inject({
       method: "PATCH",
       url: "/admin/settings/x-api",
@@ -1471,6 +1536,12 @@ describe("admin api", () => {
 
     const timelineAfterImport = await app.inject({ method: "GET", url: "/timeline/data", headers: authHeaders });
     expect(timelineAfterImport.statusCode).toBe(200);
+    expect(timelineAfterImport.json().pagination).toMatchObject({
+      total: expect.any(Number),
+      limit: 50,
+      offset: 0,
+      hasMore: expect.any(Boolean)
+    });
 
     const stats = await app.inject({ method: "GET", url: "/admin/stats", headers: authHeaders });
     expect(stats.statusCode).toBe(200);

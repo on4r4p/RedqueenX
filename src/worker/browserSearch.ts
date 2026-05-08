@@ -13,6 +13,15 @@ export interface ManualVerificationDetection {
   type: ManualVerificationType;
   reason: string;
   signals: string[];
+  pageState: ManualVerificationPageState;
+}
+
+export interface ManualVerificationPageState {
+  url: string;
+  visibleText: string;
+  nonTweetVisibleText: string;
+  articleCount: number;
+  tweetTextCount: number;
 }
 
 export interface VisibleTweetSnapshot {
@@ -119,30 +128,109 @@ export async function extractVisibleTweets(page: Page): Promise<TweetCandidate[]
 }
 
 export async function detectManualVerification(page: Page): Promise<ManualVerificationDetection | null> {
-  const url = page.url();
-  const visibleText = await page.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
-  const text = visibleText.toLowerCase();
+  const state = await readManualVerificationPageState(page);
+  return detectManualVerificationFromState(state);
+}
+
+export function detectManualVerificationFromState(state: ManualVerificationPageState): ManualVerificationDetection | null {
+  const url = state.url;
+  const text = state.nonTweetVisibleText.toLowerCase();
   const detected = (type: ManualVerificationType, reason: string, signal: string): ManualVerificationDetection => ({
     type,
     reason,
-    signals: [signal]
+    signals: [signal, `Detection source: page text excluding tweet articles.`, `Tweet articles visible: ${state.articleCount}.`],
+    pageState: state
   });
-  if (url.includes("/i/flow/login") || text.includes("sign in to x") || text.includes("log in to x")) {
+  if (isLoginExpiredPage(url, text)) {
     return detected("login_expired", "The X browser session is no longer logged in.", "URL or visible text matched X login flow.");
   }
-  if (text.includes("captcha")) {
-    return detected("captcha", "X displayed a CAPTCHA or CAPTCHA-related verification.", "Visible page text contained 'captcha'.");
+  if (hasCaptchaText(text)) {
+    return detected("captcha", "X displayed a CAPTCHA or CAPTCHA-related verification.", "Visible page text matched CAPTCHA wording.");
   }
-  if (text.includes("two-factor") || text.includes("2fa") || text.includes("verification code")) {
+  if (hasTwoFactorText(text)) {
     return detected("two_factor", "X requested two-factor verification.", "Visible page text matched two-factor or verification-code wording.");
   }
-  if (text.includes("verify") && (text.includes("account") || text.includes("identity") || text.includes("unusual"))) {
+  if (hasManualChallengeText(text)) {
     return detected("challenge", "X requested manual account verification.", "Visible page text matched account/identity verification wording.");
   }
-  if (text.includes("something went wrong") || text.includes("try reloading")) {
+  if (hasXBlockedText(text) && !isRecoverableSearchResultError(url, text)) {
     return detected("x_blocked", "X returned a blocking error page: Something went wrong.", "Visible page text matched 'Something went wrong' or 'Try reloading'.");
   }
   return null;
+}
+
+async function readManualVerificationPageState(page: Page): Promise<ManualVerificationPageState> {
+  const url = page.url();
+  const fallbackVisibleText = await page.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
+  const domState = await page
+    .evaluate(() => {
+      const doc = (globalThis as unknown as { document: any }).document;
+      const body = doc.body;
+      const visibleText = body?.innerText || body?.textContent || "";
+      const clone = body?.cloneNode(true);
+      clone
+        ?.querySelectorAll('article[data-testid="tweet"], script, style, noscript, template, svg')
+        .forEach((node: any) => node.remove());
+      return {
+        visibleText,
+        nonTweetVisibleText: clone?.innerText || clone?.textContent || "",
+        articleCount: doc.querySelectorAll('article[data-testid="tweet"]').length,
+        tweetTextCount: doc.querySelectorAll('[data-testid="tweetText"]').length
+      };
+    })
+    .catch(() => ({
+      visibleText: fallbackVisibleText,
+      nonTweetVisibleText: fallbackVisibleText,
+      articleCount: 0,
+      tweetTextCount: 0
+    }));
+
+  return {
+    url,
+    visibleText: normalizeDetectorText(domState.visibleText ?? fallbackVisibleText),
+    nonTweetVisibleText: normalizeDetectorText(domState.nonTweetVisibleText ?? fallbackVisibleText),
+    articleCount: domState.articleCount,
+    tweetTextCount: domState.tweetTextCount
+  };
+}
+
+function hasTwoFactorText(text: string): boolean {
+  return /\b(?:two[-\s]?factor|2fa)\b|\bverification\s+code\b/.test(text);
+}
+
+function isLoginExpiredPage(url: string, text: string): boolean {
+  return url.includes("/i/flow/login") || /\b(?:sign|log)\s+in\s+to\s+x\b/.test(text);
+}
+
+function hasCaptchaText(text: string): boolean {
+  return /\b(?:captcha|recaptcha|hcaptcha)\b/.test(text);
+}
+
+function hasManualChallengeText(text: string): boolean {
+  return (
+    /\b(?:verify|confirm|authenticate|validate)\s+(?:your\s+)?(?:account|identity)\b/.test(text) ||
+    /\b(?:account|identity)\s+(?:verification|required|confirmation)\b/.test(text) ||
+    /\bunusual\s+(?:login|sign[-\s]?in|activity)\b/.test(text)
+  );
+}
+
+function hasXBlockedText(text: string): boolean {
+  return /\bsomething\s+went\s+wrong\b|\btry\s+reloading\b/.test(text);
+}
+
+function isRecoverableSearchResultError(url: string, text: string): boolean {
+  if (!url.includes("/search")) {
+    return false;
+  }
+  return (
+    /\btop\s+latest\s+people\s+media\s+lists\b/.test(text) &&
+    /\bsearch\s+filters\b/.test(text) &&
+    /\badvanced\s+search\b/.test(text)
+  );
+}
+
+function normalizeDetectorText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 export function extractHashtags(text: string): string[] {

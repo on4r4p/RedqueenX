@@ -25,7 +25,25 @@
         </div>
       </header>
       <p id="raw-timeline-status" class="timeline-status"></p>
+      <nav id="raw-timeline-pagination" class="timeline-pagination is-hidden" aria-label="Raw timeline pagination" data-raw-timeline-pagination>
+        <button type="button" class="tweet-action-button" data-page-action="prev">Previous</button>
+        <span data-pagination-label></span>
+        <button type="button" class="tweet-action-button" data-page-action="next">Next</button>
+        <label class="timeline-page-size">
+          Per page
+          <input data-page-size type="number" min="1" max="300" step="1" value="50" aria-label="Raw timeline items per page" />
+        </label>
+      </nav>
       <section id="raw-timeline" class="timeline raw-timeline"></section>
+      <nav id="raw-timeline-pagination-bottom" class="timeline-pagination timeline-pagination-bottom is-hidden" aria-label="Raw timeline pagination bottom" data-raw-timeline-pagination>
+        <button type="button" class="tweet-action-button" data-page-action="prev">Previous</button>
+        <span data-pagination-label></span>
+        <button type="button" class="tweet-action-button" data-page-action="next">Next</button>
+        <label class="timeline-page-size">
+          Per page
+          <input data-page-size type="number" min="1" max="300" step="1" value="50" aria-label="Raw timeline items per page" />
+        </label>
+      </nav>
     </main>
     <script src="/assets/raw-timeline.js" defer></script>
   </body>

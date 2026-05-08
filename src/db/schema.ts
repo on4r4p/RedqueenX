@@ -229,8 +229,74 @@ export function migrate(database: Database): void {
       FROM x_browser_accounts;
   `);
 
+  ensureListEntryUniqueness(database);
   ensureRawTimelineDecisionColumns(database);
   ensureXSessionAlertDetailColumns(database);
+}
+
+function ensureListEntryUniqueness(database: Database): void {
+  database.exec(`
+    DELETE FROM list_entries
+    WHERE id IN (
+      WITH ranked AS (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY
+              kind,
+              CASE
+                WHEN kind IN ('following', 'friend', 'banned_user') AND handle_normalized IS NOT NULL
+                  THEN 'handle:' || handle_normalized
+                ELSE 'value:' || normalized_value
+              END
+            ORDER BY
+              CASE
+                WHEN source_file IS NULL THEN 3
+                WHEN source_file LIKE 'uploaded:%' THEN 1
+                ELSE 2
+              END DESC,
+              id ASC
+          ) AS duplicate_rank
+        FROM list_entries
+        WHERE is_deleted = 0
+      )
+      SELECT id
+      FROM ranked
+      WHERE duplicate_rank > 1
+    );
+
+    DELETE FROM list_entries
+    WHERE id IN (
+      WITH ranked AS (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY kind, normalized_value
+            ORDER BY
+              CASE
+                WHEN source_file IS NULL THEN 3
+                WHEN source_file LIKE 'uploaded:%' THEN 1
+                ELSE 2
+              END DESC,
+              id ASC
+          ) AS duplicate_rank
+        FROM list_entries
+        WHERE is_deleted = 0
+      )
+      SELECT id
+      FROM ranked
+      WHERE duplicate_rank > 1
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_list_entries_active_normalized_unique
+      ON list_entries(kind, normalized_value)
+      WHERE is_deleted = 0;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_list_entries_active_handle_unique
+      ON list_entries(kind, handle_normalized)
+      WHERE is_deleted = 0
+        AND handle_normalized IS NOT NULL;
+  `);
 }
 
 function ensureRawTimelineDecisionColumns(database: Database): void {

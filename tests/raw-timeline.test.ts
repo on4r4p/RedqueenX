@@ -45,4 +45,32 @@ describe("RawTimelineTweetService", () => {
       rejectionReasons: ["banned_user:@blocked", "tweet_too_short"]
     });
   });
+
+  it("paginates raw timeline tweets", () => {
+    const database = openMemoryDatabase();
+    database.prepare("INSERT INTO runs (id, status, started_at, updated_at, stats_json) VALUES (?, ?, ?, ?, ?)").run(
+      "run-raw",
+      "running",
+      "2026-05-07T12:00:00.000Z",
+      "2026-05-07T12:00:00.000Z",
+      "{}"
+    );
+    const service = new RawTimelineTweetService(database);
+    const tweets: TweetCandidate[] = [
+      { id: "tweet-1", text: "first visible tweet", user: { screenName: "@one" } },
+      { id: "tweet-2", text: "second visible tweet", user: { screenName: "@two" } },
+      { id: "tweet-3", text: "third visible tweet", user: { screenName: "@three" } }
+    ];
+
+    expect(service.saveVisible("run-raw", "cloudflare", tweets)).toBe(3);
+
+    const page = service.page({ limit: 2, offset: 1 });
+    expect(page).toMatchObject({
+      total: 3,
+      limit: 2,
+      offset: 1,
+      hasMore: false
+    });
+    expect(page.items).toHaveLength(2);
+  });
 });

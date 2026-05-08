@@ -67,6 +67,15 @@ export class ListService {
   }
 
   update(id: number, kind: ListKind, rawValue: string): ListEntry {
+    const duplicate = this.findDuplicate(kind, rawValue, id);
+    if (duplicate) {
+      const deleted = this.markDeletedById(kind, id);
+      if (deleted === 0) {
+        throw new Error(`List entry not found: ${kind}#${id}`);
+      }
+      return mapRow(duplicate);
+    }
+
     const row = this.database
       .prepare(`
         UPDATE list_entries
@@ -362,7 +371,7 @@ export class ListService {
     return insertedRecords;
   }
 
-  private findDuplicate(kind: ListKind, rawValue: string): ListEntryRow | undefined {
+  private findDuplicate(kind: ListKind, rawValue: string, excludeId?: number): ListEntryRow | undefined {
     const normalizedValue = normalizeValue(rawValue);
     const handleNormalized = handleKinds.has(kind) ? normalizeHandle(rawValue) : null;
     return this.database
@@ -371,6 +380,7 @@ export class ListService {
         FROM list_entries
         WHERE kind = @kind
           AND is_deleted = 0
+          AND (@excludeId IS NULL OR id != @excludeId)
           AND (
             normalized_value = @normalizedValue
             OR (@handleNormalized IS NOT NULL AND handle_normalized = @handleNormalized)
@@ -378,7 +388,7 @@ export class ListService {
         ORDER BY id ASC
         LIMIT 1
       `)
-      .get({ kind, normalizedValue, handleNormalized }) as ListEntryRow | undefined;
+      .get({ kind, normalizedValue, handleNormalized, excludeId: excludeId ?? null }) as ListEntryRow | undefined;
   }
 }
 

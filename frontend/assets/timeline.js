@@ -1,5 +1,14 @@
 const timeline = document.getElementById("timeline");
 const timelineStatus = document.getElementById("timeline-status");
+const timelinePaginations = Array.from(document.querySelectorAll("[data-timeline-pagination]"));
+const timelineDefaultPageSize = 50;
+const timelineMaxPageSize = 200;
+const timelineState = {
+  offset: readBoundedQueryInt("offset", 0, 0, Number.MAX_SAFE_INTEGER),
+  limit: readBoundedQueryInt("limit", timelineDefaultPageSize, 1, timelineMaxPageSize),
+  total: 0,
+  hasMore: false
+};
 
 function avatarText(author) {
   if (!author) return "RQ";
@@ -102,9 +111,31 @@ function renderMetrics(item) {
 }
 
 async function refreshTimeline() {
-  const response = await fetch("/timeline/data?limit=40");
+  const params = new URLSearchParams({
+    limit: String(timelineState.limit),
+    offset: String(timelineState.offset)
+  });
+  const response = await fetch(`/timeline/data?${params.toString()}`);
   const data = await response.json();
-  timelineStatus.textContent = "Remote avatars, media, and external links are not loaded directly. Cached media is served locally from /media-cache only.";
+  const pagination = data.pagination || { total: data.items.length, limit: timelineState.limit, offset: timelineState.offset, hasMore: false };
+  if (!data.items.length && pagination.total > 0 && timelineState.offset > 0) {
+    timelineState.offset = Math.max(0, Math.floor((pagination.total - 1) / timelineState.limit) * timelineState.limit);
+    updateTimelineUrl();
+    await refreshTimeline();
+    return;
+  }
+  timelineState.total = pagination.total;
+  timelineState.limit = pagination.limit;
+  timelineState.offset = pagination.offset;
+  timelineState.hasMore = pagination.hasMore;
+  updateTimelineUrl();
+  renderPagination(pagination, data.items.length);
+  timelineStatus.textContent = [
+    pageSummary(pagination, data.items.length),
+    "Remote avatars, media, and external links are not loaded directly. Cached media is served locally from /media-cache only."
+  ]
+    .filter(Boolean)
+    .join(" ");
   if (!data.items.length) {
     timeline.innerHTML = '<div class="empty-state">No imported data. Go to Admin, then run the legacy import.</div>';
     return;
@@ -136,6 +167,96 @@ async function refreshTimeline() {
 }
 
 refreshTimeline();
+
+function pageSummary(pagination, itemCount) {
+  if (!pagination.total) return "";
+  const start = pagination.offset + 1;
+  const end = pagination.offset + itemCount;
+  return `Showing ${start}-${end} of ${pagination.total}.`;
+}
+
+function renderPagination(pagination, itemCount) {
+  const hasItems = pagination.total > 0;
+  for (const paginationNav of timelinePaginations) {
+    paginationNav.classList.toggle("is-hidden", !hasItems);
+    if (!hasItems) continue;
+    const label = paginationNav.querySelector("[data-pagination-label]");
+    if (label) label.textContent = pageSummary(pagination, itemCount);
+    const previous = paginationNav.querySelector('[data-page-action="prev"]');
+    const next = paginationNav.querySelector('[data-page-action="next"]');
+    const pageSize = paginationNav.querySelector("[data-page-size]");
+    if (previous) previous.disabled = pagination.offset <= 0;
+    if (next) next.disabled = !pagination.hasMore;
+    if (pageSize) pageSize.value = String(pagination.limit);
+  }
+}
+
+function readBoundedQueryInt(name, fallback, min, max) {
+  const params = new URLSearchParams(window.location.search);
+  const value = Number(params.get(name));
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+function clampTimelineLimit(value) {
+  const limit = Number(value);
+  if (!Number.isFinite(limit)) return timelineState.limit;
+  return Math.min(timelineMaxPageSize, Math.max(1, Math.floor(limit)));
+}
+
+function updateTimelineUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.set("limit", String(timelineState.limit));
+  if (timelineState.offset > 0) {
+    url.searchParams.set("offset", String(timelineState.offset));
+  } else {
+    url.searchParams.delete("offset");
+  }
+  window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+}
+
+async function changeTimelinePage(action) {
+  if (action === "prev") {
+    timelineState.offset = Math.max(0, timelineState.offset - timelineState.limit);
+  } else if (action === "next") {
+    timelineState.offset += timelineState.limit;
+  } else {
+    return;
+  }
+  timelineStatus.textContent = "Loading timeline page...";
+  await refreshTimeline();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function changeTimelinePageSize(value) {
+  const nextLimit = clampTimelineLimit(value);
+  if (nextLimit === timelineState.limit) {
+    timelinePaginations.forEach((paginationNav) => {
+      const pageSize = paginationNav.querySelector("[data-page-size]");
+      if (pageSize) pageSize.value = String(timelineState.limit);
+    });
+    return;
+  }
+  timelineState.limit = nextLimit;
+  timelineState.offset = 0;
+  timelineStatus.textContent = "Loading timeline page...";
+  await refreshTimeline();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+timelinePaginations.forEach((paginationNav) => {
+  paginationNav.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-page-action]");
+    if (!button || button.disabled) return;
+    await changeTimelinePage(button.dataset.pageAction);
+  });
+
+  paginationNav.addEventListener("change", async (event) => {
+    const input = event.target.closest("[data-page-size]");
+    if (!input) return;
+    await changeTimelinePageSize(input.value);
+  });
+});
 
 timeline.addEventListener("click", async (event) => {
   const externalLink = event.target.closest("[data-external-url]");

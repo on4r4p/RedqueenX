@@ -23,6 +23,14 @@ export interface TimelineTweetItem {
   acceptedAt: string;
 }
 
+export interface TimelineTweetPage {
+  items: TimelineTweetItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 type TimelineTweetRow = {
   rowid: number;
   tweet_id: string;
@@ -132,18 +140,39 @@ export class TimelineTweetService {
       });
   }
 
-  latest(limit = 40): TimelineTweetItem[] {
+  latest(limit = 40, offset = 0): TimelineTweetItem[] {
     const safeLimit = Math.max(1, Math.min(limit, 200));
+    const safeOffset = Math.max(0, Math.floor(offset));
     const rows = this.database
       .prepare(`
         SELECT rowid, *
         FROM timeline_tweets
         ORDER BY accepted_at DESC, tweet_created_at DESC, rowid DESC
         LIMIT ?
+        OFFSET ?
       `)
-      .all(safeLimit) as TimelineTweetRow[];
+      .all(safeLimit, safeOffset) as TimelineTweetRow[];
 
     return rows.map(mapTweetRow);
+  }
+
+  page(options: { limit?: number; offset?: number } = {}): TimelineTweetPage {
+    const limit = Math.max(1, Math.min(options.limit ?? 40, 200));
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const total = this.count();
+    const items = this.latest(limit, offset);
+    return {
+      items,
+      total,
+      limit,
+      offset,
+      hasMore: offset + items.length < total
+    };
+  }
+
+  count(): number {
+    const row = this.database.prepare("SELECT COUNT(*) AS total FROM timeline_tweets").get() as { total: number };
+    return row.total;
   }
 
   find(tweetId: string): TimelineTweetItem | null {

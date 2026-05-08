@@ -31,6 +31,14 @@ type TimelineRow = {
   line_number: number | null;
 };
 
+export interface LegacyTimelinePage {
+  items: Array<LegacyTimelineItem | TimelineTweetItem>;
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 export class LegacyTimelineService {
   private readonly timelineTweets: TimelineTweetService;
 
@@ -39,8 +47,32 @@ export class LegacyTimelineService {
   }
 
   latest(limit = 40): Array<LegacyTimelineItem | TimelineTweetItem> {
-    const safeLimit = Math.max(1, Math.min(limit, 200));
-    const runtimeTweets = this.timelineTweets.latest(safeLimit);
+    return this.page({ limit, offset: 0 }).items;
+  }
+
+  page(options: { limit?: number; offset?: number } = {}): LegacyTimelinePage {
+    const limit = Math.max(1, Math.min(options.limit ?? 40, 200));
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const runtimeTotal = this.timelineTweets.count();
+    const legacyTotal = this.countLegacy();
+    const runtimeOffset = Math.min(offset, runtimeTotal);
+    const runtimeLimit = Math.max(0, Math.min(limit, runtimeTotal - runtimeOffset));
+    const legacyOffset = Math.max(0, offset - runtimeTotal);
+    const legacyLimit = limit - runtimeLimit;
+    const runtimeTweets = runtimeLimit > 0 ? this.timelineTweets.latest(runtimeLimit, runtimeOffset) : [];
+    const legacyItems = legacyLimit > 0 ? this.latestLegacy(legacyLimit, legacyOffset) : [];
+    const items = [...runtimeTweets, ...legacyItems];
+    const total = runtimeTotal + legacyTotal;
+    return {
+      items,
+      total,
+      limit,
+      offset,
+      hasMore: offset + items.length < total
+    };
+  }
+
+  private latestLegacy(limit: number, offset: number): LegacyTimelineItem[] {
     const rows = this.database
       .prepare(`
         SELECT
@@ -62,10 +94,11 @@ export class LegacyTimelineService {
           )
         ORDER BY text_entry.line_number DESC, text_entry.id DESC
         LIMIT ?
+        OFFSET ?
       `)
-      .all(safeLimit) as TimelineRow[];
+      .all(limit, offset) as TimelineRow[];
 
-    const legacyItems: LegacyTimelineItem[] = rows.map((row) => {
+    return rows.map((row) => {
       const tweetId = normalizeTweetId(row.tweet_id);
       return {
         id: row.id,
@@ -89,8 +122,23 @@ export class LegacyTimelineService {
         acceptedAt: null
       };
     });
+  }
 
-    return [...runtimeTweets, ...legacyItems].slice(0, safeLimit);
+  private countLegacy(): number {
+    const row = this.database
+      .prepare(`
+        SELECT COUNT(*) AS total
+        FROM list_entries AS text_entry
+        WHERE text_entry.kind = 'text_sent'
+          AND text_entry.is_deleted = 0
+          AND text_entry.is_empty = 0
+          AND (
+            text_entry.source_file IS NULL
+            OR text_entry.source_file NOT LIKE 'runtime:x-search:%'
+          )
+      `)
+      .get() as { total: number };
+    return row.total;
   }
 }
 

@@ -3,6 +3,7 @@ import { webrtcCandidateExtractorSource } from "../src/diagnostics/vpn";
 import {
   buildBrowserSearchQuery,
   buildBrowserSearchUrl,
+  detectManualVerificationFromState,
   extractHashtags,
   extractMentions,
   snapshotToTweetCandidate,
@@ -72,5 +73,153 @@ describe("browser search helpers", () => {
     expect(extractMentions("@one text @two @one")).toEqual(["one", "two"]);
     expect(nextMouseProfile("smooth1", "smooth1")).toBe("smooth2");
     expect(nextMouseProfile("smooth2", "smooth1")).toBe("smooth1");
+  });
+
+  it("does not create a manual verification alert from tweet text content", () => {
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search?q=captcha&f=live",
+        visibleText: "Home Latest A tweet talking about captcha and something went wrong in an app.",
+        nonTweetVisibleText: "Home Latest Search filters",
+        articleCount: 3,
+        tweetTextCount: 3
+      })
+    ).toBeNull();
+  });
+
+  it("does not treat bundled script hashes as visible 2FA prompts", () => {
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search",
+        visibleText: "To view keyboard shortcuts, press question mark",
+        nonTweetVisibleText: "To view keyboard shortcuts window.__chunk='f2fa7a'",
+        articleCount: 0,
+        tweetTextCount: 0
+      })
+    ).toBeNull();
+  });
+
+  it("does not trigger manual verification from technical detector substrings", () => {
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search",
+        visibleText: "To view keyboard shortcuts, press question mark",
+        nonTweetVisibleText:
+          "To view keyboard shortcuts captchaHandler recaptchav2 f2fa7a verifyAccount unusualHash sign-in-to-x somethingwentwrong tryreloading",
+        articleCount: 0,
+        tweetTextCount: 0
+      })
+    ).toBeNull();
+  });
+
+  it("does not create a challenge from unrelated visible words on the same page", () => {
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search",
+        visibleText: "Verify your email preferences. Account security article. Unusual weather trending.",
+        nonTweetVisibleText: "Verify your email preferences. Account security article. Unusual weather trending.",
+        articleCount: 0,
+        tweetTextCount: 0
+      })
+    ).toBeNull();
+  });
+
+  it("does not create a manual verification alert from a recoverable X search result error", () => {
+    const searchShellText = [
+      "Home",
+      "Explore",
+      "Notifications",
+      "Post",
+      "Blue king",
+      "@Blueking561857",
+      "Top",
+      "Latest",
+      "People",
+      "Media",
+      "Lists",
+      "See new posts",
+      "Something went wrong. Try reloading.",
+      "Retry",
+      "Search filters",
+      "People",
+      "From anyone",
+      "Location",
+      "Anywhere",
+      "Advanced search"
+    ].join("\n");
+
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search?q=csrf+exploit&src=typed_query&f=live",
+        visibleText: searchShellText,
+        nonTweetVisibleText: searchShellText,
+        articleCount: 0,
+        tweetTextCount: 0
+      })
+    ).toBeNull();
+  });
+
+  it("still detects real two-factor wording in visible page text", () => {
+    const detected = detectManualVerificationFromState({
+      url: "https://x.com/account/access",
+      visibleText: "Enter your 2FA code to continue.",
+      nonTweetVisibleText: "Enter your 2FA code to continue.",
+      articleCount: 0,
+      tweetTextCount: 0
+    });
+
+    expect(detected?.type).toBe("two_factor");
+  });
+
+  it("still detects real CAPTCHA, login, and challenge wording in visible page text", () => {
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/account/access",
+        visibleText: "Complete this CAPTCHA to continue.",
+        nonTweetVisibleText: "Complete this CAPTCHA to continue.",
+        articleCount: 0,
+        tweetTextCount: 0
+      })?.type
+    ).toBe("captcha");
+
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search",
+        visibleText: "Log in to X to continue.",
+        nonTweetVisibleText: "Log in to X to continue.",
+        articleCount: 0,
+        tweetTextCount: 0
+      })?.type
+    ).toBe("login_expired");
+
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/account/access",
+        visibleText: "Verify your account to continue.",
+        nonTweetVisibleText: "Verify your account to continue.",
+        articleCount: 0,
+        tweetTextCount: 0
+      })?.type
+    ).toBe("challenge");
+  });
+
+  it("reports exact manual verification detection signals from non-tweet page text", () => {
+    const detected = detectManualVerificationFromState({
+      url: "https://x.com/search?q=test&f=live",
+      visibleText: "Something went wrong. Try reloading.",
+      nonTweetVisibleText: "Something went wrong. Try reloading.",
+      articleCount: 0,
+      tweetTextCount: 0
+    });
+
+    expect(detected).toMatchObject({
+      type: "x_blocked",
+      pageState: {
+        articleCount: 0,
+        tweetTextCount: 0
+      }
+    });
+    expect(detected?.signals.join(" ")).toContain("Something went wrong");
+    expect(detected?.signals.join(" ")).toContain("excluding tweet articles");
   });
 });

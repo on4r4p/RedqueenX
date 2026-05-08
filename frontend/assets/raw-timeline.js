@@ -1,5 +1,14 @@
 const rawTimeline = document.getElementById("raw-timeline");
 const rawTimelineStatus = document.getElementById("raw-timeline-status");
+const rawTimelinePaginations = Array.from(document.querySelectorAll("[data-raw-timeline-pagination]"));
+const rawTimelineDefaultPageSize = 50;
+const rawTimelineMaxPageSize = 300;
+const rawTimelineState = {
+  offset: readBoundedQueryInt("offset", 0, 0, Number.MAX_SAFE_INTEGER),
+  limit: readBoundedQueryInt("limit", rawTimelineDefaultPageSize, 1, rawTimelineMaxPageSize),
+  total: 0,
+  hasMore: false
+};
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -55,10 +64,31 @@ function formatDecision(item) {
 }
 
 async function refreshRawTimeline() {
-  const response = await fetch("/raw-timeline/data?limit=120");
+  const params = new URLSearchParams({
+    limit: String(rawTimelineState.limit),
+    offset: String(rawTimelineState.offset)
+  });
+  const response = await fetch(`/raw-timeline/data?${params.toString()}`);
   const data = await response.json();
-  rawTimelineStatus.textContent =
-    "Raw timeline is scoring-free. Every DOM-visible tweet is saved before scoring, then enriched with accepted/rejected status and rejection reasons when scoring finishes. Avatars, media, and external URLs are never loaded directly.";
+  const pagination = data.pagination || { total: data.items.length, limit: rawTimelineState.limit, offset: rawTimelineState.offset, hasMore: false };
+  if (!data.items.length && pagination.total > 0 && rawTimelineState.offset > 0) {
+    rawTimelineState.offset = Math.max(0, Math.floor((pagination.total - 1) / rawTimelineState.limit) * rawTimelineState.limit);
+    updateRawTimelineUrl();
+    await refreshRawTimeline();
+    return;
+  }
+  rawTimelineState.total = pagination.total;
+  rawTimelineState.limit = pagination.limit;
+  rawTimelineState.offset = pagination.offset;
+  rawTimelineState.hasMore = pagination.hasMore;
+  updateRawTimelineUrl();
+  renderRawPagination(pagination, data.items.length);
+  rawTimelineStatus.textContent = [
+    rawPageSummary(pagination, data.items.length),
+    "Raw timeline is scoring-free. Every DOM-visible tweet is saved before scoring, then enriched with accepted/rejected status and rejection reasons when scoring finishes. Avatars, media, and external URLs are never loaded directly."
+  ]
+    .filter(Boolean)
+    .join(" ");
   if (!data.items.length) {
     rawTimeline.innerHTML = '<div class="empty-state">No raw Playwright tweets captured yet.</div>';
     return;
@@ -96,6 +126,96 @@ async function refreshRawTimeline() {
 }
 
 refreshRawTimeline();
+
+function rawPageSummary(pagination, itemCount) {
+  if (!pagination.total) return "";
+  const start = pagination.offset + 1;
+  const end = pagination.offset + itemCount;
+  return `Showing ${start}-${end} of ${pagination.total}.`;
+}
+
+function renderRawPagination(pagination, itemCount) {
+  const hasItems = pagination.total > 0;
+  for (const paginationNav of rawTimelinePaginations) {
+    paginationNav.classList.toggle("is-hidden", !hasItems);
+    if (!hasItems) continue;
+    const label = paginationNav.querySelector("[data-pagination-label]");
+    if (label) label.textContent = rawPageSummary(pagination, itemCount);
+    const previous = paginationNav.querySelector('[data-page-action="prev"]');
+    const next = paginationNav.querySelector('[data-page-action="next"]');
+    const pageSize = paginationNav.querySelector("[data-page-size]");
+    if (previous) previous.disabled = pagination.offset <= 0;
+    if (next) next.disabled = !pagination.hasMore;
+    if (pageSize) pageSize.value = String(pagination.limit);
+  }
+}
+
+function readBoundedQueryInt(name, fallback, min, max) {
+  const params = new URLSearchParams(window.location.search);
+  const value = Number(params.get(name));
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+function clampRawTimelineLimit(value) {
+  const limit = Number(value);
+  if (!Number.isFinite(limit)) return rawTimelineState.limit;
+  return Math.min(rawTimelineMaxPageSize, Math.max(1, Math.floor(limit)));
+}
+
+function updateRawTimelineUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.set("limit", String(rawTimelineState.limit));
+  if (rawTimelineState.offset > 0) {
+    url.searchParams.set("offset", String(rawTimelineState.offset));
+  } else {
+    url.searchParams.delete("offset");
+  }
+  window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+}
+
+async function changeRawTimelinePage(action) {
+  if (action === "prev") {
+    rawTimelineState.offset = Math.max(0, rawTimelineState.offset - rawTimelineState.limit);
+  } else if (action === "next") {
+    rawTimelineState.offset += rawTimelineState.limit;
+  } else {
+    return;
+  }
+  rawTimelineStatus.textContent = "Loading raw timeline page...";
+  await refreshRawTimeline();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function changeRawTimelinePageSize(value) {
+  const nextLimit = clampRawTimelineLimit(value);
+  if (nextLimit === rawTimelineState.limit) {
+    rawTimelinePaginations.forEach((paginationNav) => {
+      const pageSize = paginationNav.querySelector("[data-page-size]");
+      if (pageSize) pageSize.value = String(rawTimelineState.limit);
+    });
+    return;
+  }
+  rawTimelineState.limit = nextLimit;
+  rawTimelineState.offset = 0;
+  rawTimelineStatus.textContent = "Loading raw timeline page...";
+  await refreshRawTimeline();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+rawTimelinePaginations.forEach((paginationNav) => {
+  paginationNav.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-page-action]");
+    if (!button || button.disabled) return;
+    await changeRawTimelinePage(button.dataset.pageAction);
+  });
+
+  paginationNav.addEventListener("change", async (event) => {
+    const input = event.target.closest("[data-page-size]");
+    if (!input) return;
+    await changeRawTimelinePageSize(input.value);
+  });
+});
 
 rawTimeline.addEventListener("click", (event) => {
   const externalLink = event.target.closest("[data-external-url]");

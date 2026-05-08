@@ -69,6 +69,14 @@ const databaseTableParamSchema = z.object({ tableName: z.string().min(1) });
 const databaseTableQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(25)
 });
+const timelineQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(200).default(50),
+  offset: z.coerce.number().int().min(0).default(0)
+});
+const rawTimelineQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(300).default(50),
+  offset: z.coerce.number().int().min(0).default(0)
+});
 const databaseExportQuerySchema = z.object({
   format: z.enum(["json", "csv"]).default("json")
 });
@@ -429,20 +437,34 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.get("/timeline/data", async (request) => {
-    const query = z.object({ limit: z.coerce.number().int().positive().max(200).default(40) }).parse(request.query);
+    const query = timelineQuerySchema.parse(request.query);
     const xApiConfig = getXApiConfig();
     const mediaCacheService = getMediaCache();
     await mediaCacheService.prune().catch(() => undefined);
+    const page = timeline.page(query);
     return {
-      items: timeline.latest(query.limit).map((item) => mediaCacheService.decorateTimelineItem(item)),
+      items: page.items.map((item) => mediaCacheService.decorateTimelineItem(item)),
+      pagination: {
+        total: page.total,
+        limit: page.limit,
+        offset: page.offset,
+        hasMore: page.hasMore
+      },
       actionsEnabled: Boolean(options.config.enableXWrite && xApiConfig.xApiEnabled && !xApiConfig.searchWithoutApiEnabled)
     };
   });
 
   app.get("/raw-timeline/data", async (request) => {
-    const query = z.object({ limit: z.coerce.number().int().positive().max(300).default(80) }).parse(request.query);
+    const query = rawTimelineQuerySchema.parse(request.query);
+    const page = rawTimelineTweets.page(query);
     return {
-      items: rawTimelineTweets.latest(query.limit)
+      items: page.items,
+      pagination: {
+        total: page.total,
+        limit: page.limit,
+        offset: page.offset,
+        hasMore: page.hasMore
+      }
     };
   });
 
@@ -722,6 +744,29 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     try {
       const { alertId } = xSessionAlertParamSchema.parse(request.params);
       const body = xSessionAlertResolveSchema.parse(request.body);
+      const existingAlert = xSessionAlerts.find(alertId);
+      if (!existingAlert) {
+        reply.code(404).send({ error: `X session alert not found: ${alertId}` });
+        return;
+      }
+      if (existingAlert.status !== "open") {
+        reply.code(409).send({ error: "This X session alert is already resolved." });
+        return;
+      }
+      const account = xBrowserAccounts.findById(existingAlert.accountId);
+      if (!account) {
+        reply.code(404).send({ error: `X browser account not found: ${existingAlert.accountId}` });
+        return;
+      }
+      if (!xAlertSessionWasCaptured(existingAlert, account)) {
+        const commands = xAlertManualLoginCommands(account.id);
+        reply.code(409).send({
+          error:
+            "Capture and save a fresh X browser session before resolving this alert. Click Launch visible X login; RedqueenX will save the session automatically as soon as the login is detected.",
+          commands
+        });
+        return;
+      }
       const alert = xSessionAlerts.resolve(alertId, body.note);
       await recordSession("info", "x.session_alert.resolved", "X session alert resolved by admin", {
         alertId: alert.id,
@@ -831,6 +876,20 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return await readXAlertManualLoginStatus(alert, account ?? null);
     } catch (error) {
       reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to read manual X login status" });
+    }
+  });
+
+  app.get("/admin/x-session-alerts/:alertId/snapshot", async (request, reply) => {
+    try {
+      const { alertId } = xSessionAlertParamSchema.parse(request.params);
+      const alert = xSessionAlerts.find(alertId);
+      if (!alert) {
+        reply.code(404).send({ error: `X session alert not found: ${alertId}` });
+        return;
+      }
+      return await readXSessionAlertSnapshot(alert);
+    } catch (error) {
+      reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to read X session alert snapshot" });
     }
   });
 
@@ -1099,11 +1158,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   app.patch("/admin/settings/x-api", async (request) => {
     const body = xApiUpdateSchema.parse(request.body ?? {});
     const previousConfig = getXApiConfig();
-    const config = settings.updateXApiConfig(xApiEnvValuesToConfig(body.values, previousConfig), getDefaultXApiConfig());
+    const config = settings.updateXApiConfig(xApiEnvValuesToConfig(body.values, previousConfig), previousConfig);
     const values = xApiConfigToEnvValues(config);
     await env.update(values);
     if (!config.xApiEnabled) {
-      stopActiveRunBecauseXDisabled();
+      stopActiveRunBecauseXDisabled(config);
     }
     const changedVpnKeys = changedOpenVpnConfigKeys(previousConfig, config);
     const openVpnStop = await requestOpenVpnStopForConfigChange(changedVpnKeys);
@@ -1635,9 +1694,22 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     });
   }
 
-  function stopActiveRunBecauseXDisabled(): void {
+  function isWithoutApiRun(run: RunRecord): boolean {
+    return parseRunStats(run.statsJson).sessionKeywordLimit !== null;
+  }
+
+  function stopActiveRunBecauseXDisabled(config: XApiRuntimeConfig): void {
     const currentRun = runs.current();
     if (!currentRun) {
+      return;
+    }
+    if (config.searchWithoutApiEnabled && isWithoutApiRun(currentRun)) {
+      void recordSession(
+        "info",
+        "browser.search.x_api_disabled_ignored",
+        "X API search disabled from settings; without-API run kept running",
+        { runId: currentRun.id }
+      );
       return;
     }
 
@@ -1740,13 +1812,26 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   }
 
   function xAlertManualLoginCommands(accountId: number) {
+    const autoSaveLogin = `npm run netns:x-login -- --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`;
     return {
       setup: "npm run setup:local",
-      manualLogin: `npm run netns:x-login -- --account-id ${accountId} --resolve-alert`,
-      webLaunch: `npm run netns:x-login -- --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`,
+      manualLogin: autoSaveLogin,
+      webLaunch: autoSaveLogin,
       diagnose: "npm run netns:diagnose",
       worker: "npm run netns:worker"
     };
+  }
+
+  function xAlertSessionWasCaptured(alert: XSessionAlertRecord, account: XBrowserAccountRecord): boolean {
+    if (!account.storageStateExists || account.sessionStatus !== "valid" || !account.lastLoginAt) {
+      return false;
+    }
+    const loginTime = Date.parse(account.lastLoginAt);
+    const alertTime = Date.parse(alert.detectedAt);
+    if (!Number.isFinite(loginTime) || !Number.isFinite(alertTime)) {
+      return true;
+    }
+    return loginTime >= alertTime;
   }
 
   function xAlertManualLoginLogPath(alertId: number): string {
@@ -1764,7 +1849,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       logText = "";
     }
 
-    const saved = logText.includes("V Session validated and saved.");
+    const saved = logText.includes("V Session validated and saved.") || Boolean(account && xAlertSessionWasCaptured(alert, account));
     const completed = saved || logText.includes("npm run netns:x-login completed");
     const failed =
       !saved &&
@@ -3849,6 +3934,37 @@ type BrowserSnapshotFileSummary = {
 
 function browserSnapshotRoot(): string {
   return path.resolve(process.cwd(), "runtime", "browser-search-snapshots");
+}
+
+function xSessionAlertSnapshotRoot(): string {
+  return path.resolve(process.cwd(), "runtime", "x-session-alert-snapshots");
+}
+
+async function readXSessionAlertSnapshot(alert: { details?: Record<string, unknown> | null }) {
+  const snapshotPath = typeof alert.details?.snapshotPath === "string" ? alert.details.snapshotPath : "";
+  if (!snapshotPath) {
+    throw new Error("This alert has no captured snapshot file.");
+  }
+
+  const root = xSessionAlertSnapshotRoot();
+  const absolutePath = path.resolve(process.cwd(), snapshotPath);
+  if (!absolutePath.startsWith(`${root}${path.sep}`)) {
+    throw new Error("Invalid X session alert snapshot path.");
+  }
+
+  const stat = await fs.stat(absolutePath);
+  if (!stat.isFile()) {
+    throw new Error("X session alert snapshot not found.");
+  }
+
+  const raw = await fs.readFile(absolutePath, "utf8");
+  return {
+    path: `./${path.relative(process.cwd(), absolutePath)}`,
+    sizeBytes: stat.size,
+    updatedAt: stat.mtime.toISOString(),
+    snapshot: safeJsonObject(raw),
+    raw
+  };
 }
 
 async function listBrowserSnapshots(): Promise<{ root: string; runs: Array<{ runId: string; updatedAt: string; files: BrowserSnapshotFileSummary[] }> }> {
