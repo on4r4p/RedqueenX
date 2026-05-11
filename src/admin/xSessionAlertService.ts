@@ -10,7 +10,7 @@ export type XSessionAlertType =
   | "manual_verification"
   | "unknown_auth_problem";
 
-export type XSessionAlertStatus = "open" | "resolved";
+export type XSessionAlertStatus = "open" | "resolved" | "ignored";
 
 export interface XSessionAlertRecord {
   id: number;
@@ -75,7 +75,7 @@ export class XSessionAlertService {
   createOpen(input: CreateXSessionAlertInput): XSessionAlertRecord {
     const existing = this.openForAccount(input.accountId);
     if (existing) {
-      return existing;
+      return this.refreshOpen(existing.id, input);
     }
 
     const now = new Date().toISOString();
@@ -110,6 +110,42 @@ export class XSessionAlertService {
         now
       ) as XSessionAlertRow;
 
+    return mapRow(row);
+  }
+
+  private refreshOpen(id: number, input: CreateXSessionAlertInput): XSessionAlertRecord {
+    const now = new Date().toISOString();
+    const row = this.database
+      .prepare(
+        `
+          UPDATE x_session_alerts
+          SET x_identifier = ?,
+              vpn_profile_path = ?,
+              public_ipv4 = ?,
+              alert_type = ?,
+              message = ?,
+              recommendation = ?,
+              details_json = ?,
+              detected_at = ?
+          WHERE id = ?
+            AND status = 'open'
+          RETURNING *
+        `
+      )
+      .get(
+        input.xIdentifier,
+        input.vpnProfilePath,
+        input.publicIpv4 ?? null,
+        input.alertType,
+        input.message ?? defaultManualVerificationMessage(),
+        input.recommendation ?? defaultManualVerificationRecommendation(input.accountId),
+        JSON.stringify(input.details ?? {}),
+        now,
+        id
+      ) as XSessionAlertRow | undefined;
+    if (!row) {
+      throw new Error(`Open X session alert not found: ${id}`);
+    }
     return mapRow(row);
   }
 
@@ -180,16 +216,24 @@ export class XSessionAlertService {
   }
 
   resolve(id: number, note: string): XSessionAlertRecord {
+    return this.close(id, "resolved", note, "A resolution note is required before unlocking this X account.");
+  }
+
+  ignore(id: number): XSessionAlertRecord {
+    return this.close(id, "ignored", "Ignored from admin without saving a fresh X browser session.");
+  }
+
+  private close(id: number, status: "resolved" | "ignored", note: string, emptyNoteMessage = "A note is required."): XSessionAlertRecord {
     const trimmedNote = note.trim();
-    if (trimmedNote.length < 3) {
-      throw new Error("A resolution note is required before unlocking this X account.");
+    if (trimmedNote.length < 1) {
+      throw new Error(emptyNoteMessage);
     }
     const now = new Date().toISOString();
     const row = this.database
       .prepare(
         `
           UPDATE x_session_alerts
-          SET status = 'resolved',
+          SET status = ?,
               resolved_at = ?,
               resolved_by_note = ?
           WHERE id = ?
@@ -197,7 +241,7 @@ export class XSessionAlertService {
           RETURNING *
         `
       )
-      .get(now, trimmedNote, id) as XSessionAlertRow | undefined;
+      .get(status, now, trimmedNote, id) as XSessionAlertRow | undefined;
     if (!row) {
       throw new Error(`Open X session alert not found: ${id}`);
     }

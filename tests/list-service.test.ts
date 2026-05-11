@@ -28,6 +28,23 @@ describe("ListService", () => {
     expect(lists.activeValues("following")).toEqual(["@Alice"]);
   });
 
+  it("deduplicates skipped keyword users by handle while keeping the recorded reason", () => {
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+
+    const first = lists.add("skipped_keyword_user", "@Alice", "reason:no_visible_tweet_for_user");
+    const duplicate = lists.add("skipped_keyword_user", "alice", "reason:latest_tweet_has_no_date");
+
+    expect(duplicate.id).toBe(first.id);
+    expect(lists.list("skipped_keyword_user")).toMatchObject([
+      {
+        rawValue: "@Alice",
+        handleNormalized: "alice",
+        sourceFile: "reason:no_visible_tweet_for_user"
+      }
+    ]);
+  });
+
   it("merges updates into an existing active entry instead of creating a duplicate", () => {
     const database = openMemoryDatabase();
     const lists = new ListService(database);
@@ -39,6 +56,47 @@ describe("ListService", () => {
     expect(merged.id).toBe(keeper.id);
     expect(lists.activeValues("keyword")).toEqual(["alpha"]);
     expect(lists.list("keyword", true).find((entry) => entry.id === edited.id)?.isDeleted).toBe(true);
+  });
+
+  it("cleans known cross-list inconsistencies", () => {
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+
+    lists.add("keyword", "");
+    lists.add("keyword", "RemoveMe");
+    lists.add("banned_word", " removeme ");
+    lists.add("keyword", "@bad");
+    lists.add("following", "bad");
+    lists.add("friend", "@bad");
+    lists.add("stale_keyword_user", "@bad");
+    lists.add("skipped_keyword_user", "@bad", "reason:no_visible_tweet_for_user");
+    lists.add("banned_user", "@bad");
+    lists.add("keyword", "@active");
+    lists.add("stale_keyword_user", "active");
+    lists.add("skipped_keyword_user", "@active", "reason:latest_tweet_has_no_date");
+    lists.add("stale_keyword_user", "@old");
+    lists.add("skipped_keyword_user", "old", "reason:latest_tweet_has_no_date");
+
+    const result = lists.cleanupActiveInconsistencies();
+
+    expect(result).toMatchObject({
+      emptyDeleted: 1,
+      keywordBannedWordsDeleted: 1,
+      keywordBannedUsersDeleted: 1,
+      followingBannedUsersDeleted: 1,
+      friendBannedUsersDeleted: 1,
+      staleBannedUsersDeleted: 1,
+      skippedBannedUsersDeleted: 1,
+      staleActiveKeywordsDeleted: 1,
+      skippedActiveKeywordsDeleted: 1,
+      skippedStaleUsersDeleted: 1,
+      totalDeleted: 10
+    });
+    expect(lists.activeValues("keyword")).toEqual(["@active"]);
+    expect(lists.activeValues("following")).toEqual([]);
+    expect(lists.activeValues("friend")).toEqual([]);
+    expect(lists.activeValues("stale_keyword_user")).toEqual(["@old"]);
+    expect(lists.activeValues("skipped_keyword_user")).toEqual([]);
   });
 
   it("deduplicates legacy active rows during migration and enforces unique active indexes", () => {

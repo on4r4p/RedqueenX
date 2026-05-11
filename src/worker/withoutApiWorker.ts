@@ -5,7 +5,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium, type Browser, type Page } from "playwright-core";
-import { loadConfig } from "../config";
+import { loadConfig, type AppConfig } from "../config";
 import { Crawler } from "../crawler";
 import { openDatabase } from "../db/database";
 import { formatDiagnosticsReport, runVpnDiagnostics, type VpnDiagnosticsReport } from "../diagnostics/vpn";
@@ -23,8 +23,15 @@ import {
   type XSessionAlertType
 } from "../admin/xSessionAlertService";
 import { normalizeValue } from "../text";
-import type { RunRecord, ScoringConfig, TweetCandidate } from "../types";
-import { buildBrowserSearchQuery, buildBrowserSearchUrl, detectManualVerification, extractVisibleTweets } from "./browserSearch";
+import type { RunRecord, RunStats, ScoringConfig, TweetCandidate } from "../types";
+import {
+  buildBrowserSearchQuery,
+  buildBrowserSearchUrl,
+  detectManualVerification,
+  extractVisibleTweets,
+  sameManualVerificationDetection,
+  type ManualVerificationDetection
+} from "./browserSearch";
 import {
   hoverVisibleTweets,
   nextMouseProfile,
@@ -35,7 +42,7 @@ import {
   type HumanPacingConfig,
   typeWithPacing
 } from "./humanPacing";
-import { assertVpnNamespaceRuntime } from "./vpnGuard";
+import { assertVpnRuntime } from "./vpnGuard";
 
 interface WorkerArgs {
   runId?: string;
@@ -44,6 +51,7 @@ interface WorkerArgs {
 }
 
 const SMOKE_KEYWORDS = ["hack", "sql injection", "last cve", "xss"] as const;
+const manualVerificationRefreshRetryDelayMs = 10_000;
 
 interface PageSnapshot {
   phase: "before_search" | "after_search";
@@ -111,6 +119,42 @@ const throwingXClient = {
   }
 };
 
+function xLoginCommand(accountId: number, config: Pick<AppConfig, "searchWithoutApiIsolation">): string {
+  return config.searchWithoutApiIsolation === "docker_vpn"
+    ? `docker compose run --rm x-login --account-id ${accountId}`
+    : `npm run netns:x-login -- --account-id ${accountId}`;
+}
+
+function manualVerificationRecommendation(accountId: number, config: Pick<AppConfig, "searchWithoutApiIsolation">): string {
+  if (config.searchWithoutApiIsolation !== "docker_vpn") {
+    return defaultManualVerificationRecommendation(accountId);
+  }
+  return [
+    "No more scraping or login will run for this X account until this alert is resolved.",
+    "Log in manually from the usual IP/VPN profile used by this X account.",
+    "Let the human solve CAPTCHA/2FA/challenge manually.",
+    "The Docker visible login flow uses SSH X forwarding only; no VNC/noVNC fallback exists.",
+    "Return here after the session is saved, then mark the alert as resolved with a note.",
+    `Recommended Docker commands: ops/docker/x11-bridge.sh; docker compose run --rm x-login --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save; docker compose exec worker npm run diagnose:vpn.`
+  ].join(" ");
+}
+
+function manualVerificationCommands(accountId: number, config: Pick<AppConfig, "searchWithoutApiIsolation">): string[] {
+  return config.searchWithoutApiIsolation === "docker_vpn"
+    ? [
+        "ops/docker/x11-bridge.sh",
+        `docker compose run --rm x-login --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`,
+        "docker compose exec worker npm run diagnose:vpn",
+        "docker compose up -d worker"
+      ]
+    : [
+        "npm run setup:local",
+        `npm run netns:x-login -- --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`,
+        "npm run netns:diagnose",
+        "npm run netns:worker"
+      ];
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig();
@@ -130,6 +174,15 @@ async function main() {
 
   const record = (level: CurrentSessionLevel, type: string, message: string, data: Record<string, unknown> = {}) =>
     currentSession.record(level, type, message, data).catch(() => undefined);
+  let mediaCacheFetchQueue: Promise<void> = Promise.resolve();
+  const queueAcceptedTweetMediaCache = (tweetId: string, mediaCount: number) => {
+    if (!config.searchWithoutApiMediaCacheEnabled || mediaCount <= 0) {
+      return;
+    }
+    mediaCacheFetchQueue = mediaCacheFetchQueue
+      .catch(() => undefined)
+      .then(() => runMediaCacheFetchProcess(tweetId, config, record));
+  };
 
   let browser: Browser | null = null;
   let account: XBrowserAccountRecord | null = null;
@@ -137,7 +190,7 @@ async function main() {
   let publicIpv4: string | null = null;
 
   try {
-    await assertVpnNamespaceRuntime(config.vpnNetnsName, "Without-API crawler worker");
+    await assertVpnRuntime(config, "Without-API crawler worker");
     const report = await runVpnDiagnostics({ includePlaywright: true, strict: true });
     console.log(formatDiagnosticsReport(report));
     await record("info", "browser.vpn.diagnostics", "Without-API VPN diagnostics completed", {
@@ -153,7 +206,7 @@ async function main() {
     account = selectBrowserAccount(accounts, config.vpnConfig);
     alerts.openForAccountOrThrow(account);
     if (!account.storageStateExists || account.sessionStatus !== "valid") {
-      throw new Error(`X browser session for ${account.xIdentifier} is not ready. Run npm run netns:x-login -- --account-id ${account.id}.`);
+      throw new Error(`X browser session for ${account.xIdentifier} is not ready. Run ${xLoginCommand(account.id, config)}.`);
     }
 
     if (args.smoke && runs.current()) {
@@ -177,7 +230,7 @@ async function main() {
     const keywords = canResumeExistingPlan ? existingKeywords : keywordPlan.keywords;
     if (!canResumeExistingPlan) {
       runs.replaceKeywords(run.id, keywords);
-      runs.updateStats(run.id, createBrowserRunStats(keywords.length, config, keywordPlan.availableKeywords));
+      runs.updateStats(run.id, createBrowserRunStats(keywords.length, config, keywordPlan.availableKeywords, existingStats));
     } else {
       runs.updateStats(run.id, { currentKeyword: null, nextApiResetAt: null });
     }
@@ -219,10 +272,16 @@ async function main() {
       lists,
       throwingXClient,
       () => settings.getScoringConfig(),
-      (result) =>
-        args.smoke
-          ? timelineTweets.saveAcceptedFromTest(result.keyword, result.tweet, result.decision)
-          : timelineTweets.saveAccepted(result.keyword, result.tweet, result.decision)
+      (result) => {
+        if (args.smoke) {
+          timelineTweets.saveAcceptedFromTest(result.keyword, result.tweet, result.decision);
+        } else {
+          timelineTweets.saveAccepted(result.keyword, result.tweet, result.decision);
+        }
+        if (!args.smoke) {
+          queueAcceptedTweetMediaCache(result.tweet.id, result.tweet.entities?.media?.length ?? 0);
+        }
+      }
     );
 
     await runBrowserSearchLoop({
@@ -250,7 +309,7 @@ async function main() {
         publicIpv4: error.publicIpv4,
         alertType: error.alertType,
         message: defaultManualVerificationMessage(),
-        recommendation: defaultManualVerificationRecommendation(account.id),
+        recommendation: manualVerificationRecommendation(account.id, config),
         details: error.details
       });
       accounts.markStatus(account.id, "needs_login");
@@ -268,14 +327,11 @@ async function main() {
         reason: error.reason,
         recommendation: alert.recommendation,
         details: summarizeAlertDetails(error.details),
-        commands: [
-          "npm run setup:local",
-          `npm run netns:x-login -- --account-id ${account.id} --resolve-alert --auto-save-on-login --hold-open-after-save`,
-          "npm run netns:diagnose",
-          "npm run netns:worker"
-        ]
+        commands: manualVerificationCommands(account.id, config)
       });
-      requestVpnTeardown(record, config.vpnNetnsName);
+      if (config.searchWithoutApiIsolation === "host_netns") {
+        requestVpnTeardown(record, config.vpnNetnsName);
+      }
       throw error;
     }
     if (run) {
@@ -333,7 +389,7 @@ async function runBrowserSearchLoop(input: {
   let rejectedTotal = 0;
   let searchesInWindow = 0;
   const keywordSummaries: BrowserKeywordSummary[] = [];
-  let searchesBeforePause = searchesBeforePauseForKeywords(input.keywords.length - completedKeywords);
+  let searchesBeforePause = searchesBeforePauseForKeywords(input.keywords.length - completedKeywords, input.config);
 
   while (completedKeywords < input.keywords.length) {
     const run = await waitUntilRunnable(input.runs, input.runId);
@@ -375,41 +431,46 @@ async function runBrowserSearchLoop(input: {
       record: input.record
     });
     const tweets = search.tweets;
-    const rawSaved = input.rawTimelineTweets.saveVisible(input.runId, keyword, tweets);
-    await input.record("debug", "browser.raw_timeline.saved", "Visible browser tweets saved to raw timeline", {
-      runId: input.runId,
-      keyword,
-      visibleTweets: tweets.length,
-      savedTweets: rawSaved,
-      scoringIndependent: true
-    });
+    const rawTimelineEnabled = input.settings.getXApiConfig(input.config).rawTimelineEnabled;
+    if (rawTimelineEnabled) {
+      const rawSaved = input.rawTimelineTweets.saveVisible(input.runId, keyword, tweets);
+      await input.record("debug", "browser.raw_timeline.saved", "Visible browser tweets saved to raw timeline", {
+        runId: input.runId,
+        keyword,
+        visibleTweets: tweets.length,
+        savedTweets: rawSaved,
+        scoringIndependent: true
+      });
+    }
     const prefilterResults = input.crawler.explainTweetsForHydration(keyword, tweets);
     const prefilterRejected = prefilterResults.filter((result) => !result.decision.accepted);
     const selectedTweets = prefilterResults.filter((result) => result.decision.accepted).map((result) => result.tweet);
     const scored = input.crawler.scoreTweets(keyword, selectedTweets);
-    const rawDecisionUpdates: RawTimelineDecisionUpdate[] = [
-      ...prefilterRejected.map((result) => ({
-        tweetId: result.tweet.id,
-        status: "rejected" as const,
-        stage: "prefilter" as const,
-        score: null,
-        reasons: result.decision.reasons
-      })),
-      ...scored.map((result) => ({
-        tweetId: result.tweet.id,
-        status: result.decision.accepted ? ("accepted" as const) : ("rejected" as const),
-        stage: result.decision.accepted ? ("accepted" as const) : ("scoring" as const),
-        score: result.decision.score,
-        reasons: result.decision.reasons
-      }))
-    ];
-    const rawDecisionsSaved = input.rawTimelineTweets.saveDecisions(input.runId, rawDecisionUpdates);
-    await input.record("debug", "browser.raw_timeline.decisions_saved", "Raw timeline tweets enriched with scoring decisions", {
-      runId: input.runId,
-      keyword,
-      decisions: rawDecisionUpdates.length,
-      updatedTweets: rawDecisionsSaved
-    });
+    if (rawTimelineEnabled) {
+      const rawDecisionUpdates: RawTimelineDecisionUpdate[] = [
+        ...prefilterRejected.map((result) => ({
+          tweetId: result.tweet.id,
+          status: "rejected" as const,
+          stage: "prefilter" as const,
+          score: null,
+          reasons: result.decision.reasons
+        })),
+        ...scored.map((result) => ({
+          tweetId: result.tweet.id,
+          status: result.decision.accepted ? ("accepted" as const) : ("rejected" as const),
+          stage: result.decision.accepted ? ("accepted" as const) : ("scoring" as const),
+          score: result.decision.score,
+          reasons: result.decision.reasons
+        }))
+      ];
+      const rawDecisionsSaved = input.rawTimelineTweets.saveDecisions(input.runId, rawDecisionUpdates);
+      await input.record("debug", "browser.raw_timeline.decisions_saved", "Raw timeline tweets enriched with scoring decisions", {
+        runId: input.runId,
+        keyword,
+        decisions: rawDecisionUpdates.length,
+        updatedTweets: rawDecisionsSaved
+      });
+    }
     const accepted = scored.filter((result) => result.decision.accepted).length;
     const scoringRejected = scored.filter((result) => !result.decision.accepted);
     const rejected = prefilterRejected.length + scoringRejected.length;
@@ -597,7 +658,7 @@ async function runBrowserSearchLoop(input: {
       });
       await interruptibleDelay(input.runs, input.runId, pauseMinutes * 60_000);
       searchesInWindow = 0;
-      searchesBeforePause = searchesBeforePauseForKeywords(input.keywords.length - completedKeywords);
+      searchesBeforePause = searchesBeforePauseForKeywords(input.keywords.length - completedKeywords, input.config);
       input.runs.updateStats(input.runId, {
         nextApiResetAt: null,
         apiCallsUsed: searchesInWindow,
@@ -822,7 +883,13 @@ async function searchOneKeyword(
     searchInputVisible: beforeSearch.searchInputVisible,
     snapshotFile: beforeSearch.snapshotFile
   });
-  await assertNoManualVerification(page, publicIpv4);
+  await assertNoManualVerification(page, {
+    publicIpv4,
+    runId: options.runId,
+    keyword,
+    phase: "before_search",
+    record: options.record
+  });
 
   const preSearchDelayMs = randomDelayMs(
     Math.max(800, pacing.keyDelayMinMs),
@@ -878,7 +945,13 @@ async function searchOneKeyword(
 
   await page.waitForTimeout(1_200);
   submitSearchMs = Date.now() - submitStartedAt;
-  await assertNoManualVerification(page, publicIpv4);
+  await assertNoManualVerification(page, {
+    publicIpv4,
+    runId: options.runId,
+    keyword,
+    phase: "after_search",
+    record: options.record
+  });
   const afterSearch = await capturePageSnapshot(page, "after_search", keyword, options.runId, options.position, Boolean(options.saveSnapshots));
   await options.record?.("debug", "browser.playwright.step", "Search result page captured", {
     runId: options.runId,
@@ -915,7 +988,13 @@ async function searchOneKeyword(
     await hoverVisibleTweets(page, mouseProfile, pacing);
     const scrollDelayMs = await scrollWithPacing(page, mouseProfile, pacing);
     scrollsPerformed += 1;
-    await assertNoManualVerification(page, publicIpv4);
+    await assertNoManualVerification(page, {
+      publicIpv4,
+      runId: options.runId,
+      keyword,
+      phase: "scroll",
+      record: options.record
+    });
     const nextTweets = await extractVisibleTweets(page);
     const merged = new Map(tweets.map((tweet) => [tweet.id, tweet]));
     for (const tweet of nextTweets) {
@@ -1114,12 +1193,128 @@ function safePathSegment(value: string): string {
     .slice(0, 80) || "snapshot";
 }
 
-async function assertNoManualVerification(page: Page, publicIpv4: string | null): Promise<void> {
-  const detected = await detectManualVerification(page);
-  if (detected) {
-    const details = await captureManualVerificationDetails(page, detected.type, detected.reason, detected.signals, detected.pageState);
-    throw new ManualVerificationRequiredError(detected.type, detected.reason, publicIpv4, details);
+async function assertNoManualVerification(
+  page: Page,
+  options: {
+    publicIpv4: string | null;
+    runId?: string;
+    keyword?: string;
+    phase?: string;
+    retryDelayMs?: number;
+    record?: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>;
   }
+): Promise<void> {
+  const firstDetection = await detectManualVerification(page);
+  if (!firstDetection) {
+    return;
+  }
+
+  const retryDelayMs = Math.max(0, options.retryDelayMs ?? manualVerificationRefreshRetryDelayMs);
+  const beforeRefreshUrl = page.url();
+  await options.record?.("prob", "x.manual_verification.refresh_retry.waiting", "X session alert candidate detected; refreshing once before locking account", {
+    runId: options.runId,
+    keyword: options.keyword,
+    phase: options.phase,
+    alertType: firstDetection.type,
+    reason: firstDetection.reason,
+    url: firstDetection.pageState.url,
+    retryDelayMs,
+    detectionSignals: firstDetection.signals
+  });
+
+  if (retryDelayMs > 0) {
+    await delay(retryDelayMs);
+  }
+
+  const refreshStartedAt = Date.now();
+  let refreshError: string | null = null;
+  try {
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 45_000 });
+  } catch (error) {
+    refreshError = error instanceof Error ? error.message : String(error);
+  }
+  await page.waitForTimeout(1_200).catch(() => undefined);
+
+  const secondDetection = await detectManualVerification(page).catch((error) => {
+    refreshError = [refreshError, error instanceof Error ? error.message : String(error)].filter(Boolean).join(" | ");
+    return firstDetection;
+  });
+  if (!secondDetection) {
+    await options.record?.("info", "x.manual_verification.refresh_retry.cleared", "X session alert candidate cleared after one refresh", {
+      runId: options.runId,
+      keyword: options.keyword,
+      phase: options.phase,
+      firstAlertType: firstDetection.type,
+      firstReason: firstDetection.reason,
+      beforeRefreshUrl,
+      afterRefreshUrl: page.url(),
+      refreshDurationMs: Date.now() - refreshStartedAt,
+      refreshError
+    });
+    return;
+  }
+
+  const confirmedSameAlert = sameManualVerificationDetection(firstDetection, secondDetection);
+  await options.record?.("prob", "x.manual_verification.refresh_retry.confirmed", "X session alert persisted after one refresh; browser worker will stop", {
+    runId: options.runId,
+    keyword: options.keyword,
+    phase: options.phase,
+    firstAlertType: firstDetection.type,
+    firstReason: firstDetection.reason,
+    confirmedAlertType: secondDetection.type,
+    confirmedReason: secondDetection.reason,
+    confirmedSameAlert,
+    beforeRefreshUrl,
+    afterRefreshUrl: page.url(),
+    refreshDurationMs: Date.now() - refreshStartedAt,
+    refreshError
+  });
+
+  const details = await captureManualVerificationDetails(
+    page,
+    secondDetection.type,
+    secondDetection.reason,
+    secondDetection.signals,
+    secondDetection.pageState
+  );
+  throw new ManualVerificationRequiredError(secondDetection.type, secondDetection.reason, options.publicIpv4, {
+    ...details,
+    refreshRetry: manualVerificationRefreshRetryDetails(
+      firstDetection,
+      secondDetection,
+      retryDelayMs,
+      beforeRefreshUrl,
+      page.url(),
+      Date.now() - refreshStartedAt,
+      refreshError
+    )
+  });
+}
+
+function manualVerificationRefreshRetryDetails(
+  firstDetection: ManualVerificationDetection,
+  secondDetection: ManualVerificationDetection,
+  retryDelayMs: number,
+  beforeRefreshUrl: string,
+  afterRefreshUrl: string,
+  refreshDurationMs: number,
+  refreshError: string | null
+): Record<string, unknown> {
+  return {
+    attempted: true,
+    retryDelayMs,
+    beforeRefreshUrl,
+    afterRefreshUrl,
+    refreshDurationMs,
+    refreshError,
+    firstAlertType: firstDetection.type,
+    firstReason: firstDetection.reason,
+    firstDetectionSignals: firstDetection.signals,
+    confirmedAlertType: secondDetection.type,
+    confirmedReason: secondDetection.reason,
+    confirmedDetectionSignals: secondDetection.signals,
+    confirmedSameAlert: sameManualVerificationDetection(firstDetection, secondDetection)
+  };
 }
 
 async function captureManualVerificationDetails(
@@ -1204,7 +1399,8 @@ function summarizeAlertDetails(details: Record<string, unknown>): Record<string,
     tweetTextCount: details.tweetTextCount,
     bodyTextLength: details.bodyTextLength,
     htmlLength: details.htmlLength,
-    snapshotPath: details.snapshotPath
+    snapshotPath: details.snapshotPath,
+    refreshRetry: details.refreshRetry
   };
 }
 
@@ -1283,8 +1479,17 @@ function shuffleKeywords(keywords: string[]): string[] {
   return shuffled;
 }
 
-function createBrowserRunStats(totalKeywords: number, config: ReturnType<typeof loadConfig>, availableKeywords = totalKeywords) {
-  const apiCallLimit = searchesBeforePauseForKeywords(totalKeywords);
+function createBrowserRunStats(
+  totalKeywords: number,
+  config: ReturnType<typeof loadConfig>,
+  availableKeywords = totalKeywords,
+  existingStats?: RunStats
+) {
+  const apiCallLimit = searchesBeforePauseForKeywords(totalKeywords, config);
+  const fallbackRunChainTotal = Math.max(1, Math.floor(config.runChainCount ?? 1));
+  const runChainTotal = Math.max(1, Math.floor(existingStats?.runChainTotal ?? fallbackRunChainTotal));
+  const runChainIndex = Math.max(1, Math.floor(existingStats?.runChainIndex ?? 1));
+  const runChainRemaining = Math.max(0, Math.floor(existingStats?.runChainRemaining ?? runChainTotal - runChainIndex));
   return {
     currentKeyword: null,
     totalKeywords,
@@ -1294,6 +1499,9 @@ function createBrowserRunStats(totalKeywords: number, config: ReturnType<typeof 
     sessionKeywordLimit: config.searchWithoutApiSessionKeywordLimit,
     sessionKeywordLimitRandom: config.searchWithoutApiSessionKeywordLimitRandom,
     randomizeKeywordOrder: config.searchWithoutApiRandomizeKeywordOrder,
+    runChainTotal,
+    runChainIndex,
+    runChainRemaining,
     apiCallsUsed: 0,
     apiCallLimit,
     apiCallsRemaining: apiCallLimit,
@@ -1306,12 +1514,14 @@ function createBrowserRunStats(totalKeywords: number, config: ReturnType<typeof 
   };
 }
 
-function searchesBeforePauseForKeywords(remainingKeywords: number): number {
+function searchesBeforePauseForKeywords(remainingKeywords: number, config: ReturnType<typeof loadConfig>): number {
   const remaining = Math.max(0, Math.floor(remainingKeywords));
   if (remaining <= 0) {
     return 0;
   }
-  return Math.max(1, Math.ceil(remaining / 2));
+  const automaticLimit = Math.ceil(remaining / 2);
+  const manualMax = Math.max(1, Math.floor(config.searchWithoutApiRequestsBeforePauseMax));
+  return Math.max(1, Math.min(remaining, automaticLimit, manualMax));
 }
 
 function browserPacingConfig(config: ReturnType<typeof loadConfig>): HumanPacingConfig {
@@ -1365,6 +1575,54 @@ async function interruptibleDelay(runs: RunService, runId: string, ms: number): 
     }
     await delay(Math.min(1_000, deadline - Date.now()));
   }
+}
+
+async function runMediaCacheFetchProcess(
+  tweetId: string,
+  config: ReturnType<typeof loadConfig>,
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>
+): Promise<void> {
+  await record("debug", "media_cache.auto_fetch.queued", "Accepted tweet media cache fetch queued", {
+    tweetId,
+    viaVpnNamespace: config.vpnNetnsName,
+    isolation: config.searchWithoutApiIsolation
+  });
+
+  await new Promise<void>((resolve) => {
+    const lifecycle = process.env.npm_lifecycle_event ?? "";
+    const fetchScript = lifecycle.endsWith(":dev") ? "media-cache:fetch:dev" : "media-cache:fetch";
+    const child = spawn("npm", ["run", fetchScript, "--", "--tweet-id", tweetId], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        DATABASE_URL: config.databaseUrl,
+        CURRENT_SESSION_FILE: config.currentSessionFile,
+        REDQUEENX_DOCKER_VPN: process.env.REDQUEENX_DOCKER_VPN
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      void record("prob", "media_cache.auto_fetch.failed", error.message, { tweetId });
+      resolve();
+    });
+    child.on("close", (code) => {
+      void record(code === 0 ? "info" : "prob", code === 0 ? "media_cache.auto_fetch.completed" : "media_cache.auto_fetch.failed", code === 0 ? "Accepted tweet media cache fetch completed" : "Accepted tweet media cache fetch failed", {
+        tweetId,
+        code,
+        stdout: lastOutputLines(stdout, 20),
+        stderr: lastOutputLines(stderr, 20)
+      });
+      resolve();
+    });
+  });
 }
 
 function selectBrowserAccount(service: XBrowserAccountService, vpnProfilePath: string): XBrowserAccountRecord {
@@ -1447,6 +1705,14 @@ function findChromiumExecutable(): string | undefined {
 function publicIpv4FromReport(report: VpnDiagnosticsReport): string | null {
   const value = report.checks.publicIpv4?.value;
   return typeof value === "string" ? value : null;
+}
+
+function lastOutputLines(value: string, limit: number): string {
+  return value
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .slice(-limit)
+    .join("\n");
 }
 
 function parseArgs(args: string[]): WorkerArgs {

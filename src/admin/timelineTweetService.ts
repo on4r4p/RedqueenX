@@ -1,9 +1,11 @@
 import type { Database } from "better-sqlite3";
 import type { ScoreDecision, TweetCandidate, TweetMedia } from "../types";
+import { mediaWithoutEmojiImages } from "../tweetMedia";
 
 export interface TimelineTweetItem {
   id: number;
   source: "tweet" | "from test";
+  keyword?: string | null;
   text: string;
   tweetId: string;
   author: string | null;
@@ -17,6 +19,7 @@ export interface TimelineTweetItem {
   retweetCount: number;
   favoriteCount: number;
   score: number;
+  reasons: string[];
   media: TweetMedia[];
   likedAt: string | null;
   retweetedAt: string | null;
@@ -43,6 +46,7 @@ type TimelineTweetRow = {
   retweet_count: number;
   favorite_count: number;
   score: number;
+  reasons_json: string;
   media_json: string;
   urls_json: string;
   source_keyword: string | null;
@@ -64,7 +68,7 @@ export class TimelineTweetService {
 
   private saveAcceptedWithSource(keyword: string, tweet: TweetCandidate, decision: ScoreDecision, source: "tweet" | "test"): void {
     const urls = tweet.entities?.urls ?? [];
-    const media = tweet.entities?.media ?? [];
+    const media = mediaWithoutEmojiImages(tweet.entities?.media);
     const sourceKeyword = source === "test" ? `test:${keyword}` : keyword;
     this.database
       .prepare(`
@@ -140,7 +144,7 @@ export class TimelineTweetService {
       });
   }
 
-  latest(limit = 40, offset = 0): TimelineTweetItem[] {
+  latest(limit = 50, offset = 0): TimelineTweetItem[] {
     const safeLimit = Math.max(1, Math.min(limit, 200));
     const safeOffset = Math.max(0, Math.floor(offset));
     const rows = this.database
@@ -157,7 +161,7 @@ export class TimelineTweetService {
   }
 
   page(options: { limit?: number; offset?: number } = {}): TimelineTweetPage {
-    const limit = Math.max(1, Math.min(options.limit ?? 40, 200));
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
     const offset = Math.max(0, Math.floor(options.offset ?? 0));
     const total = this.count();
     const items = this.latest(limit, offset);
@@ -212,6 +216,7 @@ function mapTweetRow(row: TimelineTweetRow): TimelineTweetItem {
   return {
     id: row.rowid,
     source: row.source_keyword?.startsWith("test:") ? "from test" : "tweet",
+    keyword: displayKeyword(row.source_keyword),
     text: row.text,
     tweetId: row.tweet_id,
     author: row.author_handle,
@@ -225,11 +230,17 @@ function mapTweetRow(row: TimelineTweetRow): TimelineTweetItem {
     retweetCount: row.retweet_count,
     favoriteCount: row.favorite_count,
     score: row.score,
-    media: readJson<TweetMedia[]>(row.media_json, []),
+    reasons: readJson<string[]>(row.reasons_json, []),
+    media: mediaWithoutEmojiImages(readJson<TweetMedia[]>(row.media_json, [])),
     likedAt: row.liked_at,
     retweetedAt: row.retweeted_at,
     acceptedAt: row.accepted_at
   };
+}
+
+function displayKeyword(sourceKeyword: string | null): string | null {
+  if (!sourceKeyword) return null;
+  return sourceKeyword.startsWith("test:") ? sourceKeyword.slice("test:".length) : sourceKeyword;
 }
 
 function readJson<T>(value: string, fallback: T): T {

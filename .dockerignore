@@ -1,0 +1,12 @@
+node_modules
+dist
+runtime
+redqueenx.sqlite
+redqueenx.sqlite-*
+.env
+.git
+ops/vpn/*.auth
+ops/vpn/*.ovpn
+ops/vpn/*.conf
+!ops/vpn/README.md
+!ops/vpn/custom.conf.example

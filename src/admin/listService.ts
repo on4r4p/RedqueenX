@@ -1,6 +1,6 @@
 import type { Database } from "better-sqlite3";
 import { LIST_KINDS, type ListEntry, type ListKind } from "../types";
-import { normalizeHandle, normalizeValue } from "../text";
+import { isHandleSearchKeyword, normalizeHandle, normalizeValue } from "../text";
 
 type ListEntryRow = {
   id: number;
@@ -23,6 +23,21 @@ type DeduplicateRow = {
   handle_normalized: string | null;
   source_file: string | null;
 };
+
+export interface ListConsistencyCleanupResult {
+  duplicatesDeleted: number;
+  emptyDeleted: number;
+  keywordBannedWordsDeleted: number;
+  keywordBannedUsersDeleted: number;
+  followingBannedUsersDeleted: number;
+  friendBannedUsersDeleted: number;
+  staleBannedUsersDeleted: number;
+  skippedBannedUsersDeleted: number;
+  staleActiveKeywordsDeleted: number;
+  skippedActiveKeywordsDeleted: number;
+  skippedStaleUsersDeleted: number;
+  totalDeleted: number;
+}
 
 export function isListKind(value: string): value is ListKind {
   return (LIST_KINDS as readonly string[]).includes(value);
@@ -102,6 +117,21 @@ export class ListService {
     }
 
     return mapRow(row);
+  }
+
+  getById(kind: ListKind, id: number, includeDeleted = false): ListEntry | null {
+    const row = this.database
+      .prepare(`
+        SELECT *
+        FROM list_entries
+        WHERE id = ?
+          AND kind = ?
+          AND (? = 1 OR is_deleted = 0)
+        LIMIT 1
+      `)
+      .get(id, kind, includeDeleted ? 1 : 0) as ListEntryRow | undefined;
+
+    return row ? mapRow(row) : null;
   }
 
   list(kind: ListKind, includeDeleted = false): ListEntry[] {
@@ -286,6 +316,97 @@ export class ListService {
     return deleted;
   }
 
+  cleanupActiveInconsistencies(): ListConsistencyCleanupResult {
+    const result: ListConsistencyCleanupResult = {
+      duplicatesDeleted: 0,
+      emptyDeleted: 0,
+      keywordBannedWordsDeleted: 0,
+      keywordBannedUsersDeleted: 0,
+      followingBannedUsersDeleted: 0,
+      friendBannedUsersDeleted: 0,
+      staleBannedUsersDeleted: 0,
+      skippedBannedUsersDeleted: 0,
+      staleActiveKeywordsDeleted: 0,
+      skippedActiveKeywordsDeleted: 0,
+      skippedStaleUsersDeleted: 0,
+      totalDeleted: 0
+    };
+
+    for (const kind of editableListKinds) {
+      result.duplicatesDeleted += this.deduplicateActive(kind);
+    }
+
+    const transaction = this.database.transaction(() => {
+      const deleteEmpty = this.database.prepare(`
+        UPDATE list_entries
+        SET is_deleted = 1
+        WHERE kind = ?
+          AND is_deleted = 0
+          AND is_empty = 1
+      `);
+      for (const kind of editableListKinds) {
+        result.emptyDeleted += deleteEmpty.run(kind).changes;
+      }
+
+      const deleteKeywordByNormalized = this.database.prepare(`
+        UPDATE list_entries
+        SET is_deleted = 1
+        WHERE kind = 'keyword'
+          AND is_deleted = 0
+          AND normalized_value = ?
+      `);
+      const bannedWords = this.activeListRows("banned_word");
+      for (const bannedWord of bannedWords) {
+        result.keywordBannedWordsDeleted += deleteKeywordByNormalized.run(bannedWord.normalizedValue).changes;
+      }
+
+      const deleteByHandle = this.database.prepare(`
+        UPDATE list_entries
+        SET is_deleted = 1
+        WHERE kind = ?
+          AND is_deleted = 0
+          AND handle_normalized = ?
+      `);
+      const bannedUsers = this.activeListRows("banned_user").map((entry) => entry.handleNormalized).filter(Boolean) as string[];
+      for (const handle of bannedUsers) {
+        result.keywordBannedUsersDeleted += deleteKeywordByNormalized.run(`@${handle}`).changes;
+        result.followingBannedUsersDeleted += deleteByHandle.run("following", handle).changes;
+        result.friendBannedUsersDeleted += deleteByHandle.run("friend", handle).changes;
+        result.staleBannedUsersDeleted += deleteByHandle.run("stale_keyword_user", handle).changes;
+        result.skippedBannedUsersDeleted += deleteByHandle.run("skipped_keyword_user", handle).changes;
+      }
+
+      const activeKeywordHandles = this.activeListRows("keyword")
+        .filter((entry) => isHandleSearchKeyword(entry.rawValue))
+        .map((entry) => normalizeHandle(entry.rawValue))
+        .filter(Boolean) as string[];
+      for (const handle of activeKeywordHandles) {
+        result.staleActiveKeywordsDeleted += deleteByHandle.run("stale_keyword_user", handle).changes;
+        result.skippedActiveKeywordsDeleted += deleteByHandle.run("skipped_keyword_user", handle).changes;
+      }
+
+      const activeStaleHandles = this.activeListRows("stale_keyword_user").map((entry) => entry.handleNormalized).filter(Boolean) as string[];
+      for (const handle of activeStaleHandles) {
+        result.skippedStaleUsersDeleted += deleteByHandle.run("skipped_keyword_user", handle).changes;
+      }
+    });
+
+    transaction();
+    result.totalDeleted =
+      result.duplicatesDeleted +
+      result.emptyDeleted +
+      result.keywordBannedWordsDeleted +
+      result.keywordBannedUsersDeleted +
+      result.followingBannedUsersDeleted +
+      result.friendBannedUsersDeleted +
+      result.staleBannedUsersDeleted +
+      result.skippedBannedUsersDeleted +
+      result.staleActiveKeywordsDeleted +
+      result.skippedActiveKeywordsDeleted +
+      result.skippedStaleUsersDeleted;
+    return result;
+  }
+
   replaceImportedSource(sourceFile: string, kind: ListKind, values: string[], importedAt: string): number {
     return this.replaceImportedRecords(
       sourceFile,
@@ -390,9 +511,35 @@ export class ListService {
       `)
       .get({ kind, normalizedValue, handleNormalized, excludeId: excludeId ?? null }) as ListEntryRow | undefined;
   }
+
+  private activeListRows(kind: ListKind): ListEntry[] {
+    return (
+      this.database
+        .prepare(`
+          SELECT *
+          FROM list_entries
+          WHERE kind = ?
+            AND is_deleted = 0
+          ORDER BY id ASC
+        `)
+        .all(kind) as ListEntryRow[]
+    ).map(mapRow);
+  }
 }
 
-const handleKinds = new Set<ListKind>(["following", "friend", "banned_user"]);
+const handleKinds = new Set<ListKind>(["following", "friend", "banned_user", "stale_keyword_user", "skipped_keyword_user"]);
+const editableListKinds: ListKind[] = [
+  "keyword",
+  "following",
+  "friend",
+  "banned_user",
+  "banned_word",
+  "rss_feed",
+  "no_result",
+  "search_terms_used",
+  "stale_keyword_user",
+  "skipped_keyword_user"
+];
 
 function sourcePriority(sourceFile: string | null): number {
   if (!sourceFile) return 3;

@@ -3,6 +3,7 @@ const adminNavMore = document.getElementById("admin-nav-more");
 const metrics = document.getElementById("metrics");
 const countersUpdatedAt = document.getElementById("counters-updated-at");
 const runStatusLine = document.getElementById("run-status-line");
+const rawTimelineLinks = Array.from(document.querySelectorAll("[data-raw-timeline-link]"));
 const xSessionAlertHeader = document.getElementById("x-session-alert-header");
 const xSessionAlertTitle = document.getElementById("x-session-alert-title");
 const xSessionAlertDetail = document.getElementById("x-session-alert-detail");
@@ -26,6 +27,7 @@ const selectedEntryLine = document.getElementById("selected-entry-line");
 const saveSelectedButton = document.getElementById("save-selected-button");
 const deleteSelectedButton = document.getElementById("delete-selected-button");
 const clearSelectionButton = document.getElementById("clear-selection-button");
+const cleanupListsButton = document.getElementById("cleanup-lists-button");
 const activeListLabel = document.getElementById("active-list-label");
 const listSearch = document.getElementById("list-search");
 const listContent = document.getElementById("list-content");
@@ -38,8 +40,20 @@ const importFileDetail = document.getElementById("import-file-detail");
 const serverAccessForm = document.getElementById("server-access-form");
 const serverAccessCurrentIp = document.getElementById("server-access-current-ip");
 const scoringForm = document.getElementById("scoring-form");
+const generalSettingsForm = document.getElementById("general-settings-form");
+const staleKeywordUserDays = document.getElementById("stale-keyword-user-days");
+const staleKeywordUserStartIndex = document.getElementById("stale-keyword-user-start-index");
+const staleKeywordUserAutoIgnoreAlert = document.getElementById("stale-keyword-user-auto-ignore-alert");
+const staleKeywordUserMaxRetries = document.getElementById("stale-keyword-user-max-retries");
+const openStaleKeywordUsersButton = document.getElementById("open-stale-keyword-users-button");
+const openSkippedKeywordUsersButton = document.getElementById("open-skipped-keyword-users-button");
+const toggleInlineStaleKeywordUsersButton = document.getElementById("toggle-inline-stale-keyword-users-button");
+const pruneStaleKeywordUsersButton = document.getElementById("prune-stale-keyword-users-button");
+const stopStaleKeywordUsersButton = document.getElementById("stop-stale-keyword-users-button");
+const staleKeywordUserPruneResult = document.getElementById("stale-keyword-user-prune-result");
 const searchWithoutApiForm = document.getElementById("search-without-api-form");
 const searchWithoutApiControls = document.getElementById("search-without-api-controls");
+const dockerVpnOnlySettings = Array.from(document.querySelectorAll(".docker-vpn-only"));
 const openVpnProfileSelect = document.getElementById("openvpn-profile-select");
 const openVpnProfileDetail = document.getElementById("openvpn-profile-detail");
 const openVpnSettingsSaveButton = document.getElementById("openvpn-settings-save-button");
@@ -73,6 +87,7 @@ const sessionFilePath = document.getElementById("session-file-path");
 const sessionUpdatedAt = document.getElementById("session-updated-at");
 const sessionCurrentKeyword = document.getElementById("session-current-keyword");
 const sessionKeywordProgress = document.getElementById("session-keyword-progress");
+const sessionStalePruneStatus = document.getElementById("session-stale-prune-status");
 const sessionApiLeftLabel = document.getElementById("session-api-left-label");
 const sessionApiLeft = document.getElementById("session-api-left");
 const sessionAcceptedTweets = document.getElementById("session-accepted-tweets");
@@ -146,6 +161,7 @@ let openXSessionAlerts = [];
 let recentXSessionAlerts = [];
 let selectedXSessionAlertId = null;
 let currentRuntimeModes = {};
+let currentSessionStats = null;
 let listSearchTimer = null;
 let pathPickerState = { input: null, mode: "file", cwd: "", parent: null };
 let openVpnProfiles = [];
@@ -158,6 +174,11 @@ let sessionShouldStickBottom = true;
 let sessionNextResetAt = null;
 let sessionNextResetTimer = null;
 let statusLineTimer = null;
+let staleKeywordUserPrunePollTimer = null;
+let staleKeywordUserStartIndexTouched = false;
+let staleKeywordUserInlineListVisible = false;
+let staleKeywordUserInlineListTouched = false;
+let staleKeywordUserRemovedListVisible = false;
 const buttonFeedbackTimers = new WeakMap();
 const manualLoginPollTimers = new Map();
 const moreNavSectionIds = new Set(["tests", "database", "env"]);
@@ -190,6 +211,8 @@ const legacyKindByFilename = new Map([
   ["UpdateStatus.Call", "update_status_call"],
   ["Current.Session", "current_session"],
   ["SearchTerms.Used", "search_terms_used"],
+  ["Stale.Keyword.Users", "stale_keyword_user"],
+  ["Skipped.Keyword.Users", "skipped_keyword_user"],
   [".Session", "hidden_session"]
 ]);
 
@@ -204,12 +227,13 @@ const metricDefinitions = [
   ["no_result", "No.Result"],
   ["request_log", "Request.log"],
   ["search_terms_used", "SearchTerms.Used"],
+  ["stale_keyword_user", "Stale keyword users"],
+  ["skipped_keyword_user", "Skipped keyword users"],
   ["tweet_sent", "Tweets.Sent"],
   ["update_status_call", "UpdateStatus.Call"],
   ["text_sent", "Text.Sent"],
   ["total_api_call", "TotalApi.Call"],
-  ["current_session", "Current.Session", "raw"],
-  ["hidden_session", ".Session"]
+  ["current_session", "Current.Session", "raw"]
 ];
 
 const scoringNumberFields = [
@@ -225,7 +249,8 @@ const scoringNumberFields = [
   "maximumTweetAgeDays",
   "maximumHashtags",
   "maximumMentions",
-  "maximumTweetsByUser"
+  "maximumTweetsByUser",
+  "similarTweetTextThreshold"
 ];
 
 const scoringBooleanFields = [
@@ -242,7 +267,8 @@ const scoringBooleanFields = [
   "enableMaximumTweetAgeDays",
   "enableMaximumHashtags",
   "enableMaximumMentions",
-  "enableMaximumTweetsByUser"
+  "enableMaximumTweetsByUser",
+  "enableSimilarTweetText"
 ];
 
 const scoringCheckTargets = {
@@ -259,10 +285,33 @@ const scoringCheckTargets = {
   enableMaximumTweetAgeDays: "maximumTweetAgeDays",
   enableMaximumHashtags: "maximumHashtags",
   enableMaximumMentions: "maximumMentions",
-  enableMaximumTweetsByUser: "maximumTweetsByUser"
+  enableMaximumTweetsByUser: "maximumTweetsByUser",
+  enableSimilarTweetText: "similarTweetTextThreshold"
 };
 
 const serverAccessFields = ["whitelist", "blacklist"];
+
+const generalSettingsFields = [
+  "TIMELINE_DEFAULT_PAGE_SIZE",
+  "RAW_TIMELINE_ENABLED",
+  "RUN_CHAIN_COUNT",
+  "STALE_KEYWORD_USER_MAX_AGE_DAYS",
+  "STALE_KEYWORD_USER_START_INDEX",
+  "STALE_KEYWORD_USER_AUTO_IGNORE_ALERT",
+  "STALE_KEYWORD_USER_MAX_RETRIES",
+  "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT",
+  "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM",
+  "SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER",
+  "SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX",
+  "SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES",
+  "SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES",
+  "SEARCH_WITHOUT_API_MAX_SCROLLS",
+  "SEARCH_WITHOUT_API_SCROLL_DELAY_MS",
+  "SEARCH_WITHOUT_API_SCROLL_DELAY_MIN_MS",
+  "SEARCH_WITHOUT_API_SCROLL_DELAY_MAX_MS",
+  "SEARCH_WITHOUT_API_SCROLLS_MIN",
+  "SEARCH_WITHOUT_API_SCROLLS_MAX"
+];
 
 const xApiFields = [
   "X_API_ENABLED",
@@ -286,24 +335,14 @@ const xApiFields = [
 
 const searchWithoutApiFields = [
   "SEARCH_WITHOUT_API_ENABLED",
+  "SEARCH_WITHOUT_API_ISOLATION",
   "SEARCH_WITHOUT_API_PROFILE_DIR",
   "SEARCH_WITHOUT_API_START_URL",
-  "SEARCH_WITHOUT_API_MAX_SCROLLS",
-  "SEARCH_WITHOUT_API_SCROLL_DELAY_MS",
-  "SEARCH_WITHOUT_API_SCROLL_DELAY_MIN_MS",
-  "SEARCH_WITHOUT_API_SCROLL_DELAY_MAX_MS",
   "SEARCH_WITHOUT_API_SHOW_BROWSER_LOCAL",
   "SEARCH_WITHOUT_API_KEY_DELAY_MIN_MS",
   "SEARCH_WITHOUT_API_KEY_DELAY_MAX_MS",
   "SEARCH_WITHOUT_API_SEARCH_DELAY_MIN_SECONDS",
   "SEARCH_WITHOUT_API_SEARCH_DELAY_MAX_SECONDS",
-  "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT",
-  "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM",
-  "SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER",
-  "SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES",
-  "SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES",
-  "SEARCH_WITHOUT_API_SCROLLS_MIN",
-  "SEARCH_WITHOUT_API_SCROLLS_MAX",
   "SEARCH_WITHOUT_API_TWEET_HOVER_MIN_SECONDS",
   "SEARCH_WITHOUT_API_TWEET_HOVER_MAX_SECONDS",
   "SEARCH_WITHOUT_API_MOUSE_PROFILE",
@@ -315,6 +354,10 @@ const searchWithoutApiFields = [
   "SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB",
   "SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS",
   "SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS",
+  "DOCKER_X11_FORWARD_ENABLED",
+  "DOCKER_X11_HOST",
+  "DOCKER_X11_PORT",
+  "DOCKER_XAUTHORITY",
   "VPN_NETNS_NAME",
   "VPN_HOST_IFACE",
   "VPN_NETNS_CIDR",
@@ -398,9 +441,13 @@ const adminTooltipByName = {
   enableMaximumMentions: "Enable or disable the maximum mention rejection check.",
   maximumTweetsByUser: "Maximum accepted tweets allowed from the same author in one scoring window.",
   enableMaximumTweetsByUser: "Enable or disable the per-author tweet limit rejection check.",
+  similarTweetTextThreshold: "Reject a tweet when its token similarity with an already accepted tweet reaches this value. Default 0.52 catches close paraphrases.",
+  enableSimilarTweetText: "Enable or disable near-duplicate tweet text rejection.",
   whitelist: "IPv4 addresses or CIDR ranges allowed to access RedqueenX over HTTPS. Your current IP is kept allowed automatically unless blacklisted.",
   blacklist: "IPv4 addresses or CIDR ranges denied access to RedqueenX over HTTPS. Blacklist wins over whitelist.",
   SEARCH_WITHOUT_API_ENABLED: "Enable the future non-API search mode and stop X API search.",
+  SEARCH_WITHOUT_API_ISOLATION:
+    "host_netns keeps the existing Linux namespace helper flow. docker_vpn assigns runs to the Docker VPN worker and forbids admin netns script launches.",
   X_LOGIN_SKIP_NETWORK_PRECHECK: "Skip the X login API/CORS precheck before opening Chrome. Keep false unless manually troubleshooting a blocked login flow.",
   SEARCH_WITHOUT_API_PROFILE_DIR: "Local browser profile directory reserved for the future browser-based search mode.",
   SEARCH_WITHOUT_API_START_URL: "Starting URL reserved for the future browser-based search mode.",
@@ -415,11 +462,13 @@ const adminTooltipByName = {
   SEARCH_WITHOUT_API_SEARCH_DELAY_MIN_SECONDS: "Minimum random delay between two searches.",
   SEARCH_WITHOUT_API_SEARCH_DELAY_MAX_SECONDS: "Maximum random delay between two searches.",
   SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT:
-    "Maximum number of keywords searched in one without-API session. Use 0 to search every eligible keyword.",
+    "Maximum number of keywords searched in one session, for X API and without-API modes. Use 0 to search every eligible keyword.",
   SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM:
     "When true, each session randomly chooses a keyword count between 1 and the configured session limit.",
   SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER:
     "Shuffle eligible keywords before applying the session limit so each run does not always start with the same entries.",
+  SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX:
+    "Hard maximum number of keyword searches allowed before a pacing pause. The automatic limit is half of remaining session keywords, rounded up, capped by this value.",
   SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES: "Minimum random pause duration after the search limit is reached.",
   SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES: "Maximum random pause duration after the search limit is reached.",
   SEARCH_WITHOUT_API_SCROLLS_MIN: "Minimum random number of result-page scrolls per search.",
@@ -432,11 +481,29 @@ const adminTooltipByName = {
   SEARCH_WITHOUT_API_MEDIA_CACHE_ENABLED:
     "Allow the VPN namespace worker to download X media into the local cache. Keep false if you never want RedqueenX to request X media files.",
   SEARCH_WITHOUT_API_MEDIA_CACHE_DIR: "Directory where VPN-downloaded media files are stored temporarily.",
-  SEARCH_WITHOUT_API_MEDIA_CACHE_TTL_HOURS: "How long cached media remains usable before the timeline asks for a VPN reload.",
-  SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_MB: "Maximum total cache size. Oldest cached files are removed when this limit is exceeded.",
+  SEARCH_WITHOUT_API_MEDIA_CACHE_TTL_HOURS:
+    "How long cached media remains usable before the timeline asks for a VPN reload. Use 0 to keep cached media indefinitely.",
+  SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_MB:
+    "Maximum total cache size. Oldest cached files are removed when this limit is exceeded. Use 0 for unlimited total size.",
   SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB: "Maximum size accepted for a single downloaded image or video.",
   SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS: "Minimum delay between two media downloads in the VPN worker.",
   SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS: "Maximum delay between two media downloads in the VPN worker.",
+  DOCKER_X11_FORWARD_ENABLED: "Enable only for temporary docker compose run x-login sessions launched from an SSH X-forwarded host shell.",
+  DOCKER_X11_HOST: "Host or bridge IP that the x-login container uses to reach the SSH X forwarding proxy.",
+  DOCKER_X11_PORT: "TCP port for the SSH X forwarding proxy. Display :10 normally maps to port 6010.",
+  DOCKER_XAUTHORITY: "Temporary xauth file generated by ops/docker/x11-bridge.sh and mounted into the x-login container.",
+  TIMELINE_DEFAULT_PAGE_SIZE: "Default number of tweets shown per page on Timeline and Rejected Timeline when the URL has no limit parameter.",
+  RUN_CHAIN_COUNT:
+    "Number of runs launched sequentially from Start. Chaining stops if a run fails, pauses for session verification, or no eligible keyword remains.",
+  STALE_KEYWORD_USER_MAX_AGE_DAYS:
+    "Saved default threshold for Keyword users cleanup. @keywords are removed when the latest visible tweet is older than this many days.",
+  STALE_KEYWORD_USER_START_INDEX:
+    "Saved 1-based active keyword user index used when starting Keyword users cleanup.",
+  STALE_KEYWORD_USER_AUTO_IGNORE_ALERT:
+    "When Keyword users cleanup is stopped by an X session alert, mark that alert ignored automatically and retry the cleanup once.",
+  STALE_KEYWORD_USER_MAX_RETRIES:
+    "Maximum number of times Keyword users cleanup can restart after an X session alert. The control is active only when Ignore alerts is enabled.",
+  RAW_TIMELINE_ENABLED: "Enable rejected timeline capture and the Rejected Timeline page. Disable it to stop saving every DOM-visible tweet.",
   VPN_NETNS_NAME: "Linux network namespace name used by the browser crawler.",
   VPN_HOST_IFACE: "Host network interface used before OpenVPN connects. Leave empty for auto-detection.",
   VPN_NETNS_CIDR: "Private IPv4 subnet used between the host and the namespace.",
@@ -498,6 +565,16 @@ const adminTooltipById = {
   "save-selected-button": "Save changes to the selected list entry.",
   "delete-selected-button": "Delete the selected list entry from active use.",
   "clear-selection-button": "Clear the selected row and return to add mode.",
+  "cleanup-lists-button":
+    "Clean editable lists: remove duplicates, empty rows, keywords blocked by bans, and stale/skipped user conflicts.",
+  "stale-keyword-user-days": "Remove @keywords when the latest visible tweet from that user is older than this many days.",
+  "stale-keyword-user-start-index": "Start checking @keywords at this 1-based position in the planned user list. Use the estimated value after an interrupted cleanup.",
+  "stale-keyword-user-max-retries": "Maximum restart attempts after X session alerts during Keyword users cleanup. Used only in browser-session mode.",
+  "open-stale-keyword-users-button": "Open the list of @keywords removed by stale user cleanup.",
+  "toggle-inline-stale-keyword-users-button": "Show or hide the stale keyword users preview in this section.",
+  "open-skipped-keyword-users-button": "Open the list of @keywords skipped by stale user cleanup, with the recorded reason.",
+  "prune-stale-keyword-users-button": "Start inactive users check: stop the active run, check @keywords through the active search mode, and move inactive users to Stale keyword users.",
+  "stop-stale-keyword-users-button": "Stop the active inactive users check and keep the progress already written to the report.",
   "reset-x-counters-button": "Reset local X request counters without clearing estimated spend.",
   "reset-x-budget-button": "Reset today's local X budget usage.",
   "openvpn-profile-select": "Select one imported OpenVPN profile. The config path, remote host, port, and protocol are filled from that profile.",
@@ -651,9 +728,14 @@ function helpForElement(element) {
   if (element.dataset?.adminSectionTarget && adminTooltipBySection[element.dataset.adminSectionTarget]) {
     return adminTooltipBySection[element.dataset.adminSectionTarget];
   }
+  if (element.dataset?.settingsSection !== undefined) {
+    const legend = element.closest(".settings-subsection")?.querySelector("legend")?.textContent?.trim();
+    return legend ? `Save only the ${legend} section.` : "Save only this settings section.";
+  }
   if (element.matches?.('button[type="submit"]')) {
     const formId = element.closest("form")?.id;
     if (formId === "scoring-form") return "Save scoring constants and apply them immediately.";
+    if (formId === "general-settings-form") return "Save general timeline and search pacing settings.";
     if (formId === "search-without-api-form") return "Save Search without Api settings and apply mode changes immediately.";
     if (formId === "x-api-form") return "Save X API settings and apply mode changes immediately.";
     if (formId === "env-form") return "Save .env variables and restart the server when configured.";
@@ -1257,7 +1339,7 @@ async function refreshStats() {
           : listCounts[kind] || 0;
       const renderedValue =
         display === "raw"
-          ? `<strong class="metric-text">${escapeHtml(value === undefined ? "No session" : value || "(empty line)")}</strong>`
+          ? `<strong>${escapeHtml(value === undefined ? "No session" : value || "(empty line)")}</strong>`
           : `<strong>${value}</strong>`;
       return `<div class="metric"><span>${label}</span>${renderedValue}</div>`;
     })
@@ -1265,7 +1347,7 @@ async function refreshStats() {
   if (countersUpdatedAt) {
     countersUpdatedAt.textContent = `Updated ${new Date().toLocaleString()}`;
   }
-  renderRunStatus(data.currentRun);
+  renderRunStatus(data.currentRun, data.staleKeywordUserPrune);
 }
 
 function renderXBudgetMetrics(budget, runtimeModes = {}) {
@@ -1297,33 +1379,15 @@ function renderXBudgetMetrics(budget, runtimeModes = {}) {
 
 function renderSearchWithoutApiMetrics(stats) {
   if (!stats?.enabled) return "";
+  const noResultSaved = stats.noResultKeywords ?? 0;
+  const noResultExcluded = stats.excludedNoResultKeywords ?? 0;
   return `
-    <div class="metric"><span>Search without API status</span><strong class="metric-text">${escapeHtml(stats.status || "configured")}</strong></div>
-    <div class="metric"><span>Browser sessions</span><strong>${stats.browserSessions ?? 0}</strong></div>
-    <div class="metric"><span>Captured tweets</span><strong>${stats.capturedTweets ?? 0}</strong></div>
-    <div class="metric"><span>Accepted without API</span><strong>${stats.acceptedTweets ?? 0}</strong></div>
-    <div class="metric"><span>Rejected without API</span><strong>${stats.rejectedTweets ?? 0}</strong></div>
-    <div class="metric"><span>Type delay / char</span><strong class="metric-text">${stats.keyDelayMinMs} - ${stats.keyDelayMaxMs} ms</strong></div>
-    <div class="metric"><span>Delay between searches</span><strong class="metric-text">${stats.searchDelayMinSeconds} - ${stats.searchDelayMaxSeconds} s</strong></div>
-    <div class="metric"><span>Keywords per session</span><strong class="metric-text">${formatSessionKeywordLimit(stats)}</strong></div>
-    <div class="metric"><span>Keyword order</span><strong class="metric-text">${stats.randomizeKeywordOrder ? "randomized" : "list order"}</strong></div>
+    <div class="metric"><span>Keywords per session</span><strong>${formatSessionKeywordLimit(stats)}</strong></div>
     <div class="metric"><span>Total active keywords</span><strong>${stats.keywordTotal ?? 0}</strong></div>
-    <div class="metric"><span>No.Result entries</span><strong>${stats.noResultKeywords ?? 0}</strong></div>
+    <div class="metric"><span>No.Result exclusions</span><strong class="metric-text">${noResultExcluded} active / ${noResultSaved} saved</strong></div>
     <div class="metric"><span>SearchTerms.Used entries</span><strong>${stats.searchTermsUsedKeywords ?? stats.searchedKeywords ?? 0}</strong></div>
-    <div class="metric"><span>Keywords excluded by No.Result</span><strong>${stats.excludedNoResultKeywords ?? 0}</strong></div>
     <div class="metric"><span>Keywords already searched</span><strong>${stats.excludedAlreadySearchedKeywords ?? 0}</strong></div>
-    <div class="metric"><span>Real keywords remaining</span><strong class="metric-text">${formatAvailableKeywordFormula(stats)}</strong></div>
     <div class="metric"><span>Available keywords now</span><strong>${stats.availableKeywords ?? 0}</strong></div>
-    <div class="metric"><span>Searches before pause</span><strong class="metric-text">session keywords / 2</strong></div>
-    <div class="metric"><span>Pause duration</span><strong class="metric-text">${stats.pauseMinMinutes} - ${stats.pauseMaxMinutes} min</strong></div>
-    <div class="metric"><span>Result scrolls</span><strong class="metric-text">${stats.scrollsMin} - ${stats.scrollsMax}</strong></div>
-    <div class="metric"><span>Tweet hover time</span><strong class="metric-text">${stats.tweetHoverMinSeconds} - ${stats.tweetHoverMaxSeconds} s</strong></div>
-    <div class="metric"><span>Mouse profile</span><strong class="metric-text">${escapeHtml(stats.mouseProfile || "smooth1")}</strong></div>
-    <div class="metric"><span>Network namespace</span><strong class="metric-text">${escapeHtml(stats.netnsName || "redqueenx-vpn")}</strong></div>
-    <div class="metric"><span>OpenVPN endpoint</span><strong class="metric-text">${escapeHtml(formatVpnEndpoint(stats))}</strong></div>
-    <div class="metric"><span>Host IPv4 leak check</span><strong class="metric-text">${stats.vpnCheckHostIpv4Leak ? "true" : "false"}</strong></div>
-    <div class="metric"><span>IPv6 leak check</span><strong class="metric-text">${stats.vpnCheckIpv6 ? "true" : "false"}</strong></div>
-    <div class="metric"><span>Strict diagnostics</span><strong class="metric-text">${stats.diagnosticStrict ? "true" : "false"}</strong></div>
   `;
 }
 
@@ -1331,19 +1395,6 @@ function formatSessionKeywordLimit(stats) {
   const limit = Number(stats?.sessionKeywordLimit ?? 0);
   if (!limit) return "all eligible";
   return stats?.sessionKeywordLimitRandom ? `random 1 - ${limit}` : String(limit);
-}
-
-function formatAvailableKeywordFormula(stats) {
-  const total = stats.keywordTotal ?? 0;
-  const noResult = stats.excludedNoResultKeywords ?? 0;
-  const searched = stats.excludedAlreadySearchedKeywords ?? 0;
-  const available = stats.availableKeywords ?? 0;
-  return `${available} = ${total} - ${noResult} - ${searched}`;
-}
-
-function formatVpnEndpoint(stats) {
-  if (!stats?.vpnRemoteHost) return "not set";
-  return `${stats.vpnRemoteHost}:${stats.vpnRemotePort || 1194}/${stats.vpnRemoteProto || "udp"}`;
 }
 
 async function refreshOpenVpnProfiles(activePath = null) {
@@ -1512,7 +1563,19 @@ function renderXBrowserAccountDetail(account, vpnProfilePath = currentVpnProfile
   const linked = linkedCount > 1 ? ` Linked VPN profiles: ${linkedCount}.` : ` Linked VPN profile: ${account.vpnProfilePath}.`;
   const lock = account.openAlert ? ` LOCKED by alert #${account.openAlert.id}: ${account.openAlert.alertType}.` : "";
   xBrowserAccountDetail.textContent = `${account.sessionStatus} - ${session}.${linked}${lastLogin}${ip}${lock}`;
-  xBrowserLoginCommand.textContent = `npm run netns:x-login -- --account-id ${account.id}`;
+  xBrowserLoginCommand.textContent = xLoginCommand(account.id);
+}
+
+function currentSearchIsolation() {
+  return searchWithoutApiForm.elements.SEARCH_WITHOUT_API_ISOLATION?.value || "host_netns";
+}
+
+function xLoginCommand(accountId, extraArgs = "") {
+  const base =
+    currentSearchIsolation() === "docker_vpn"
+      ? `docker compose run --rm x-login --account-id ${accountId}`
+      : `npm run netns:x-login -- --account-id ${accountId}`;
+  return extraArgs ? `${base} ${extraArgs}` : base;
 }
 
 function currentVpnProfilePath() {
@@ -1719,6 +1782,25 @@ function appendListRows(entries) {
     .map((entry) => {
       const value = entry.rawValue || "(empty line)";
       const line = entry.lineNumber ? `line ${entry.lineNumber}` : `#${entry.id}`;
+      if (entry.kind === "stale_keyword_user") {
+        return `<div class="list-row list-row-with-actions" data-entry-id="${entry.id}" data-entry-kind="${entry.kind}" data-entry-value="${encodeURIComponent(entry.rawValue)}">
+          <button class="list-row-main" type="button" title="Select this list entry so it can be edited or deleted.">
+            <code>${escapeHtml(value)}</code>
+            <span>${line}</span>
+          </button>
+          <button class="list-row-action secondary-button" type="button" data-restore-stale-keyword-user="${entry.id}" title="Move this user back into Keywords and remove it from Stale keyword users.">Re-enable</button>
+        </div>`;
+      }
+      if (entry.kind === "skipped_keyword_user") {
+        const reason = skippedKeywordUserReason(entry);
+        return `<div class="list-row list-row-with-actions" data-entry-id="${entry.id}" data-entry-kind="${entry.kind}" data-entry-value="${encodeURIComponent(entry.rawValue)}">
+          <button class="list-row-main" type="button" title="Select this skipped user entry so it can be edited or deleted.">
+            <code>${escapeHtml(value)}</code>
+            <span>${escapeHtml(reason || line)}</span>
+          </button>
+          <button class="list-row-action secondary-button" type="button" data-move-skipped-keyword-user-to-stale="${entry.id}" title="Move this skipped user into Stale keyword users and remove it from Keywords.">Move to stale</button>
+        </div>`;
+      }
       return `<button class="list-row" type="button" data-entry-id="${entry.id}" data-entry-kind="${entry.kind}" data-entry-value="${encodeURIComponent(entry.rawValue)}" title="Select this list entry so it can be edited or deleted.">
         <code>${escapeHtml(value)}</code>
         <span>${line}</span>
@@ -1767,6 +1849,97 @@ function clearSelection() {
   clearSelectionButton.disabled = true;
 }
 
+async function restoreStaleKeywordUser(entryId, button) {
+  const result = await jsonFetch(`/admin/lists/stale_keyword_user/${encodeURIComponent(entryId)}/restore-keyword`, {
+    method: "POST"
+  });
+  if (!result) return;
+  showButtonFeedback(button, "Restored.");
+  await refreshStats();
+  if (activeAdminSection() === "lists") {
+    await refreshList();
+  }
+  if (activeAdminSection() !== "lists") {
+    await refreshStaleKeywordUserPruneStatus();
+  }
+}
+
+async function moveSkippedKeywordUserToStale(entryId, button) {
+  const result = await jsonFetch(`/admin/lists/skipped_keyword_user/${encodeURIComponent(entryId)}/move-to-stale`, {
+    method: "POST"
+  });
+  if (!result) return;
+  showButtonFeedback(button, "Moved.");
+  await refreshStats();
+  if (activeAdminSection() === "lists") {
+    await refreshList();
+  }
+  if (activeAdminSection() !== "lists") {
+    await refreshStaleKeywordUserPruneStatus();
+  }
+}
+
+async function openStaleKeywordUsersList() {
+  showAdminSection("lists");
+  editKind.value = "stale_keyword_user";
+  listSearch.value = "";
+  await refreshStats();
+  await refreshList();
+}
+
+async function openSkippedKeywordUsersList() {
+  showAdminSection("lists");
+  editKind.value = "skipped_keyword_user";
+  listSearch.value = "";
+  await refreshStats();
+  await refreshList();
+}
+
+function skippedKeywordUserReason(entry) {
+  const source = String(entry?.sourceFile || "");
+  return source.startsWith("reason:") ? source.slice("reason:".length) : "";
+}
+
+function formatListCleanupSummary(result) {
+  const labels = [
+    ["duplicatesDeleted", "duplicates"],
+    ["emptyDeleted", "empty"],
+    ["keywordBannedWordsDeleted", "keyword/banned words"],
+    ["keywordBannedUsersDeleted", "keyword/banned users"],
+    ["followingBannedUsersDeleted", "following/banned users"],
+    ["friendBannedUsersDeleted", "friends/banned users"],
+    ["staleBannedUsersDeleted", "stale/banned users"],
+    ["skippedBannedUsersDeleted", "skipped/banned users"],
+    ["staleActiveKeywordsDeleted", "stale/active keywords"],
+    ["skippedActiveKeywordsDeleted", "skipped/active keywords"],
+    ["skippedStaleUsersDeleted", "skipped/stale users"]
+  ];
+  const parts = labels
+    .map(([key, label]) => [Number(result?.[key] ?? 0), label])
+    .filter(([count]) => count > 0)
+    .map(([count, label]) => `${count} ${label}`);
+  const total = Number(result?.totalDeleted ?? 0);
+  return `List cleanup: ${total} removed${parts.length ? ` (${parts.join(", ")})` : ""}.`;
+}
+
+async function cleanupLists() {
+  if (!window.confirm("Clean duplicate entries, empty rows, and known conflicts between editable lists?")) {
+    return;
+  }
+  if (cleanupListsButton) cleanupListsButton.disabled = true;
+  try {
+    const result = await jsonFetch("/admin/lists/maintenance/cleanup", { method: "POST" });
+    if (!result) return;
+    setStatus(formatListCleanupSummary(result));
+    showButtonFeedback(cleanupListsButton, "Cleaned.");
+    clearSelection();
+    await refreshStats();
+    await refreshList();
+  } finally {
+    if (cleanupListsButton) cleanupListsButton.disabled = false;
+  }
+}
+
 function showAdminSection(sectionId) {
   document.querySelectorAll("[data-admin-section-target]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.adminSectionTarget === sectionId);
@@ -1781,6 +1954,12 @@ function showAdminSection(sectionId) {
   document.querySelectorAll(".admin-section").forEach((section) => {
     section.classList.toggle("is-active", section.id === `admin-section-${sectionId}`);
   });
+  if (window.location.hash !== `#${sectionId}`) {
+    window.history.replaceState(null, "", `#${sectionId}`);
+  }
+  if (sectionId === "settings") {
+    refreshStaleKeywordUserPruneStatus().catch((error) => setStatus(error.message));
+  }
 }
 
 function activeAdminSection() {
@@ -1796,8 +1975,50 @@ async function openCurrentSessionSection() {
   await refreshSessionKeywords();
 }
 
-function renderRunStatus(run) {
+async function openCurrentSessionForLiveFollow() {
+  showAdminSection("session");
+  if (sessionAutoRefresh) {
+    sessionAutoRefresh.checked = true;
+  }
+  if (sessionStickBottom) {
+    sessionStickBottom.checked = true;
+    sessionShouldStickBottom = true;
+  }
+  updateSessionPolling();
+  document.getElementById("admin-section-session")?.scrollIntoView({ block: "start" });
+  await refreshCurrentSession();
+}
+
+function isActiveRun(run) {
+  return run?.status === "running" || run?.status === "paused";
+}
+
+function formatStaleKeywordUserPruneRunLabel(status) {
+  if (!status?.running || !status.job) {
+    return "";
+  }
+  const job = status.job;
+  const report = job.report;
+  const modeLabel = (report?.mode ?? job.mode) === "x_api" ? "X API" : "browser";
+  const total = Number(report?.totalCandidates ?? 0);
+  const processed = Number(report?.processedCandidates ?? 0);
+  const remaining = Math.max(0, total - processed);
+  const progress =
+    Number.isFinite(total) && total > 0
+      ? `${processed}/${total} checked, ${remaining} @ remaining`
+      : "waiting for first update";
+  return `Inactive users check (${modeLabel}) - ${progress}`;
+}
+
+function renderRunStatus(run, staleKeywordUserPrune) {
   if (!runStatusLine) return;
+  if (!isActiveRun(run)) {
+    const pruneLabel = formatStaleKeywordUserPruneRunLabel(staleKeywordUserPrune);
+    if (pruneLabel) {
+      runStatusLine.textContent = pruneLabel;
+      return;
+    }
+  }
   if (!run) {
     runStatusLine.textContent = "No active run.";
     return;
@@ -1860,10 +2081,22 @@ function renderXSessionAlertHeader() {
 
 function formatXSessionAlertCommands(alert) {
   if (!alert) return "";
+  if (currentSearchIsolation() === "docker_vpn") {
+    return [
+      "Terminal fallback:",
+      "  ops/docker/x11-bridge.sh",
+      `  ${xLoginCommand(alert.accountId, "--resolve-alert --auto-save-on-login --hold-open-after-save")}`,
+      "  docker compose exec worker npm run diagnose:vpn",
+      "  docker compose up -d worker",
+      "",
+      "Admin button:",
+      "  Docker mode does not mount the Docker socket in admin. Launch visible X login shows this command instead of starting a process."
+    ].join("\n");
+  }
   return [
     "Terminal fallback:",
     "  npm run setup:local",
-    `  npm run netns:x-login -- --account-id ${alert.accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`,
+    `  ${xLoginCommand(alert.accountId, "--resolve-alert --auto-save-on-login --hold-open-after-save")}`,
     "  npm run netns:diagnose",
     "  npm run netns:worker",
     "",
@@ -1887,7 +2120,7 @@ async function resolveSelectedXSessionAlert() {
 }
 
 async function resolveXSessionAlert(alertId, note, feedbackTarget, noteElement) {
-  if (note.length < 3) {
+  if (note.length < 1) {
     setStatus("Resolution note required before unlocking this X account.");
     noteElement?.focus();
     return;
@@ -1953,12 +2186,18 @@ async function maybeOfferResumeInterruptedRun(options = {}) {
 
 async function launchXSessionAlertLogin(alertId, feedbackTarget) {
   if (!alertId) return;
-  updateManualLoginStatus(alertId, "Launching visible Chrome through the VPN namespace...");
+  updateManualLoginStatus(alertId, "Preparing visible X login...");
   const result = await jsonFetch(`/admin/x-session-alerts/${encodeURIComponent(alertId)}/manual-login`, {
     method: "POST",
     body: JSON.stringify({})
   });
   if (!result) return;
+  if (result.manualRequired) {
+    showButtonFeedback(feedbackTarget, "Use command.");
+    setStatus(result.message || "Run the displayed x-login command from the host shell.");
+    await refreshCurrentSession();
+    return;
+  }
   const message = result.alreadyRunning
     ? `Visible X login is already running for ${result.alert?.xIdentifier || "this alert"}.`
     : `Visible X login launched for ${result.alert?.xIdentifier || "this alert"}.`;
@@ -2108,9 +2347,10 @@ function renderSelectedSessionAlert(alert) {
   }
   selectedXSessionAlertId = alert.id;
   const resolved = alert.status !== "open";
+  const alertStateLabel = alert.status === "ignored" ? "Ignored X Session Alert" : resolved ? "Resolved X Session Alert" : "Open X Session Alert";
   sessionAlertDetail.innerHTML = `
     <div class="session-alert-card${resolved ? " is-resolved" : ""}">
-      <p class="alert-kicker">${resolved ? "Resolved X Session Alert" : "Open X Session Alert"}</p>
+      <p class="alert-kicker">${alertStateLabel}</p>
       <h2>${escapeHtml(alert.xIdentifier)}</h2>
       <p><strong>Message:</strong> ${escapeHtml(alert.message)}</p>
       <p><strong>Recommendation:</strong> ${escapeHtml(alert.recommendation)}</p>
@@ -2226,7 +2466,7 @@ function formatAlertDate(value) {
 async function refreshCurrentSession() {
   const previousScrollTop = sessionLog.scrollTop;
   const params = new URLSearchParams({
-    limit: "250",
+    limit: "5000",
     level: currentSessionLevel(),
     includeAdminPolling: sessionIncludeAdminPolling.checked ? "true" : "false",
     includeTweetContent: sessionTweetContent.checked ? "true" : "false",
@@ -2242,16 +2482,18 @@ async function refreshCurrentSession() {
 
   const run = data.currentRun;
   const stats = parseRunStats(run?.statsJson);
-  renderRunStatus(run);
+  renderRunStatus(run, data.staleKeywordUserPrune);
   applySessionModeLabels(data.runtimeModes);
-  sessionRunStatus.textContent = run ? `${run.status} - ${run.id}` : "No active run";
+  const pruneRunLabel = !isActiveRun(run) ? formatStaleKeywordUserPruneRunLabel(data.staleKeywordUserPrune) : "";
+  sessionRunStatus.textContent = pruneRunLabel || (run ? `${run.status} - ${run.id}` : "No active run");
   sessionFilePath.textContent = data.session.filePath;
   sessionUpdatedAt.textContent = data.session.updatedAt
     ? new Date(data.session.updatedAt).toLocaleString()
     : "Never";
   sessionCurrentKeyword.textContent = currentKeywordLabel(run, stats);
   sessionKeywordProgress.textContent = formatSessionKeywordProgress(stats, data.runtimeModes);
-  sessionApiLeft.textContent = formatSearchesBeforePause(stats, data.runtimeModes);
+  renderSessionStaleKeywordUserPrune(data.staleKeywordUserPrune);
+  currentSessionStats = stats;
   sessionAcceptedTweets.textContent = `${stats.acceptedTweets} OK / ${stats.rejectedTweets} rejected`;
   setSessionNextReset(stats.nextApiResetAt, data.runtimeModes);
   sessionLog.textContent = data.session.lines.length
@@ -2264,16 +2506,76 @@ async function refreshCurrentSession() {
   }
 }
 
+function renderSessionStaleKeywordUserPrune(status) {
+  const running = Boolean(status?.running);
+  if (pruneStaleKeywordUsersButton) pruneStaleKeywordUsersButton.disabled = running;
+  if (stopStaleKeywordUsersButton) stopStaleKeywordUsersButton.disabled = false;
+  if (!sessionStalePruneStatus) return;
+  const job = status?.job;
+  if (!job) {
+    sessionStalePruneStatus.textContent = "-";
+    sessionStalePruneStatus.removeAttribute("title");
+    return;
+  }
+  const report = job.report;
+  const total = Number(report?.totalCandidates ?? 0);
+  const processed = Number(report?.processedCandidates ?? 0);
+  const remaining = Math.max(0, total - processed);
+  const removed = report?.removedUsers?.length ?? 0;
+  const kept = report?.keptUsers?.length ?? 0;
+  const skipped = report?.skippedUsers?.length ?? 0;
+  const deleted = report?.deletedUsers?.length ?? 0;
+  const state = report?.status ?? job.status ?? "running";
+  const age = Number(job.maxAgeDays ?? report?.maxAgeDays ?? 0);
+  const ageLabel = Number.isFinite(age) && age > 0 ? `>${age}d` : "";
+  const mode = report?.mode ?? job.mode ?? (currentRuntimeModes.searchWithoutApiEnabled ? "without_api" : "x_api");
+  const modeLabel = mode === "x_api" ? " x_api" : " browser";
+  const retryLabel = mode === "without_api" && job.autoIgnoreAlert ? " auto-ignore" : "";
+  const startIndex = Number(job.startIndex ?? report?.startIndex ?? 1);
+  const estimatedChecked = Number(job.estimatedCheckedUsers ?? 0);
+  const suggestedStartIndex = Number(job.suggestedStartIndex ?? 1);
+  const startLabel = Number.isFinite(startIndex) && startIndex > 1 ? `, start index ${startIndex}` : "";
+  const estimateLabel =
+    Number.isFinite(estimatedChecked) && estimatedChecked > 0
+      ? `, estimated checked ${estimatedChecked}, next index ${suggestedStartIndex}`
+      : "";
+  const nextLabel = Number.isFinite(suggestedStartIndex) && suggestedStartIndex > 1 ? `next ${suggestedStartIndex}` : "";
+  const shortParts = [
+    state,
+    ageLabel,
+    modeLabel.trim(),
+    retryLabel,
+    total > 0 ? `${processed}/${total} checked` : "waiting",
+    remaining > 0 ? `${remaining} left` : "",
+    nextLabel
+  ].filter(Boolean);
+  const fullStatus = `${state} ${ageLabel}${modeLabel}${retryLabel ? ` ${retryLabel}` : ""}${startLabel}${estimateLabel} - ${processed}/${total} checked, ${remaining} left, ${removed} removed this run, ${deleted} keyword removed, ${kept} kept, ${skipped} skipped`;
+  if (!report && state === "running") {
+    sessionStalePruneStatus.textContent = shortParts.join(" - ");
+    sessionStalePruneStatus.title = `running ${ageLabel}${modeLabel}${retryLabel ? ` ${retryLabel}` : ""}${startLabel}${estimateLabel} - waiting for first update`;
+    return;
+  }
+  sessionStalePruneStatus.textContent = shortParts.join(" - ");
+  sessionStalePruneStatus.title = fullStatus;
+}
+
 function setSessionNextReset(value, runtimeModes = {}) {
   sessionNextResetAt = value ? Date.parse(value) : null;
-  renderSessionNextReset(runtimeModes);
+  renderSessionTimers(runtimeModes);
   if (sessionNextResetTimer) {
     clearInterval(sessionNextResetTimer);
     sessionNextResetTimer = null;
   }
   if (sessionNextResetAt && Number.isFinite(sessionNextResetAt)) {
-    sessionNextResetTimer = setInterval(() => renderSessionNextReset(currentRuntimeModes), 1000);
+    sessionNextResetTimer = setInterval(() => renderSessionTimers(currentRuntimeModes), 1000);
   }
+}
+
+function renderSessionTimers(runtimeModes = currentRuntimeModes) {
+  if (sessionApiLeft && currentSessionStats) {
+    sessionApiLeft.textContent = formatSearchesBeforePause(currentSessionStats, runtimeModes);
+  }
+  renderSessionNextReset(runtimeModes);
 }
 
 function renderSessionNextReset(runtimeModes = currentRuntimeModes) {
@@ -2516,30 +2818,25 @@ function formatSearchesBeforePause(stats, runtimeModes = {}) {
   const completedInWindow = Math.max(0, Number(stats.apiCallsUsed ?? 0));
   const limit = Math.min(Math.max(0, Number(stats.apiCallLimit ?? 0)), remainingKeywords + completedInWindow);
   const remaining = Math.min(Math.max(0, Number(stats.apiCallsRemaining ?? 0)), limit);
+  if (remaining <= 0 && stats.nextApiResetAt) {
+    const resetAt = Date.parse(stats.nextApiResetAt);
+    if (Number.isFinite(resetAt)) {
+      const remainingMs = resetAt - Date.now();
+      return remainingMs > 0 ? `${remaining} / ${limit} - pause ${formatShortCountdown(remainingMs)}` : `${remaining} / ${limit} - resuming`;
+    }
+  }
   return `${remaining} / ${limit}`;
 }
 
-function formatSessionKeywordProgress(stats, runtimeModes = {}) {
-  const base = `${stats.completedKeywords} / ${stats.totalKeywords} (${stats.remainingKeywords} remaining)`;
-  if (!runtimeModes.searchWithoutApiEnabled) {
-    return base;
-  }
-  const details = [formatRunKeywordSessionPlan(stats)];
-  if (stats.availableKeywords !== null && stats.availableKeywords !== undefined && Number.isFinite(Number(stats.availableKeywords))) {
-    details.push(`${stats.availableKeywords} available`);
-  }
-  return `${base} - ${details.join(" - ")}`;
+function formatShortCountdown(remainingMs) {
+  const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const restSeconds = seconds % 60;
+  return `${minutes}:${String(restSeconds).padStart(2, "0")}`;
 }
 
-function formatRunKeywordSessionPlan(stats) {
-  const limit = Number(stats?.sessionKeywordLimit ?? 0);
-  if (!limit) {
-    return "Keywords per session: all eligible";
-  }
-  if (stats?.sessionKeywordLimitRandom) {
-    return `Keywords per session: ${limit}; Random keyword count: on; picked ${stats.totalKeywords}`;
-  }
-  return `Keywords per session: ${limit}; Random keyword count: off`;
+function formatSessionKeywordProgress(stats) {
+  return `${stats.completedKeywords} / ${stats.totalKeywords} (${stats.remainingKeywords} remaining)`;
 }
 
 function currentKeywordLabel(run, stats) {
@@ -2742,6 +3039,7 @@ async function refreshXApiSettings() {
   if (!data) return;
 
   writeXApiForm(data.values);
+  writeGeneralSettingsForm(data.values);
   writeSearchWithoutApiForm(data.values);
   applyRuntimeModeUi();
   await refreshOpenVpnProfiles(data.values?.VPN_CONFIG);
@@ -2781,6 +3079,37 @@ function writeSearchWithoutApiForm(values) {
       }
     }
   }
+  applyRawTimelineUi(values);
+  applyIsolationBackendUi();
+}
+
+function writeGeneralSettingsForm(values) {
+  for (const field of generalSettingsFields) {
+    if (generalSettingsForm.elements[field]) {
+      if (generalSettingsForm.elements[field].type === "checkbox") {
+        generalSettingsForm.elements[field].checked = values[field] === "true";
+      } else {
+        generalSettingsForm.elements[field].value = values[field] ?? "";
+      }
+    }
+  }
+  applyRawTimelineUi(values);
+  syncStaleKeywordUserRetryControls();
+}
+
+function applyRawTimelineUi(values) {
+  const rawTimelineEnabled = values?.RAW_TIMELINE_ENABLED !== "false";
+  rawTimelineLinks.forEach((link) => {
+    link.hidden = !rawTimelineEnabled;
+  });
+}
+
+function syncStaleKeywordUserRetryControls() {
+  const enabled = Boolean(staleKeywordUserAutoIgnoreAlert?.checked);
+  if (staleKeywordUserMaxRetries) {
+    staleKeywordUserMaxRetries.disabled = !enabled;
+  }
+  document.getElementById("stale-keyword-user-max-retries-label")?.classList.toggle("is-check-disabled", !enabled);
 }
 
 function writeServerAccessForm(config, currentIp) {
@@ -2830,29 +3159,42 @@ function readEnvForm() {
   return { values };
 }
 
-function readXApiForm() {
+function scopedSettingsFields(form, fields, submitter) {
+  if (!submitter?.dataset?.settingsSection) return fields;
+  const scope = submitter.closest(".settings-subsection") || form;
+  const scopedNames = new Set(
+    Array.from(scope.querySelectorAll("[name]"))
+      .map((element) => element.name)
+      .filter(Boolean)
+  );
+  return fields.filter((field) => scopedNames.has(field));
+}
+
+function readSettingsValues(form, fields, submitter) {
   const values = {};
-  for (const field of xApiFields) {
-    if (xApiForm.elements[field]) {
+  for (const field of scopedSettingsFields(form, fields, submitter)) {
+    if (form.elements[field]) {
       values[field] =
-        xApiForm.elements[field].type === "checkbox"
-          ? String(xApiForm.elements[field].checked)
-          : xApiForm.elements[field].value;
+        form.elements[field].type === "checkbox"
+          ? String(form.elements[field].checked)
+          : form.elements[field].value;
     }
   }
+  return values;
+}
+
+function readXApiForm(submitter) {
+  const values = readSettingsValues(xApiForm, xApiFields, submitter);
   return { values };
 }
 
-function readSearchWithoutApiForm() {
-  const values = {};
-  for (const field of searchWithoutApiFields) {
-    if (searchWithoutApiForm.elements[field]) {
-      values[field] =
-        searchWithoutApiForm.elements[field].type === "checkbox"
-          ? String(searchWithoutApiForm.elements[field].checked)
-          : searchWithoutApiForm.elements[field].value;
-    }
-  }
+function readSearchWithoutApiForm(submitter) {
+  const values = readSettingsValues(searchWithoutApiForm, searchWithoutApiFields, submitter);
+  return { values };
+}
+
+function readGeneralSettingsForm(submitter) {
+  const values = readSettingsValues(generalSettingsForm, generalSettingsFields, submitter);
   return { values };
 }
 
@@ -2888,6 +3230,17 @@ function applyRuntimeModeUi() {
   if (searchWithoutApiControls) {
     searchWithoutApiControls.disabled = !normalizedSearchWithoutApiEnabled;
   }
+  applyIsolationBackendUi();
+}
+
+function applyIsolationBackendUi() {
+  const isDockerVpn = currentSearchIsolation() === "docker_vpn";
+  dockerVpnOnlySettings.forEach((container) => {
+    container.classList.toggle("is-hidden", !isDockerVpn);
+    for (const field of container.querySelectorAll("input, select, textarea, button")) {
+      field.disabled = !isDockerVpn;
+    }
+  });
 }
 
 async function saveRuntimeModeSettings(values, statusMessage, feedbackTarget = null) {
@@ -2897,6 +3250,7 @@ async function saveRuntimeModeSettings(values, statusMessage, feedbackTarget = n
   });
   if (!result) return null;
   writeXApiForm(result.values ?? {});
+  writeGeneralSettingsForm(result.values ?? {});
   writeSearchWithoutApiForm(result.values ?? {});
   applyRuntimeModeUi();
   if (statusMessage) {
@@ -3007,6 +3361,329 @@ async function runAction(action) {
   }
 }
 
+async function startStaleKeywordUserPrune() {
+  const maxAgeDays = Number(staleKeywordUserDays?.value);
+  if (!Number.isFinite(maxAgeDays) || maxAgeDays <= 0) {
+    setStatus("Enter a positive number of days before checking @keywords.");
+    return;
+  }
+  const startIndex = Number(staleKeywordUserStartIndex?.value || 1);
+  if (!Number.isFinite(startIndex) || startIndex < 1) {
+    setStatus("Enter a positive start index before checking @keywords.");
+    return;
+  }
+  const maxRetries = Number(staleKeywordUserMaxRetries?.value || 0);
+  if (!Number.isFinite(maxRetries) || maxRetries < 0) {
+    setStatus("Enter a positive max retry value before checking @keywords.");
+    return;
+  }
+  const autoIgnoreAlert = Boolean(staleKeywordUserAutoIgnoreAlert?.checked);
+  const usesBrowserMode = Boolean(currentRuntimeModes.searchWithoutApiEnabled);
+  const cleanupModeLabel = usesBrowserMode ? "X browser session" : "X API";
+  const confirmed = window.confirm(
+    [
+      `This cleanup checks every keyword that starts with @ through ${cleanupModeLabel}.`,
+      `It will start from user index ${Math.floor(startIndex)}.`,
+      "If a run is currently active, it will be stopped before the cleanup starts.",
+      "Each user check uses random 1-5 second pauses between actions.",
+      usesBrowserMode
+        ? autoIgnoreAlert
+          ? `Ignore alerts is enabled: X session alerts raised by this cleanup will be marked ignored automatically and the cleanup can retry up to ${Math.floor(
+              maxRetries
+            )} time(s).`
+          : "If X raises a session alert, resolve it manually to continue this cleanup."
+        : "In X API mode this cleanup does not depend on an X browser session, so alert retries are not used.",
+      "",
+      "Continue?"
+    ].join("\n")
+  );
+  if (!confirmed) return;
+
+  pruneStaleKeywordUsersButton.disabled = true;
+  staleKeywordUserStartIndexTouched = false;
+  setStatus("Starting stale @keyword cleanup...");
+  const result = await jsonFetch("/admin/keyword-users/prune-stale", {
+    method: "POST",
+    body: JSON.stringify({
+      maxAgeDays,
+      startIndex: Math.floor(startIndex),
+      autoIgnoreAlert,
+      maxRetries: Math.floor(maxRetries)
+    })
+  });
+  if (stopStaleKeywordUsersButton) stopStaleKeywordUsersButton.disabled = false;
+  staleKeywordUserInlineListVisible = true;
+  staleKeywordUserInlineListTouched = false;
+  staleKeywordUserRemovedListVisible = false;
+  syncInlineStaleKeywordUsersToggle();
+  renderStaleKeywordUserPruneStatus(result);
+  pollStaleKeywordUserPruneStatusSoon();
+}
+
+async function stopStaleKeywordUserPrune() {
+  if (!stopStaleKeywordUsersButton) return;
+  stopStaleKeywordUsersButton.disabled = true;
+  setStatus("Stopping stale @keyword cleanup...");
+  const result = await jsonFetch("/admin/keyword-users/prune-stale/stop", { method: "POST" });
+  renderStaleKeywordUserPruneStatus(result.job ?? result);
+  await refreshStats();
+  if (listState.kind === "keyword" || listState.kind === "stale_keyword_user" || listState.kind === "skipped_keyword_user") {
+    await refreshList();
+  }
+}
+
+async function refreshStaleKeywordUserPruneStatus() {
+  const result = await jsonFetch("/admin/keyword-users/prune-stale/current");
+  renderStaleKeywordUserPruneStatus(result);
+  if (!result?.job) {
+    if (pruneStaleKeywordUsersButton) {
+      pruneStaleKeywordUsersButton.disabled = false;
+    }
+    if (stopStaleKeywordUsersButton) {
+      stopStaleKeywordUsersButton.disabled = false;
+    }
+    return;
+  }
+  if (result?.running) {
+    if (stopStaleKeywordUsersButton) {
+      stopStaleKeywordUsersButton.disabled = false;
+    }
+    pollStaleKeywordUserPruneStatusSoon();
+    return;
+  }
+  if (shouldPollForStaleKeywordUserAutoRestart(result)) {
+    pollStaleKeywordUserPruneStatusSoon();
+    return;
+  }
+  if (pruneStaleKeywordUsersButton) {
+    pruneStaleKeywordUsersButton.disabled = false;
+  }
+  if (stopStaleKeywordUsersButton) {
+    stopStaleKeywordUsersButton.disabled = false;
+  }
+  await refreshStats();
+  if (listState.kind === "keyword" || listState.kind === "stale_keyword_user") {
+    await refreshList();
+  }
+}
+
+function shouldPollForStaleKeywordUserAutoRestart(result) {
+  const job = result?.job;
+  if (!job || job.status !== "failed" || !job.autoIgnoreAlert || !job.blockedByAlertId) {
+    return false;
+  }
+  const restartCount = Number(job.restartCount ?? 0);
+  const maxRetries = Number(job.maxRetries ?? 0);
+  return Number.isFinite(restartCount) && Number.isFinite(maxRetries) && restartCount < maxRetries;
+}
+
+function pollStaleKeywordUserPruneStatusSoon() {
+  if (staleKeywordUserPrunePollTimer) {
+    clearTimeout(staleKeywordUserPrunePollTimer);
+  }
+  staleKeywordUserPrunePollTimer = setTimeout(() => {
+    refreshStaleKeywordUserPruneStatus().catch((error) => {
+      if (pruneStaleKeywordUsersButton) pruneStaleKeywordUsersButton.disabled = false;
+      if (stopStaleKeywordUsersButton) stopStaleKeywordUsersButton.disabled = false;
+      setStatus(error.message);
+    });
+  }, 2500);
+}
+
+function renderStaleKeywordUserPruneStatus(result) {
+  if (typeof result?.running !== "boolean" && typeof result?.job?.running === "boolean") {
+    result = result.job;
+  }
+  const running = Boolean(result?.running);
+  if (pruneStaleKeywordUsersButton) pruneStaleKeywordUsersButton.disabled = running;
+  if (stopStaleKeywordUsersButton) stopStaleKeywordUsersButton.disabled = false;
+  if (!staleKeywordUserPruneResult) return;
+  const job = result?.job;
+  if (job && !staleKeywordUserInlineListTouched) {
+    staleKeywordUserInlineListVisible = true;
+  }
+  syncInlineStaleKeywordUsersToggle();
+  const staleUsersList = staleKeywordUserInlineListVisible ? renderInlineStaleKeywordUsers(result?.staleUsers) : "";
+  const statusEstimate = staleKeywordUserPruneEstimate(result, job);
+  maybeApplyStaleKeywordUserSuggestedStartIndex(statusEstimate.suggestedStartIndex);
+  const estimateLine = renderStaleKeywordUserEstimateLine(statusEstimate);
+  if (!job) {
+    staleKeywordUserPruneResult.innerHTML =
+      estimateLine || staleUsersList ? `<div class="job-result-summary">${estimateLine}${staleUsersList}</div>` : "";
+    return;
+  }
+  const report = job.report;
+  const total = report?.totalCandidates ?? 0;
+  const processed = report?.processedCandidates ?? 0;
+  const remaining = Math.max(0, total - processed);
+  const removed = report?.removedUsers?.length ?? 0;
+  const deleted = report?.deletedUsers?.length ?? 0;
+  const kept = report?.keptUsers?.length ?? 0;
+  const skipped = report?.skippedUsers?.length ?? 0;
+  const status = report?.status ?? job.status;
+  const mode = report?.mode ?? job.mode ?? (currentRuntimeModes.searchWithoutApiEnabled ? "without_api" : "x_api");
+  const modeLabel = mode === "x_api" ? "X API" : "browser session";
+  const autoIgnoreLabel = mode === "without_api" && job.autoIgnoreAlert ? " - auto-ignore alerts" : "";
+  const maxRetries = Number(job.maxRetries ?? 0);
+  const restartCount = Number(job.restartCount ?? 0);
+  const staleUsersTotal = Number(result?.staleUsers?.total ?? 0);
+  const startIndex = Number(job.startIndex ?? report?.startIndex ?? 1);
+  const skippedBeforeStartIndex = Number(job.skippedBeforeStartIndex ?? report?.skippedBeforeStartIndex ?? 0);
+  const stoppedRun = job.stoppedRun ? `<p>Stopped run: <code>${escapeHtml(job.stoppedRun.id)}</code></p>` : "";
+  const error = job.error ? `<p class="status-problem">${escapeHtml(job.error)}</p>` : "";
+  const progress = renderStaleKeywordUserProgress({ processed, total, remaining });
+  const startIndexLine =
+    startIndex > 1 || skippedBeforeStartIndex > 0
+      ? `<p>Start index: <code>${escapeHtml(startIndex)}</code> (${escapeHtml(skippedBeforeStartIndex)} skipped before start).</p>`
+      : "";
+  const removedListHidden = staleKeywordUserRemovedListVisible ? "" : " hidden";
+  const removedList =
+    removed > 0
+      ? `<div class="stale-prune-removed" data-stale-prune-removed-list${removedListHidden}>
+          ${report.removedUsers
+            .map(
+              (user) =>
+                `<div class="stale-prune-user"><code>${escapeHtml(user.keyword)}</code><span>${escapeHtml(
+                  formatRemovedKeywordUserDetail(user)
+                )}</span></div>`
+            )
+            .join("")}
+        </div>`
+      : "";
+  const showRemovedButton =
+    removed > 0
+      ? `<button type="button" class="secondary-button" data-stale-prune-toggle>${staleKeywordUserRemovedListVisible ? "Hide removed users" : "Show removed users"}</button>`
+      : "";
+  const retryLine =
+    mode === "without_api"
+      ? `<p>Alert retries: <strong>${escapeHtml(restartCount)}</strong>/<strong>${escapeHtml(maxRetries)}</strong></p>`
+      : `<p>Alert retries: <strong>n/a</strong> in X API mode.</p>`;
+  staleKeywordUserPruneResult.innerHTML = `
+    <div class="job-result-summary">
+      ${progress}
+      <p>Mode: <strong>${escapeHtml(modeLabel)}</strong></p>
+      <p>Status: <strong>${escapeHtml(status)}</strong>${escapeHtml(autoIgnoreLabel)} - ${processed}/${total} checked - <strong>${remaining}</strong> @ remaining - ${removed} removed this run - ${deleted} keyword removed - ${kept} kept - ${skipped} skipped</p>
+      <p>Stale list total: <strong>${escapeHtml(staleUsersTotal)}</strong></p>
+      ${retryLine}
+      ${startIndexLine}
+      ${estimateLine}
+      ${stoppedRun}
+      ${error}
+      <div class="button-row">${showRemovedButton}</div>
+      ${removedList}
+      ${staleUsersList}
+    </div>`;
+  if (status !== "running") {
+    const message =
+      status === "completed"
+        ? `Stale @keyword cleanup completed: ${removed} stale, ${deleted} keyword removed, ${kept} kept, ${skipped} skipped.`
+        : status === "stopped"
+          ? `Stale @keyword cleanup stopped: ${removed} stale, ${deleted} keyword removed, ${kept} kept, ${skipped} skipped.`
+          : `Stale @keyword cleanup failed: ${job.error || "unknown error"}`;
+    setStatus(message);
+  }
+}
+
+function staleKeywordUserPruneEstimate(result, job) {
+  return {
+    checkedUsers: Number(result?.estimates?.checkedUsers ?? job?.estimatedCheckedUsers ?? 0),
+    suggestedStartIndex: Number(result?.estimates?.suggestedStartIndex ?? job?.suggestedStartIndex ?? 1)
+  };
+}
+
+function maybeApplyStaleKeywordUserSuggestedStartIndex(suggestedStartIndex) {
+  const currentStartIndex = Number(staleKeywordUserStartIndex?.value || 1);
+  if (
+    staleKeywordUserStartIndex &&
+    Number.isFinite(suggestedStartIndex) &&
+    suggestedStartIndex > 1 &&
+    (!Number.isFinite(currentStartIndex) || suggestedStartIndex > currentStartIndex) &&
+    !staleKeywordUserStartIndexTouched
+  ) {
+    staleKeywordUserStartIndex.value = String(suggestedStartIndex);
+  }
+}
+
+function renderStaleKeywordUserEstimateLine(estimate) {
+  if (!Number.isFinite(estimate.checkedUsers) || estimate.checkedUsers <= 0) {
+    return "";
+  }
+  return `<p>Estimated already checked: <strong>${escapeHtml(estimate.checkedUsers)}</strong>. Suggested active-list start index: <code>${escapeHtml(
+    estimate.suggestedStartIndex
+  )}</code>.</p>`;
+}
+
+function syncInlineStaleKeywordUsersToggle() {
+  if (!toggleInlineStaleKeywordUsersButton) return;
+  toggleInlineStaleKeywordUsersButton.textContent = staleKeywordUserInlineListVisible ? "Hide stale users" : "Show stale users";
+  toggleInlineStaleKeywordUsersButton.setAttribute("aria-expanded", staleKeywordUserInlineListVisible ? "true" : "false");
+}
+
+function renderStaleKeywordUserProgress({ processed, total, remaining }) {
+  const safeTotal = Math.max(0, Number(total) || 0);
+  const safeProcessed = Math.max(0, Math.min(Number(processed) || 0, safeTotal || Number(processed) || 0));
+  const max = Math.max(safeTotal, 1);
+  const value = Math.min(safeProcessed, max);
+  const percent = safeTotal > 0 ? Math.round((safeProcessed / safeTotal) * 100) : 0;
+  return `
+    <div class="stale-prune-progress">
+      <div class="stale-prune-progress-head">
+        <span>Progress</span>
+        <strong>${escapeHtml(percent)}%</strong>
+      </div>
+      <progress max="${escapeAttribute(max)}" value="${escapeAttribute(value)}"></progress>
+      <div class="stale-prune-progress-meta">
+        <span>${escapeHtml(safeProcessed)}/${escapeHtml(safeTotal)} checked</span>
+        <span><strong>${escapeHtml(remaining)}</strong> @ remaining</span>
+      </div>
+    </div>`;
+}
+
+function formatRemovedKeywordUserDetail(user) {
+  if (user?.reason === "protected_posts") {
+    return "protected posts";
+  }
+  const date = user?.latestTweetCreatedAt || "unknown date";
+  const age = user?.ageDays ?? "?";
+  return `${date} - ${age} days`;
+}
+
+function renderInlineStaleKeywordUsers(staleUsers) {
+  const entries = Array.isArray(staleUsers?.entries) ? staleUsers.entries : [];
+  const total = Number(staleUsers?.total ?? entries.length);
+  const shown = entries.length;
+  const summary =
+    total > shown
+      ? `Stale users (${shown}/${total} shown)`
+      : `Stale users (${total})`;
+  const rows = entries.length
+    ? entries
+        .map((entry) => {
+          const value = entry.rawValue || "(empty line)";
+          const date = formatAlertDate(entry.importedAt || entry.createdAt);
+          return `<div class="stale-prune-user stale-prune-user-inline">
+            <code>${escapeHtml(value)}</code>
+            <span>${escapeHtml(date)}</span>
+            <button class="list-row-action secondary-button" type="button" data-stale-inline-restore="${escapeAttribute(
+              entry.id
+            )}">Re-enable</button>
+          </div>`;
+        })
+        .join("")
+    : '<p class="stale-prune-empty">No stale keyword users.</p>';
+  const more = staleUsers?.hasMore ? '<p class="stale-prune-empty">Open stale users list to see the full list.</p>' : "";
+  return `
+    <div class="stale-keyword-users-inline">
+      <div class="stale-keyword-users-inline-head">
+        <strong>${escapeHtml(summary)}</strong>
+      </div>
+      <div class="stale-keyword-users-inline-list">
+        ${rows}
+      </div>
+      ${more}
+    </div>`;
+}
+
 document.getElementById("list-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitter = event.submitter;
@@ -3042,6 +3719,10 @@ document.getElementById("list-form").addEventListener("submit", async (event) =>
   await refreshList();
 });
 
+cleanupListsButton?.addEventListener("click", () => {
+  cleanupLists().catch((error) => setStatus(error.message));
+});
+
 scoringForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitter = event.submitter;
@@ -3057,11 +3738,19 @@ scoringBooleanFields.forEach((field) => {
   scoringForm.elements[field]?.addEventListener("change", applyScoringCheckUi);
 });
 
+generalSettingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const submitter = event.submitter;
+  const payload = readGeneralSettingsForm(submitter);
+  const result = await saveRuntimeModeSettings(payload.values, "Saved.", submitter);
+  if (!result) return;
+});
+
 xApiForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitter = event.submitter;
-  const payload = readXApiForm();
-  if (payload.values.X_API_ENABLED === "true") {
+  const payload = readXApiForm(submitter);
+  if (Object.hasOwn(payload.values, "X_API_ENABLED") && payload.values.X_API_ENABLED === "true") {
     payload.values.SEARCH_WITHOUT_API_ENABLED = "false";
   }
   const result = await saveRuntimeModeSettings(payload.values, "Saved.", submitter);
@@ -3071,8 +3760,8 @@ xApiForm.addEventListener("submit", async (event) => {
 searchWithoutApiForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitter = event.submitter;
-  const payload = readSearchWithoutApiForm();
-  if (payload.values.SEARCH_WITHOUT_API_ENABLED === "true") {
+  const payload = readSearchWithoutApiForm(submitter);
+  if (Object.hasOwn(payload.values, "SEARCH_WITHOUT_API_ENABLED") && payload.values.SEARCH_WITHOUT_API_ENABLED === "true") {
     payload.values.X_API_ENABLED = "false";
   }
   const result = await saveRuntimeModeSettings(
@@ -3113,6 +3802,15 @@ searchWithoutApiForm.elements.SEARCH_WITHOUT_API_ENABLED.addEventListener("chang
       ? "Search without Api enabled. X API search was disabled and any active X run was stopped."
       : "Search without Api disabled."
   ).catch((error) => setStatus(error.message));
+});
+
+searchWithoutApiForm.elements.SEARCH_WITHOUT_API_ISOLATION?.addEventListener("change", () => {
+  applyIsolationBackendUi();
+  renderXBrowserAccountPanel(currentVpnProfilePath());
+  if (selectedXSessionAlertId) {
+    const alert = xSessionAlerts.find((item) => String(item.id) === String(selectedXSessionAlertId));
+    if (alert) renderXSessionAlertDetail(alert);
+  }
 });
 
 openVpnProfileSelect?.addEventListener("change", () => {
@@ -3419,6 +4117,22 @@ clearSelectionButton.addEventListener("click", () => {
   clearSelection();
 });
 listContent.addEventListener("click", (event) => {
+  const restoreButton = event.target.closest("[data-restore-stale-keyword-user]");
+  if (restoreButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    restoreStaleKeywordUser(restoreButton.dataset.restoreStaleKeywordUser, restoreButton).catch((error) => setStatus(error.message));
+    return;
+  }
+  const moveSkippedButton = event.target.closest("[data-move-skipped-keyword-user-to-stale]");
+  if (moveSkippedButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    moveSkippedKeywordUserToStale(moveSkippedButton.dataset.moveSkippedKeywordUserToStale, moveSkippedButton).catch((error) =>
+      setStatus(error.message)
+    );
+    return;
+  }
   const row = event.target.closest(".list-row");
   if (row) {
     selectEntry(row);
@@ -3443,10 +4157,71 @@ serverAccessForm.addEventListener("submit", async (event) => {
   showButtonFeedback(submitter, "Saved.");
 });
 
+pruneStaleKeywordUsersButton?.addEventListener("click", () => {
+  startStaleKeywordUserPrune().catch((error) => {
+    setStatus(error.message);
+    refreshStaleKeywordUserPruneStatus().catch((refreshError) => {
+      if (pruneStaleKeywordUsersButton) pruneStaleKeywordUsersButton.disabled = false;
+      if (stopStaleKeywordUsersButton) stopStaleKeywordUsersButton.disabled = false;
+      setStatus(refreshError.message);
+    });
+  });
+});
+
+stopStaleKeywordUsersButton?.addEventListener("click", () => {
+  stopStaleKeywordUserPrune().catch((error) => {
+    setStatus(error.message);
+    refreshStaleKeywordUserPruneStatus().catch((refreshError) => setStatus(refreshError.message));
+  });
+});
+
+openStaleKeywordUsersButton?.addEventListener("click", () => {
+  openStaleKeywordUsersList().catch((error) => setStatus(error.message));
+});
+
+toggleInlineStaleKeywordUsersButton?.addEventListener("click", () => {
+  staleKeywordUserInlineListVisible = !staleKeywordUserInlineListVisible;
+  staleKeywordUserInlineListTouched = true;
+  syncInlineStaleKeywordUsersToggle();
+  refreshStaleKeywordUserPruneStatus().catch((error) => setStatus(error.message));
+});
+
+openSkippedKeywordUsersButton?.addEventListener("click", () => {
+  openSkippedKeywordUsersList().catch((error) => setStatus(error.message));
+});
+
+staleKeywordUserStartIndex?.addEventListener("input", () => {
+  staleKeywordUserStartIndexTouched = true;
+});
+
+staleKeywordUserAutoIgnoreAlert?.addEventListener("change", syncStaleKeywordUserRetryControls);
+
+staleKeywordUserPruneResult?.addEventListener("click", (event) => {
+  const restore = event.target.closest("[data-stale-inline-restore]");
+  if (restore) {
+    restoreStaleKeywordUser(restore.dataset.staleInlineRestore, restore).catch((error) => setStatus(error.message));
+    return;
+  }
+  const toggle = event.target.closest("[data-stale-prune-toggle]");
+  if (!toggle) return;
+  const list = staleKeywordUserPruneResult.querySelector("[data-stale-prune-removed-list]");
+  if (!list) return;
+  staleKeywordUserRemovedListVisible = !staleKeywordUserRemovedListVisible;
+  list.hidden = !staleKeywordUserRemovedListVisible;
+  toggle.textContent = staleKeywordUserRemovedListVisible ? "Hide removed users" : "Show removed users";
+});
+
+const initialAdminSection = window.location.hash.replace("#", "");
+if (initialAdminSection && document.getElementById(`admin-section-${initialAdminSection}`)) {
+  showAdminSection(initialAdminSection);
+  updateSessionPolling();
+}
+
 refreshStats()
   .then(refreshServerAccessSettings)
   .then(refreshScoringSettings)
   .then(refreshXApiSettings)
+  .then(refreshStaleKeywordUserPruneStatus)
   .then(refreshEnvSettings)
   .then(refreshList)
   .catch((error) => setStatus(error.message));

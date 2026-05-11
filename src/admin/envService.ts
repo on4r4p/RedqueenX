@@ -11,6 +11,7 @@ export const envKeys = [
   "CURRENT_SESSION_FILE",
   "X_API_ENABLED",
   "SEARCH_WITHOUT_API_ENABLED",
+  "SEARCH_WITHOUT_API_ISOLATION",
   "X_LOGIN_SKIP_NETWORK_PRECHECK",
   "SEARCH_WITHOUT_API_PROFILE_DIR",
   "SEARCH_WITHOUT_API_START_URL",
@@ -44,6 +45,17 @@ export const envKeys = [
   "SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB",
   "SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS",
   "SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS",
+  "TIMELINE_DEFAULT_PAGE_SIZE",
+  "RUN_CHAIN_COUNT",
+  "STALE_KEYWORD_USER_MAX_AGE_DAYS",
+  "STALE_KEYWORD_USER_START_INDEX",
+  "STALE_KEYWORD_USER_AUTO_IGNORE_ALERT",
+  "STALE_KEYWORD_USER_MAX_RETRIES",
+  "RAW_TIMELINE_ENABLED",
+  "DOCKER_X11_FORWARD_ENABLED",
+  "DOCKER_X11_HOST",
+  "DOCKER_X11_PORT",
+  "DOCKER_XAUTHORITY",
   "VPN_NETNS_NAME",
   "VPN_HOST_IFACE",
   "VPN_NETNS_CIDR",
@@ -89,7 +101,7 @@ export const envKeys = [
 export type EnvKey = (typeof envKeys)[number];
 
 export const envUpdateSchema = z.object({
-  values: z.partialRecord(z.enum(envKeys), z.string())
+  values: z.partialRecord(z.enum(envKeys), z.string().max(10_000))
 });
 
 export class EnvService {

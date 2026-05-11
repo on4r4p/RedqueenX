@@ -6,10 +6,12 @@ import {
   detectManualVerificationFromState,
   extractHashtags,
   extractMentions,
+  sameManualVerificationDetection,
   snapshotToTweetCandidate,
   visibleTweetExtractorSource
 } from "../src/worker/browserSearch";
 import { nextMouseProfile } from "../src/worker/humanPacing";
+import { isEmojiMediaUrl } from "../src/tweetMedia";
 
 describe("browser search helpers", () => {
   it("builds one-keyword X Latest web search URLs without OR grouping", () => {
@@ -36,10 +38,19 @@ describe("browser search helpers", () => {
       authorHandle: "@alice",
       authorName: "Alice",
       avatarUrl: "https://pbs.twimg.com/profile_images/avatar.jpg",
+      lang: "es-MX",
       createdAt: "2026-05-04T10:00:00.000Z",
       retweetCount: 12,
       favoriteCount: 34,
-      media: [{ type: "photo", url: "https://pbs.twimg.com/media/a.jpg" }]
+      media: [
+        {
+          type: "photo",
+          url: "https://abs-0.twimg.com/emoji/v2/svg/1f447.svg",
+          previewImageUrl: "https://abs-0.twimg.com/emoji/v2/svg/1f447.svg",
+          altText: "👇"
+        },
+        { type: "photo", url: "https://pbs.twimg.com/media/a.jpg" }
+      ]
     });
 
     expect(tweet).toMatchObject({
@@ -47,6 +58,7 @@ describe("browser search helpers", () => {
       text: expect.stringContaining("Exploit writeup"),
       retweetCount: 12,
       favoriteCount: 34,
+      lang: "es",
       user: {
         screenName: "@alice",
         name: "Alice",
@@ -57,7 +69,15 @@ describe("browser search helpers", () => {
     expect(tweet.entities?.hashtags).toEqual(["infosec"]);
     expect(tweet.entities?.mentions).toEqual(["researcher"]);
     expect(tweet.entities?.urls).toEqual(["https://example.test"]);
+    expect(tweet.entities?.media).toHaveLength(1);
     expect(tweet.entities?.media?.[0]?.url).toBe("https://pbs.twimg.com/media/a.jpg");
+  });
+
+  it("recognizes X emoji image URLs without treating normal media as emoji", () => {
+    expect(isEmojiMediaUrl("https://abs-0.twimg.com/emoji/v2/svg/1f447.svg")).toBe(true);
+    expect(isEmojiMediaUrl("https://abs.twimg.com/emoji/v2/72x72/1f447.png")).toBe(true);
+    expect(isEmojiMediaUrl("https://pbs.twimg.com/media/real-photo.jpg")).toBe(false);
+    expect(isEmojiMediaUrl("https://abs.twimg.com/hashflags/test-image.png")).toBe(false);
   });
 
   it("keeps the browser DOM extractor valid as standalone page JavaScript", () => {
@@ -99,6 +119,47 @@ describe("browser search helpers", () => {
     ).toBeNull();
   });
 
+  it("does not treat technical 2FA feature flags as a visible two-factor prompt", () => {
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search",
+        visibleText: "To view keyboard shortcuts, press question mark",
+        nonTweetVisibleText:
+          'To view keyboard shortcuts window.__INITIAL_STATE__ {"2fa_temporary_password_enabled":false,"verification_code_feature_enabled":true}',
+        articleCount: 0,
+        tweetTextCount: 0
+      })
+    ).toBeNull();
+  });
+
+  it("classifies X blocking pages before technical 2FA substrings", () => {
+    const detected = detectManualVerificationFromState({
+      url: "https://x.com/search",
+      visibleText: "Something went wrong. Try reloading.",
+      nonTweetVisibleText:
+        'Something went wrong. Try reloading. window.__INITIAL_STATE__ {"2fa_temporary_password_enabled":false,"verification_code_feature_enabled":true}',
+      articleCount: 0,
+      tweetTextCount: 0
+    });
+
+    expect(detected).toMatchObject({ type: "x_blocked" });
+  });
+
+  it("does not treat sidebar news mentioning 2FA as an X two-factor prompt", () => {
+    const text =
+      "To view keyboard shortcuts, press question mark Home Explore Top Latest People Media Lists Search filters Advanced search Today’s News Google Threat Intelligence Group identifies first AI-generated zero-day exploit bypassing 2FA in popular open-source web administration tool 3 hours ago · News · 1,027 posts Terms of Service Privacy Policy";
+
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search?q=from%3Amy_name_is_fer&src=typed_query&f=live",
+        visibleText: text,
+        nonTweetVisibleText: text,
+        articleCount: 0,
+        tweetTextCount: 0
+      })
+    ).toBeNull();
+  });
+
   it("does not trigger manual verification from technical detector substrings", () => {
     expect(
       detectManualVerificationFromState({
@@ -124,7 +185,32 @@ describe("browser search helpers", () => {
     ).toBeNull();
   });
 
-  it("does not create a manual verification alert from a recoverable X search result error", () => {
+  it("does not create a CAPTCHA alert from reCAPTCHA mentioned in X news/sidebar text", () => {
+    const text = [
+      "To view keyboard shortcuts, press question mark",
+      "Home",
+      "Explore",
+      "Top",
+      "Latest",
+      "Search filters",
+      "Advanced search",
+      "Today's News",
+      "Google's Cloud Fraud Defense reCAPTCHA Update Blocks Users of DeGoogled Android Phones like GrapheneOS from Websites",
+      "Trending now - News - 580 posts"
+    ].join("\n");
+
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search?q=%40kapitanluffy&src=typed_query&f=live",
+        visibleText: text,
+        nonTweetVisibleText: text,
+        articleCount: 0,
+        tweetTextCount: 0
+      })
+    ).toBeNull();
+  });
+
+  it("does not treat recoverable X search-shell retry prompts as a session alert", () => {
     const searchShellText = [
       "Home",
       "Explore",
@@ -148,11 +234,77 @@ describe("browser search helpers", () => {
       "Advanced search"
     ].join("\n");
 
-    expect(
+    const detected =
       detectManualVerificationFromState({
         url: "https://x.com/search?q=csrf+exploit&src=typed_query&f=live",
         visibleText: searchShellText,
         nonTweetVisibleText: searchShellText,
+        articleCount: 0,
+        tweetTextCount: 0
+      });
+
+    expect(detected).toBeNull();
+  });
+
+  it("detects generic X search failures from non-tweet text", () => {
+    const detected = detectManualVerificationFromState({
+      url: "https://x.com/search?q=test&f=live",
+      visibleText: "Something went wrong. Try reloading.",
+      nonTweetVisibleText: "Something went wrong. Try reloading.",
+      articleCount: 0,
+      tweetTextCount: 0
+    });
+
+    expect(detected).toMatchObject({ type: "x_blocked" });
+    expect(detected?.signals.join(" ")).toContain("excluding tweet articles");
+  });
+
+  it("detects the X privacy-extension blocking page from non-tweet text", () => {
+    const text =
+      "Something went wrong, but don't fret — let's give it another shot. Try again Some privacy related extensions may cause issues on x.com. Please disable them and try again.";
+
+    const detected = detectManualVerificationFromState({
+      url: "https://x.com/search",
+      visibleText: text,
+      nonTweetVisibleText: text,
+      articleCount: 0,
+      tweetTextCount: 0
+    });
+
+    expect(detected).toMatchObject({ type: "x_blocked" });
+    expect(detected?.signals.join(" ")).toContain("privacy-extension");
+    expect(detected?.signals.join(" ")).toContain("excluding tweet articles");
+  });
+
+  it("can confirm the same X blocking alert after a refresh retry", () => {
+    const text =
+      "Something went wrong, but don't fret — let's give it another shot. Try again Some privacy related extensions may cause issues on x.com. Please disable them and try again.";
+    const first = detectManualVerificationFromState({
+      url: "https://x.com/search",
+      visibleText: text,
+      nonTweetVisibleText: text,
+      articleCount: 0,
+      tweetTextCount: 0
+    });
+    const second = detectManualVerificationFromState({
+      url: "https://x.com/search",
+      visibleText: text,
+      nonTweetVisibleText: text,
+      articleCount: 0,
+      tweetTextCount: 0
+    });
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(sameManualVerificationDetection(first!, second!)).toBe(true);
+  });
+
+  it("does not create a manual verification alert from an empty X app shell snapshot", () => {
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search",
+        visibleText: "",
+        nonTweetVisibleText: "",
         articleCount: 0,
         tweetTextCount: 0
       })
@@ -205,9 +357,9 @@ describe("browser search helpers", () => {
 
   it("reports exact manual verification detection signals from non-tweet page text", () => {
     const detected = detectManualVerificationFromState({
-      url: "https://x.com/search?q=test&f=live",
-      visibleText: "Something went wrong. Try reloading.",
-      nonTweetVisibleText: "Something went wrong. Try reloading.",
+      url: "https://x.com/account/access",
+      visibleText: "Access to your account has been temporarily restricted.",
+      nonTweetVisibleText: "Access to your account has been temporarily restricted.",
       articleCount: 0,
       tweetTextCount: 0
     });
@@ -219,7 +371,7 @@ describe("browser search helpers", () => {
         tweetTextCount: 0
       }
     });
-    expect(detected?.signals.join(" ")).toContain("Something went wrong");
+    expect(detected?.signals.join(" ")).toContain("explicit account access");
     expect(detected?.signals.join(" ")).toContain("excluding tweet articles");
   });
 });

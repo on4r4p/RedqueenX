@@ -8,7 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
-import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Database } from "better-sqlite3";
 import type { AppConfig } from "../config";
@@ -30,18 +30,20 @@ import { EnvService, envUpdateSchema } from "./envService";
 import { CurrentSessionService, currentSessionLevels, type CurrentSessionLevel } from "./currentSessionService";
 import { DatabaseAdminService } from "./databaseAdminService";
 import { isServerAccessAllowed, parseAccessListInput } from "./serverAccess";
-import { normalizeValue } from "../text";
+import { normalizeHandle, normalizeValue } from "../text";
 import type { RunRecord, RunStats, TweetCandidate } from "../types";
 import { Crawler } from "../crawler";
 import { XApiClient } from "../x-client";
 import { XActionClient } from "../x-actions";
 import { RssClient } from "../rss-client";
 import { TimelineTweetService } from "./timelineTweetService";
-import { RawTimelineTweetService } from "./rawTimelineTweetService";
+import { normalizeRawTimelineReasonGroupIds, RawTimelineTweetService } from "./rawTimelineTweetService";
 import { MediaCacheService, type MediaCacheConfig } from "./mediaCacheService";
+import { MediaCacheJobService } from "./mediaCacheJobService";
 import { XBudgetExceededError, XBudgetService } from "../x-budget";
 import { XBrowserAccountService, type XBrowserAccountRecord } from "./xBrowserAccountService";
 import { XSessionAlertService, type XSessionAlertRecord } from "./xSessionAlertService";
+import type { KeywordUserPruneMode, StaleKeywordUserPruneReport } from "../worker/staleKeywordUserPruner";
 
 const execFileAsync = promisify(execFile);
 const netnsHelperPath = "/usr/local/sbin/redqueenx-netns";
@@ -55,27 +57,55 @@ function hasUsableNetnsHelper(): boolean {
   }
 }
 
-const loginSchema = z.object({ password: z.string() });
-const listMutationSchema = z.object({ value: z.string() });
-const listUpdateSchema = z.object({ value: z.string() });
-const commandSchema = z.object({ command: z.string().min(1) });
-const importSchema = z.object({ dataDir: z.string().optional(), filename: z.string().optional() });
-const importContentSchema = z.object({
-  filename: z.string().min(1),
-  kind: z.enum(LIST_KINDS),
-  content: z.string()
+const maxPathLength = 4096;
+const maxListValueLength = 5_000;
+const maxCommandLength = 5_000;
+const maxImportContentLength = 10 * 1024 * 1024;
+const maxEnvValueLength = 10_000;
+const loginSchema = z.object({ password: z.string().max(1_000) });
+const listMutationSchema = z.object({ value: z.string().max(maxListValueLength) });
+const listUpdateSchema = z.object({ value: z.string().max(maxListValueLength) });
+const commandSchema = z.object({ command: z.string().min(1).max(maxCommandLength) });
+const importSchema = z.object({
+  dataDir: z.string().max(maxPathLength).optional(),
+  filename: z.string().max(255).optional()
 });
-const databaseTableParamSchema = z.object({ tableName: z.string().min(1) });
+const importContentSchema = z.object({
+  filename: z.string().min(1).max(255),
+  kind: z.enum(LIST_KINDS),
+  content: z.string().max(maxImportContentLength)
+});
+const staleKeywordUserPruneSchema = z.object({
+  maxAgeDays: z.coerce.number().positive().max(3650).default(90),
+  autoIgnoreAlert: z.boolean().optional(),
+  startIndex: z.coerce.number().int().positive().optional(),
+  maxRetries: z.coerce.number().int().min(0).max(20).optional()
+});
+const databaseTableParamSchema = z.object({ tableName: z.string().min(1).max(128) });
 const databaseTableQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(25)
 });
 const timelineQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().max(200).default(50),
+  limit: z.coerce.number().int().positive().max(200).optional(),
   offset: z.coerce.number().int().min(0).default(0)
 });
 const rawTimelineQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().max(300).default(50),
-  offset: z.coerce.number().int().min(0).default(0)
+  limit: z.coerce.number().int().positive().max(300).optional(),
+  offset: z.coerce.number().int().min(0).default(0),
+  reason: z
+    .union([z.string().max(500), z.array(z.string().max(500))])
+    .optional()
+    .transform((value) => {
+      const values = value === undefined ? [] : Array.isArray(value) ? value : [value];
+      return Array.from(new Set(values.map((item) => item.trim()).filter(Boolean))).slice(0, 50);
+    }),
+  reasonGroup: z
+    .union([z.string().max(100), z.array(z.string().max(100))])
+    .optional()
+    .transform((value) => {
+      const values = value === undefined ? [] : Array.isArray(value) ? value : [value];
+      return normalizeRawTimelineReasonGroupIds(values).slice(0, 50);
+    })
 });
 const databaseExportQuerySchema = z.object({
   format: z.enum(["json", "csv"]).default("json")
@@ -84,16 +114,16 @@ const databaseClearSchema = z.object({
   confirm: z.string().min(1)
 });
 const filesystemBrowseQuerySchema = z.object({
-  path: z.string().optional(),
+  path: z.string().max(maxPathLength).optional(),
   mode: z.enum(["file", "directory"]).default("file"),
   extensions: z.string().max(200).optional()
 });
 const filesystemCopySchema = z.object({
-  sourcePath: z.string().min(1),
-  targetDir: z.string().min(1).default("./ops/vpn")
+  sourcePath: z.string().min(1).max(maxPathLength),
+  targetDir: z.string().min(1).max(maxPathLength).default("./ops/vpn")
 });
 const openVpnAuthSchema = z.object({
-  profilePath: z.string().min(1),
+  profilePath: z.string().min(1).max(maxPathLength),
   username: z
     .string()
     .min(1)
@@ -107,8 +137,8 @@ const openVpnAuthSchema = z.object({
 });
 const xBrowserAccountSchema = z.object({
   accountId: z.number().int().positive().optional(),
-  vpnProfilePath: z.string().min(1).optional(),
-  vpnProfilePaths: z.array(z.string().min(1)).max(25_000).optional(),
+  vpnProfilePath: z.string().min(1).max(maxPathLength).optional(),
+  vpnProfilePaths: z.array(z.string().min(1).max(maxPathLength)).max(25_000).optional(),
   xIdentifier: z.string().min(1).max(120),
   replaceProfiles: z.boolean().optional()
 });
@@ -119,7 +149,7 @@ const xSessionAlertParamSchema = z.object({
   alertId: z.coerce.number().int().positive()
 });
 const xSessionAlertResolveSchema = z.object({
-  note: z.string().trim().min(3)
+  note: z.string().trim().min(1).max(2_000)
 });
 const browserSnapshotParamSchema = z.object({
   runId: z.string().regex(/^[a-zA-Z0-9._-]+$/),
@@ -150,6 +180,7 @@ const xApiUpdateSchema = z.object({
     z.enum([
       "X_API_ENABLED",
       "SEARCH_WITHOUT_API_ENABLED",
+      "SEARCH_WITHOUT_API_ISOLATION",
       "SEARCH_WITHOUT_API_PROFILE_DIR",
       "SEARCH_WITHOUT_API_START_URL",
       "SEARCH_WITHOUT_API_MAX_SCROLLS",
@@ -182,6 +213,17 @@ const xApiUpdateSchema = z.object({
       "SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB",
       "SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS",
       "SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS",
+      "TIMELINE_DEFAULT_PAGE_SIZE",
+      "RUN_CHAIN_COUNT",
+      "STALE_KEYWORD_USER_MAX_AGE_DAYS",
+      "STALE_KEYWORD_USER_START_INDEX",
+      "STALE_KEYWORD_USER_AUTO_IGNORE_ALERT",
+      "STALE_KEYWORD_USER_MAX_RETRIES",
+      "RAW_TIMELINE_ENABLED",
+      "DOCKER_X11_FORWARD_ENABLED",
+      "DOCKER_X11_HOST",
+      "DOCKER_X11_PORT",
+      "DOCKER_XAUTHORITY",
       "X_LOGIN_SKIP_NETWORK_PRECHECK",
       "VPN_NETNS_NAME",
       "VPN_HOST_IFACE",
@@ -215,12 +257,12 @@ const xApiUpdateSchema = z.object({
       "X_COST_USER_INTERACTION_USD",
       "X_COST_COUNT_CALL_USD"
     ]),
-    z.string()
+    z.string().max(maxEnvValueLength)
   )
 });
 const serverAccessUpdateSchema = z.object({
-  whitelist: z.string().default(""),
-  blacklist: z.string().default("")
+  whitelist: z.string().max(10_000).default(""),
+  blacklist: z.string().max(10_000).default("")
 });
 
 export interface AdminApiOptions {
@@ -234,6 +276,7 @@ export interface AdminApiOptions {
     | "currentSessionFile"
     | "xApiEnabled"
     | "searchWithoutApiEnabled"
+    | "searchWithoutApiIsolation"
     | "searchWithoutApiProfileDir"
     | "searchWithoutApiStartUrl"
     | "searchWithoutApiMaxScrolls"
@@ -266,6 +309,17 @@ export interface AdminApiOptions {
     | "searchWithoutApiMediaCacheMaxFileMb"
     | "searchWithoutApiMediaCacheFetchDelayMinMs"
     | "searchWithoutApiMediaCacheFetchDelayMaxMs"
+    | "timelineDefaultPageSize"
+    | "runChainCount"
+    | "staleKeywordUserMaxAgeDays"
+    | "staleKeywordUserStartIndex"
+    | "staleKeywordUserAutoIgnoreAlert"
+    | "staleKeywordUserMaxRetries"
+    | "rawTimelineEnabled"
+    | "dockerX11ForwardEnabled"
+    | "dockerX11Host"
+    | "dockerX11Port"
+    | "dockerXauthority"
     | "xLoginSkipNetworkPrecheck"
     | "vpnNetnsName"
     | "vpnHostIface"
@@ -309,6 +363,34 @@ export interface AdminApiOptions {
   logger?: boolean;
 }
 
+type WithoutApiRunStartCheck =
+  | { ok: true; account: XBrowserAccountRecord }
+  | { ok: false; code: number; payload: { error: string; alert?: XSessionAlertRecord }; reason: string };
+
+interface StaleKeywordUserPruneJob {
+  id: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  mode: KeywordUserPruneMode;
+  maxAgeDays: number;
+  autoIgnoreAlert: boolean;
+  maxRetries: number;
+  startIndex: number;
+  restartCount: number;
+  blockedByAlertId: number | null;
+  restartedAfterAlertId: number | null;
+  startedAt: string;
+  completedAt: string | null;
+  reportPath: string;
+  resumeStatePath: string;
+  stoppedRun: { id: string; status: string } | null;
+  child: ChildProcess | null;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  error: string | null;
+}
+
 export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: 50 * 1024 * 1024 });
   const lists = new ListService(options.database);
@@ -317,6 +399,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   const timeline = new LegacyTimelineService(options.database);
   const timelineTweets = new TimelineTweetService(options.database);
   const rawTimelineTweets = new RawTimelineTweetService(options.database);
+  const mediaCacheJobs = new MediaCacheJobService(options.database);
   const settings = new SettingsService(options.database);
   const env = new EnvService(options.envPath);
   const databaseAdmin = new DatabaseAdminService(options.database);
@@ -330,6 +413,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   let activeCrawlerRunId: string | null = null;
   let activeWithoutApiWorker: ChildProcess | null = null;
   let activeWithoutApiWorkerRunId: string | null = null;
+  let mediaCacheFetchQueue: Promise<void> = Promise.resolve();
+  let staleKeywordUserPruneJob: StaleKeywordUserPruneJob | null = null;
+  let staleKeywordUserPruneStartInProgress = false;
   const activeXAlertLoginProcesses = new Map<number, ChildProcess>();
   const apiResumeTimers = new Map<string, NodeJS.Timeout>();
   const frontendRoot = findFrontendRoot();
@@ -347,6 +433,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   void recordSession("info", "server.started", "Admin API started", { pid: process.pid });
 
   app.addHook("onRequest", async (request, reply) => {
+    applySecurityHeaders(reply);
     requestStartTimes.set(request, performance.now());
     const accessDecision = isServerAccessAllowed(settings.getServerAccessConfig(), request.ip);
     if (!accessDecision.allowed) {
@@ -420,6 +507,17 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       }
       return reply.code(401).send({ error: "Authentication required" });
     }
+
+    if (isAdminMutationRequest(request) && !isSameOriginMutationRequest(request)) {
+      await recordSession("prob", "security.csrf_blocked", "Blocked admin mutation from a non-admin origin", {
+        method: request.method,
+        path: safePath(request.url),
+        origin: headerValue(request.headers.origin) ?? null,
+        referer: headerValue(request.headers.referer) ?? null,
+        fetchSite: headerValue(request.headers["sec-fetch-site"]) ?? null
+      });
+      return reply.code(403).send({ error: "Forbidden: admin mutations require the RedqueenX origin." });
+    }
   });
 
   app.get("/health", async () => ({ ok: true }));
@@ -436,12 +534,19 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return sendFrontendPage(reply, pageRoot, "raw-timeline.html");
   });
 
+  app.get("/rejected-timeline", async (_request, reply) => {
+    return sendFrontendPage(reply, pageRoot, "raw-timeline.html");
+  });
+
   app.get("/timeline/data", async (request) => {
     const query = timelineQuerySchema.parse(request.query);
     const xApiConfig = getXApiConfig();
     const mediaCacheService = getMediaCache();
     await mediaCacheService.prune().catch(() => undefined);
-    const page = timeline.page(query);
+    const page = timeline.page({
+      limit: query.limit ?? xApiConfig.timelineDefaultPageSize,
+      offset: query.offset
+    });
     return {
       items: page.items.map((item) => mediaCacheService.decorateTimelineItem(item)),
       pagination: {
@@ -450,15 +555,57 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         offset: page.offset,
         hasMore: page.hasMore
       },
+      rawTimelineEnabled: xApiConfig.rawTimelineEnabled,
       actionsEnabled: Boolean(options.config.enableXWrite && xApiConfig.xApiEnabled && !xApiConfig.searchWithoutApiEnabled)
     };
   });
 
-  app.get("/raw-timeline/data", async (request) => {
-    const query = rawTimelineQuerySchema.parse(request.query);
-    const page = rawTimelineTweets.page(query);
+  app.get("/raw-timeline/data", async (request) => rejectedTimelineDataResponse(request.query));
+
+  app.get("/rejected-timeline/data", async (request) => rejectedTimelineDataResponse(request.query));
+
+  app.delete("/admin/rejected-timeline", async () => {
+    const deleted = rawTimelineTweets.clearRejected();
+    await recordSession("info", "rejected_timeline.clear", "Rejected timeline entries deleted", { deleted });
+    return { deleted };
+  });
+
+  function rejectedTimelineDataResponse(rawQuery: unknown) {
+    const query = rawTimelineQuerySchema.parse(rawQuery);
+    const xApiConfig = getXApiConfig();
+    const limit = query.limit ?? xApiConfig.timelineDefaultPageSize;
+    const availableRejectionReasons = rawTimelineTweets.rejectionReasonOptions();
+    const availableRejectionReasonGroups = rawTimelineTweets.rejectionReasonGroupOptions();
+    if (!xApiConfig.rawTimelineEnabled) {
+      return {
+        enabled: false,
+        items: [],
+        availableRejectionReasons,
+        availableRejectionReasonGroups,
+        selectedRejectionReasons: query.reason,
+        selectedRejectionReasonGroups: query.reasonGroup,
+        pagination: {
+          total: 0,
+          limit,
+          offset: 0,
+          hasMore: false
+        }
+      };
+    }
+    const page = rawTimelineTweets.page({
+      limit,
+      offset: query.offset,
+      decisionStatus: "rejected",
+      rejectionReasons: query.reason,
+      rejectionReasonGroups: query.reasonGroup
+    });
     return {
+      enabled: true,
       items: page.items,
+      availableRejectionReasons,
+      availableRejectionReasonGroups,
+      selectedRejectionReasons: query.reason,
+      selectedRejectionReasonGroups: query.reasonGroup,
       pagination: {
         total: page.total,
         limit: page.limit,
@@ -466,7 +613,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         hasMore: page.hasMore
       }
     };
-  });
+  }
 
   app.get("/media-cache/:cacheId", async (request, reply) => {
     const cacheId = z.object({ cacheId: z.string().regex(/^[a-f0-9]{32}$/) }).parse(request.params).cacheId;
@@ -500,14 +647,35 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     await recordSession("info", "media_cache.reload.requested", "Timeline media cache reload requested from admin", {
       tweetId,
       sourceCount,
-      viaVpnNamespace: xApiConfig.vpnNetnsName
+      viaVpnNamespace: xApiConfig.vpnNetnsName,
+      isolation: xApiConfig.searchWithoutApiIsolation
     });
 
+    if (usesDockerVpnIsolation(xApiConfig)) {
+      const job = mediaCacheJobs.enqueue(tweetId, "admin_reload");
+      await recordSession("info", "media_cache.reload.queued", "Timeline media cache reload queued for Docker VPN worker", {
+        tweetId,
+        sourceCount,
+        jobId: job.id
+      });
+      return { ok: true, queued: true, jobId: job.id, sourceCount, item: getMediaCache().decorateTimelineItem(tweet) };
+    }
+
     try {
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        ...xApiConfigToEnvValues(xApiConfig),
+        CURRENT_SESSION_FILE: options.currentSessionFilePath ?? options.config.currentSessionFile,
+        VPN_NETNS_AUTOSTART: "true"
+      };
+      const databasePath = databasePathForChild(options.database);
+      if (databasePath) {
+        childEnv.DATABASE_URL = databasePath;
+      }
       const { stdout, stderr } = await execFileAsync("npm", ["run", "netns:media-cache:fetch", "--", "--tweet-id", tweetId], {
         cwd: process.cwd(),
         timeout: 5 * 60 * 1000,
-        env: { ...process.env, VPN_NETNS_AUTOSTART: "true" },
+        env: childEnv,
         maxBuffer: 1024 * 1024
       });
       await recordSession("info", "media_cache.reload.completed", "Timeline media cache reload completed", {
@@ -522,6 +690,41 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       await recordSession("prob", "media_cache.reload.failed", message, { tweetId });
       reply.code(502).send({ error: message });
     }
+  });
+
+  app.post("/admin/media-cache/retry-abs-twimg-failures", async (request, reply) => {
+    const xApiConfig = getXApiConfig();
+    if (!xApiConfig.searchWithoutApiMediaCacheEnabled) {
+      reply.code(403).send({ error: "Media cache download is disabled in Search without Api settings." });
+      return;
+    }
+    const mediaCache = getMediaCache();
+    const tweetIds = mediaCache.tweetIdsForFailedSourceError("Refusing non-X media host abs.twimg.com.", "abs.twimg.com");
+    if (tweetIds.length === 0) {
+      return { ok: true, matched: 0, queued: 0, mode: usesDockerVpnIsolation(xApiConfig) ? "docker_vpn" : "host_netns" };
+    }
+
+    if (usesDockerVpnIsolation(xApiConfig)) {
+      const jobs = tweetIds.map((tweetId) => mediaCacheJobs.enqueue(tweetId, "retry_abs_twimg"));
+      await recordSession("info", "media_cache.retry_abs_twimg.queued", "Queued media cache retries for previous abs.twimg.com failures", {
+        matched: tweetIds.length,
+        queued: jobs.length,
+        jobIds: jobs.map((job) => job.id)
+      });
+      return { ok: true, matched: tweetIds.length, queued: jobs.length, mode: "docker_vpn" };
+    }
+
+    for (const tweetId of tweetIds) {
+      mediaCacheFetchQueue = mediaCacheFetchQueue
+        .catch(() => undefined)
+        .then(() => runMediaCacheFetchProcess(tweetId, xApiConfig));
+    }
+    await recordSession("info", "media_cache.retry_abs_twimg.queued", "Queued media cache retries for previous abs.twimg.com failures", {
+      matched: tweetIds.length,
+      queued: tweetIds.length,
+      isolation: xApiConfig.searchWithoutApiIsolation
+    });
+    return { ok: true, matched: tweetIds.length, queued: tweetIds.length, mode: "host_netns" };
   });
 
   app.post("/admin/tweets/:tweetId/like", async (request, reply) => {
@@ -611,7 +814,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     sessions.add(sessionId);
     reply.setCookie("redqueen_session", sessionId, {
       httpOnly: true,
-      sameSite: "lax",
+      sameSite: "strict",
       path: "/admin"
     });
     await recordSession("info", "auth.login", "Admin login accepted");
@@ -630,9 +833,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   app.get("/admin/stats", async () => {
     const xApiConfig = getXApiConfig();
+    const staleKeywordUserPrune = await staleKeywordUserPruneStatusFresh();
     return {
       lists: lists.countActiveByKind(),
       currentRun: runs.current(),
+      staleKeywordUserPrune,
       xBudget: xBudget.snapshot(undefined, runs.current()?.id),
       runtimeModes: {
         xApiEnabled: xApiConfig.xApiEnabled,
@@ -773,9 +978,39 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         accountId: alert.accountId,
         xIdentifier: alert.xIdentifier
       });
-      return { alert };
+      await maybeRestartStaleKeywordUserPruneAfterAlert(alert, "resolved");
+      await refreshStaleKeywordUserPruneJobFromReport();
+      return { alert, staleKeywordUserPrune: staleKeywordUserPruneStatus() };
     } catch (error) {
       reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to resolve alert" });
+    }
+  });
+
+  app.post("/admin/x-session-alerts/:alertId/ignore", async (request, reply) => {
+    try {
+      const { alertId } = xSessionAlertParamSchema.parse(request.params);
+      const existingAlert = xSessionAlerts.find(alertId);
+      if (!existingAlert) {
+        reply.code(404).send({ error: `X session alert not found: ${alertId}` });
+        return;
+      }
+      if (existingAlert.status !== "open") {
+        reply.code(409).send({ error: "This X session alert is already closed." });
+        return;
+      }
+      const alert = xSessionAlerts.ignore(alertId);
+      markIgnoredAlertAccountReady(alert);
+      await recordSession("prob", "x.session_alert.ignored", "X session alert ignored by admin", {
+        alertId: alert.id,
+        accountId: alert.accountId,
+        xIdentifier: alert.xIdentifier,
+        alertType: alert.alertType
+      });
+      await maybeRestartStaleKeywordUserPruneAfterAlert(alert, "ignored");
+      await refreshStaleKeywordUserPruneJobFromReport();
+      return { alert, staleKeywordUserPrune: staleKeywordUserPruneStatus() };
+    } catch (error) {
+      reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to ignore alert" });
     }
   });
 
@@ -807,6 +1042,24 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
           command: commands.webLaunch
         });
         return { launched: false, skippedInTest: true, alert, account, commands };
+      }
+
+      if (usesDockerVpnIsolation()) {
+        await recordSession("info", "x.session_alert.login.manual_required", "Docker VPN mode requires launching x-login from the host shell", {
+          alertId: alert.id,
+          accountId: account.id,
+          xIdentifier: account.xIdentifier,
+          command: commands.webLaunch
+        });
+        return {
+          launched: false,
+          manualRequired: true,
+          alert,
+          account,
+          commands,
+          message:
+            "Docker VPN mode does not mount the Docker socket in admin. Run the x-login command from an SSH X-forwarded shell on the host."
+        };
       }
 
       if (!hasUsableNetnsHelper()) {
@@ -978,7 +1231,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   app.get("/admin/session/current", async (request) => {
     const query = z
       .object({
-        limit: z.coerce.number().int().positive().max(1000).default(200),
+        limit: z.coerce.number().int().positive().max(5_000).default(200),
         level: z.enum(currentSessionLevels).default("debug"),
         includeAdminPolling: booleanQuerySchema,
         includeTweetContent: booleanQuerySchema,
@@ -987,6 +1240,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         includeTweetRetweetCount: booleanQuerySchema
       })
       .parse(request.query);
+    const staleKeywordUserPrune = await staleKeywordUserPruneStatusFresh();
     return {
       session: await currentSession.read(query.limit, query.level, {
         includeAdminPolling: query.includeAdminPolling,
@@ -998,6 +1252,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       currentRun: runs.current() ?? runs.latest(),
       events: runs.latestEvents(80),
       xSessionAlerts: xSessionAlerts.openAlerts(),
+      staleKeywordUserPrune,
       runtimeModes: {
         xApiEnabled: getXApiConfig().xApiEnabled,
         searchWithoutApiEnabled: getXApiConfig().searchWithoutApiEnabled
@@ -1199,6 +1454,92 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return { deleted };
   });
 
+  app.get("/admin/keyword-users/prune-stale/current", async () => staleKeywordUserPruneStatusFresh());
+
+  app.post("/admin/keyword-users/prune-stale/stop", async (_request, reply) => {
+    await refreshStaleKeywordUserPruneJobFromReport();
+    recoverStaleKeywordUserPruneJobFromRuntime();
+    const status = staleKeywordUserPruneStatus();
+    const job = staleKeywordUserPruneJob;
+    if (!job || !status.running) {
+      reply.code(404).send({ error: "No running stale keyword user pruning job.", job: status });
+      return;
+    }
+    const stop = stopStaleKeywordUserPruneJob(job, "admin_stop");
+    await recordSession("prob", "keyword_user_prune.stop_requested", "Stale keyword user pruning stop requested from admin", {
+      jobId: job.id,
+      stopPath: stop.stopPath,
+      removedQueuedRequest: stop.removedQueuedRequest,
+      childPid: stop.childPid
+    });
+    return { stop, job: staleKeywordUserPruneStatus() };
+  });
+
+  app.post("/admin/keyword-users/prune-stale", async (request, reply) => {
+    const body = staleKeywordUserPruneSchema.parse(request.body ?? {});
+    await refreshStaleKeywordUserPruneJobFromReport();
+    recoverStaleKeywordUserPruneJobFromRuntime();
+    const currentStatus = staleKeywordUserPruneStatus();
+    if (staleKeywordUserPruneStartInProgress || currentStatus.running) {
+      reply.code(409).send({ error: "A stale keyword user pruning job is already running.", job: currentStatus });
+      return;
+    }
+
+    staleKeywordUserPruneStartInProgress = true;
+    try {
+      const runtimeConfig = getXApiConfig();
+      const mode: KeywordUserPruneMode = runtimeConfig.searchWithoutApiEnabled ? "without_api" : "x_api";
+      let startCheck: WithoutApiRunStartCheck | null = null;
+      if (mode === "without_api") {
+        startCheck = await checkWithoutApiRunStart();
+        if (!startCheck.ok) {
+          reply.code(startCheck.code).send(startCheck.payload);
+          return;
+        }
+      } else if (!runtimeConfig.xApiEnabled) {
+        reply.code(400).send({ error: "X API search is disabled." });
+        return;
+      } else if (!options.config.x.bearerToken) {
+        reply.code(400).send({ error: "X_BEARER_TOKEN is required to run inactive users check in X API mode." });
+        return;
+      }
+
+      await refreshStaleKeywordUserPruneJobFromReport();
+      recoverStaleKeywordUserPruneJobFromRuntime();
+      const statusAfterStartCheck = staleKeywordUserPruneStatus();
+      if (statusAfterStartCheck.running) {
+        reply.code(409).send({ error: "A stale keyword user pruning job is already running.", job: statusAfterStartCheck });
+        return;
+      }
+
+      const stoppedRun = await stopActiveRunForKeywordUserPrune();
+      const autoIgnoreAlert = body.autoIgnoreAlert ?? runtimeConfig.staleKeywordUserAutoIgnoreAlert;
+      const maxRetries = body.maxRetries ?? runtimeConfig.staleKeywordUserMaxRetries;
+      const startIndex = body.startIndex ?? runtimeConfig.staleKeywordUserStartIndex;
+      const resumeStatePath = startIndex === 1 ? staleKeywordUserPruneResumeStatePathForStart(body.maxAgeDays) : undefined;
+      const job =
+        mode === "without_api" && usesDockerVpnIsolation(runtimeConfig)
+          ? queueDockerStaleKeywordUserPruneJob(mode, body.maxAgeDays, stoppedRun, autoIgnoreAlert, maxRetries, startIndex, 0, resumeStatePath)
+          : startStaleKeywordUserPruneJob(mode, body.maxAgeDays, runtimeConfig, stoppedRun, autoIgnoreAlert, maxRetries, startIndex, 0, resumeStatePath);
+      await recordSession("info", "keyword_user_prune.job_started", "Stale keyword user pruning job started from admin", {
+        jobId: job.id,
+        mode: job.mode,
+        maxAgeDays: job.maxAgeDays,
+        autoIgnoreAlert: job.autoIgnoreAlert,
+        maxRetries: job.maxRetries,
+        startIndex: job.startIndex,
+        resumeStatePath: job.resumeStatePath,
+        resumedPreviousFailedJob: Boolean(resumeStatePath),
+        stoppedRun: job.stoppedRun,
+        accountId: startCheck?.ok ? startCheck.account.id : null,
+        xIdentifier: startCheck?.ok ? startCheck.account.xIdentifier : null
+      });
+      reply.code(202).send({ job: staleKeywordUserPruneStatus() });
+    } finally {
+      staleKeywordUserPruneStartInProgress = false;
+    }
+  });
+
   app.post("/admin/settings/x-budget/reset", async () => {
     const deleted = xBudget.resetToday();
     const budget = xBudget.snapshot(undefined, runs.current()?.id);
@@ -1270,6 +1611,12 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return result;
   });
 
+  app.post("/admin/lists/maintenance/cleanup", async () => {
+    const result = lists.cleanupActiveInconsistencies();
+    await recordSession("info", "list.cleanup", "List duplicates and inconsistencies cleaned", { ...result });
+    return result;
+  });
+
   app.get("/admin/lists/:kind", async (request, reply) => {
     const kind = getKindParam(request.params);
     if (!kind) {
@@ -1295,6 +1642,60 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     };
   });
 
+  app.post("/admin/lists/stale_keyword_user/:id/restore-keyword", async (request, reply) => {
+    const entryId = getEntryIdParam(request.params);
+    const staleEntry = lists.getById("stale_keyword_user", entryId);
+    if (!staleEntry) {
+      reply.code(404).send({ error: "Stale keyword user entry not found" });
+      return;
+    }
+
+    const keywordEntry = lists.add(
+      "keyword",
+      staleEntry.rawValue,
+      "runtime:stale-keyword-user-restore",
+      null,
+      new Date().toISOString()
+    );
+    const deleted = lists.markDeletedById("stale_keyword_user", entryId);
+    const deletedSkipped = lists.markDeleted("skipped_keyword_user", staleEntry.rawValue);
+    await recordSession("info", "keyword_user.restore", "Stale keyword user restored into keywords", {
+      staleEntryId: entryId,
+      keywordEntryId: keywordEntry.id,
+      user: staleEntry.rawValue,
+      deletedFromStaleList: deleted,
+      deletedFromSkippedList: deletedSkipped
+    });
+    return { entry: keywordEntry, deletedFromStaleList: deleted, deletedFromSkippedList: deletedSkipped };
+  });
+
+  app.post("/admin/lists/skipped_keyword_user/:id/move-to-stale", async (request, reply) => {
+    const entryId = getEntryIdParam(request.params);
+    const skippedEntry = lists.getById("skipped_keyword_user", entryId);
+    if (!skippedEntry) {
+      reply.code(404).send({ error: "Skipped keyword user entry not found" });
+      return;
+    }
+
+    const staleEntry = lists.add(
+      "stale_keyword_user",
+      skippedEntry.rawValue,
+      "runtime:skipped-keyword-user-to-stale",
+      null,
+      new Date().toISOString()
+    );
+    const deletedFromKeywords = lists.markDeleted("keyword", skippedEntry.rawValue);
+    const deletedFromSkippedList = lists.markDeletedById("skipped_keyword_user", entryId);
+    await recordSession("info", "keyword_user.skipped_to_stale", "Skipped keyword user moved into stale keyword users", {
+      skippedEntryId: entryId,
+      staleEntryId: staleEntry.id,
+      user: skippedEntry.rawValue,
+      deletedFromKeywords,
+      deletedFromSkippedList
+    });
+    return { entry: staleEntry, deletedFromKeywords, deletedFromSkippedList };
+  });
+
   app.post("/admin/lists/:kind", async (request, reply) => {
     const kind = getKindParam(request.params);
     if (!kind) {
@@ -1303,8 +1704,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
     const body = listMutationSchema.parse(request.body);
     const entry = lists.add(kind, body.value);
-    await recordSession("info", "list.add", "List entry added", { kind, entryId: entry.id });
-    return { entry };
+    const removedKeywords = removeKeywordMatchingBannedWord(kind, body.value);
+    await recordSession("info", "list.add", "List entry added", { kind, entryId: entry.id, removedKeywords });
+    return { entry, removedKeywords };
   });
 
   app.patch("/admin/lists/:kind/:id", async (request, reply) => {
@@ -1316,8 +1718,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     try {
       const body = listUpdateSchema.parse(request.body);
       const entry = lists.update(getEntryIdParam(request.params), kind, body.value);
-      await recordSession("info", "list.update", "List entry updated", { kind, entryId: entry.id });
-      return { entry };
+      const removedKeywords = removeKeywordMatchingBannedWord(kind, body.value);
+      await recordSession("info", "list.update", "List entry updated", { kind, entryId: entry.id, removedKeywords });
+      return { entry, removedKeywords };
     } catch (error) {
       await recordSession("prob", "list.update.failed", error instanceof Error ? error.message : "Entry not found", {
         kind
@@ -1350,6 +1753,13 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return { deleted };
   });
 
+  function removeKeywordMatchingBannedWord(kind: string, value: string): number {
+    if (kind !== "banned_word") {
+      return 0;
+    }
+    return lists.markDeleted("keyword", value);
+  }
+
   app.post("/admin/runs", async (_request, reply) => {
     const runtimeConfig = getXApiConfig();
     if (runtimeConfig.searchWithoutApiEnabled) {
@@ -1370,7 +1780,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         xIdentifier: blocked.account.xIdentifier,
         vpnProfilePath: runtimeConfig.vpnConfig
       });
-      startWithoutApiWorker(run);
+      await startWithoutApiExecution(run);
       return { run };
     }
 
@@ -1394,10 +1804,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       await stopRunForFreshStart(existing, "x_api");
     }
 
-    const run = runs.start(createInitialRunStats(lists, runtimeConfig));
+    const keywords = plannedKeywords(lists, runtimeConfig);
+    const run = runs.start(createInitialRunStats(lists, runtimeConfig, keywords));
+    runs.replaceKeywords(run.id, keywords);
     await recordSession("info", "run.started", "Fresh run started from start action", {
       runId: run.id,
-      status: run.status
+      status: run.status,
+      plannedKeywords: keywords.length,
+      searchPacingApplied: true
     });
     startCrawlerLoop(run);
     return { run };
@@ -1432,7 +1846,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       clearApiResumeTimer(run.id);
       const resumed = runs.resume(run.id);
       await recordSession("info", "run.resumed", "Run resumed", { runId: resumed.id, status: resumed.status, mode: "without_api" });
-      startWithoutApiWorker(resumed);
+      await startWithoutApiExecution(resumed);
       return { run: resumed };
     }
     if (!runtimeConfig.xApiEnabled) {
@@ -1489,7 +1903,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         if (!blocked.ok) return;
         const run = runs.resume(id);
         await recordSession("info", "run.resumed", "Run resumed", { runId: run.id, status: run.status, mode: "without_api" });
-        startWithoutApiWorker(run);
+        await startWithoutApiExecution(run);
         return { run };
       }
       if (!runtimeConfig.xApiEnabled) {
@@ -1557,6 +1971,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       xSearchApiCallLimit: options.config.xSearchApiCallLimit,
       xApiEnabled: options.config.xApiEnabled,
       searchWithoutApiEnabled: options.config.searchWithoutApiEnabled,
+      searchWithoutApiIsolation: options.config.searchWithoutApiIsolation,
       searchWithoutApiProfileDir: options.config.searchWithoutApiProfileDir,
       searchWithoutApiStartUrl: options.config.searchWithoutApiStartUrl,
       searchWithoutApiMaxScrolls: options.config.searchWithoutApiMaxScrolls,
@@ -1589,6 +2004,17 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       searchWithoutApiMediaCacheMaxFileMb: options.config.searchWithoutApiMediaCacheMaxFileMb,
       searchWithoutApiMediaCacheFetchDelayMinMs: options.config.searchWithoutApiMediaCacheFetchDelayMinMs,
       searchWithoutApiMediaCacheFetchDelayMaxMs: options.config.searchWithoutApiMediaCacheFetchDelayMaxMs,
+      timelineDefaultPageSize: options.config.timelineDefaultPageSize,
+      runChainCount: options.config.runChainCount,
+      staleKeywordUserMaxAgeDays: options.config.staleKeywordUserMaxAgeDays,
+      staleKeywordUserStartIndex: options.config.staleKeywordUserStartIndex,
+      staleKeywordUserAutoIgnoreAlert: options.config.staleKeywordUserAutoIgnoreAlert,
+      staleKeywordUserMaxRetries: options.config.staleKeywordUserMaxRetries,
+      rawTimelineEnabled: options.config.rawTimelineEnabled,
+      dockerX11ForwardEnabled: options.config.dockerX11ForwardEnabled,
+      dockerX11Host: options.config.dockerX11Host,
+      dockerX11Port: options.config.dockerX11Port,
+      dockerXauthority: options.config.dockerXauthority,
       xLoginSkipNetworkPrecheck: options.config.xLoginSkipNetworkPrecheck,
       vpnNetnsName: options.config.vpnNetnsName,
       vpnHostIface: options.config.vpnHostIface,
@@ -1627,14 +2053,85 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return settings.getXApiConfig(getDefaultXApiConfig());
   }
 
+  function usesDockerVpnIsolation(config = getXApiConfig()): boolean {
+    return config.searchWithoutApiIsolation === "docker_vpn";
+  }
+
   function getMediaCache(): MediaCacheService {
     return new MediaCacheService(options.database, getMediaCacheConfigFromRuntime(getXApiConfig()));
+  }
+
+  function queueAcceptedTweetMediaCache(tweetId: string, mediaCount: number): void {
+    const xApiConfig = getXApiConfig();
+    if (!xApiConfig.searchWithoutApiMediaCacheEnabled || mediaCount <= 0) {
+      return;
+    }
+    if (usesDockerVpnIsolation(xApiConfig)) {
+      const job = mediaCacheJobs.enqueue(tweetId, "accepted_tweet");
+      void recordSession("debug", "media_cache.auto_fetch.queued", "Accepted tweet media cache fetch queued for Docker VPN worker", {
+        tweetId,
+        jobId: job.id,
+        isolation: xApiConfig.searchWithoutApiIsolation
+      });
+      return;
+    }
+    mediaCacheFetchQueue = mediaCacheFetchQueue
+      .catch(() => undefined)
+      .then(() => runMediaCacheFetchProcess(tweetId, xApiConfig));
+  }
+
+  async function runMediaCacheFetchProcess(tweetId: string, xApiConfig: XApiRuntimeConfig): Promise<void> {
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...xApiConfigToEnvValues(xApiConfig),
+      CURRENT_SESSION_FILE: options.currentSessionFilePath ?? options.config.currentSessionFile,
+      VPN_NETNS_AUTOSTART: "true"
+    };
+    const databasePath = databasePathForChild(options.database);
+    if (databasePath) {
+      childEnv.DATABASE_URL = databasePath;
+    }
+
+    await recordSession("debug", "media_cache.auto_fetch.queued", "Accepted tweet media cache fetch queued", {
+      tweetId,
+      viaVpnNamespace: xApiConfig.vpnNetnsName
+    });
+
+    await new Promise<void>((resolve) => {
+      const child = spawn("npm", ["run", "netns:media-cache:fetch", "--", "--tweet-id", tweetId], {
+        cwd: process.cwd(),
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      child.on("error", (error) => {
+        void recordSession("prob", "media_cache.auto_fetch.failed", error.message, { tweetId });
+        resolve();
+      });
+      child.on("close", (code) => {
+        void recordSession(code === 0 ? "info" : "prob", code === 0 ? "media_cache.auto_fetch.completed" : "media_cache.auto_fetch.failed", code === 0 ? "Accepted tweet media cache fetch completed" : "Accepted tweet media cache fetch failed", {
+          tweetId,
+          code,
+          stdout: lastOutputLines(stdout, 20),
+          stderr: lastOutputLines(stderr, 20)
+        });
+        resolve();
+      });
+    });
   }
 
   function searchWithoutApiPlaceholderStats(xApiConfig = getXApiConfig()) {
     const availability = keywordAvailability(lists);
     return {
       enabled: xApiConfig.searchWithoutApiEnabled,
+      isolation: xApiConfig.searchWithoutApiIsolation,
       status: xApiConfig.searchWithoutApiEnabled ? "configured" : "disabled",
       queuedKeywords: 0,
       keywordTotal: availability.totalKeywords,
@@ -1681,16 +2178,13 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   function applyRuntimeApiStats(run: RunRecord, xApiConfig: XApiRuntimeConfig): RunRecord {
     const stats = parseRunStats(run.statsJson);
-    if (
-      stats.apiCallLimit === xApiConfig.xSearchApiCallLimit &&
-      stats.apiWindowMinutes === xApiConfig.xSearchApiWindowMinutes
-    ) {
+    const desiredWindowMinutes = searchPauseWindowMaxMinutesForConfig(xApiConfig);
+    if (stats.apiWindowMinutes === desiredWindowMinutes) {
       return run;
     }
 
     return runs.updateStats(run.id, {
-      apiCallLimit: xApiConfig.xSearchApiCallLimit,
-      apiWindowMinutes: xApiConfig.xSearchApiWindowMinutes
+      apiWindowMinutes: desiredWindowMinutes
     });
   }
 
@@ -1771,6 +2265,934 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return stopped;
   }
 
+  async function stopActiveRunForKeywordUserPrune(): Promise<RunRecord | null> {
+    const currentRun = runs.current();
+    if (!currentRun) {
+      return null;
+    }
+
+    clearApiResumeTimer(currentRun.id);
+    runs.updateStats(currentRun.id, { currentKeyword: null });
+    const stopped = runs.stop(currentRun.id);
+    if (isWithoutApiRun(currentRun)) {
+      await stopWithoutApiWorkerAndWait("stale_keyword_user_prune");
+    }
+    await recordSession("prob", "keyword_user_prune.run_stopped", "Active run stopped before stale keyword user pruning", {
+      runId: stopped.id,
+      status: stopped.status
+    });
+    return stopped;
+  }
+
+  function startStaleKeywordUserPruneJob(
+    mode: KeywordUserPruneMode,
+    maxAgeDays: number,
+    runtimeConfig: XApiRuntimeConfig,
+    stoppedRun: RunRecord | null,
+    autoIgnoreAlert: boolean,
+    maxRetries: number,
+    startIndex: number,
+    restartCount = 0,
+    resumeStatePath?: string
+  ): StaleKeywordUserPruneJob {
+    const job = createStaleKeywordUserPruneJob(mode, maxAgeDays, stoppedRun, autoIgnoreAlert, maxRetries, startIndex, restartCount, resumeStatePath);
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...xApiConfigToEnvValues(runtimeConfig),
+      CURRENT_SESSION_FILE: options.currentSessionFilePath ?? options.config.currentSessionFile,
+      VPN_NETNS_AUTOSTART: "true",
+      VPN_NETNS_AUTOSTART_DEFAULT: "yes"
+    };
+    const databasePath = databasePathForChild(options.database);
+    if (databasePath) {
+      childEnv.DATABASE_URL = databasePath;
+    }
+
+    const child = spawn(
+      "npm",
+      mode === "without_api"
+        ? [
+            "run",
+            "netns:keyword-users:prune-stale",
+            "--",
+            "--max-age-days",
+            String(maxAgeDays),
+            "--job-id",
+            job.id,
+            "--start-index",
+            String(job.startIndex),
+            "--resume-state-path",
+            job.resumeStatePath,
+            "--mode",
+            mode
+          ]
+        : [
+            "run",
+            "keyword-users:prune-stale:dev",
+            "--",
+            "--max-age-days",
+            String(maxAgeDays),
+            "--job-id",
+            job.id,
+            "--start-index",
+            String(job.startIndex),
+            "--resume-state-path",
+            job.resumeStatePath,
+            "--mode",
+            mode
+          ],
+      {
+        cwd: process.cwd(),
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"]
+      }
+    );
+    job.child = child;
+    staleKeywordUserPruneJob = job;
+
+    child.stdout?.on("data", (chunk) => {
+      job.stdout += String(chunk);
+      for (const line of String(chunk).split(/\r?\n/).filter(Boolean)) {
+        void recordSession("info", "keyword_user_prune.stdout", firstLine(line), { jobId: job.id });
+      }
+    });
+    child.stderr?.on("data", (chunk) => {
+      job.stderr += String(chunk);
+      for (const line of String(chunk).split(/\r?\n/).filter(Boolean)) {
+        void recordSession("prob", "keyword_user_prune.stderr", firstLine(line), { jobId: job.id });
+      }
+    });
+    child.on("error", (error) => {
+      job.status = "failed";
+      job.completedAt = new Date().toISOString();
+      job.error = error.message;
+      void recordSession("prob", "keyword_user_prune.job_failed", "Stale keyword user pruning job failed to start", {
+        jobId: job.id,
+        error: error.message
+      });
+    });
+    child.on("close", (code, signal) => {
+      job.exitCode = code;
+      job.signal = signal;
+      job.completedAt = new Date().toISOString();
+      job.child = null;
+      const report = readStaleKeywordUserPruneReport(job.id);
+      job.status = report?.status ?? (code === 0 ? "completed" : "failed");
+      if (report?.status === "failed" && report.error) {
+        job.error = report.error;
+      } else if (report?.status === "stopped") {
+        job.error = report.error ?? job.error;
+      } else if (code !== 0) {
+        job.error = `Worker exited with code ${code ?? "null"}${signal ? ` and signal ${signal}` : ""}.`;
+      }
+      void recordSession(
+        job.status === "failed" ? "prob" : "info",
+        job.status === "stopped" ? "keyword_user_prune.job_stopped" : code === 0 ? "keyword_user_prune.job_completed" : "keyword_user_prune.job_failed",
+        job.status === "stopped"
+          ? "Stale keyword user pruning job stopped"
+          : code === 0
+            ? "Stale keyword user pruning job completed"
+            : "Stale keyword user pruning job failed",
+        {
+          jobId: job.id,
+          mode: job.mode,
+          status: job.status,
+          code,
+          signal,
+          reportPath: job.reportPath,
+          removedUsers: report?.removedUsers.length ?? null,
+          keptUsers: report?.keptUsers.length ?? null,
+          skippedUsers: report?.skippedUsers.length ?? null,
+          error: job.error
+        }
+      );
+      void handleStaleKeywordUserPruneAlertStop(job, report);
+    });
+
+    return job;
+  }
+
+  function stopStaleKeywordUserPruneJob(
+    job: StaleKeywordUserPruneJob,
+    reason: string
+  ): { stopPath: string; removedQueuedRequest: boolean; childPid: number | null } {
+    const stoppedAt = new Date().toISOString();
+    const stopPath = staleKeywordUserPruneStopPath(job.id);
+    fsSync.mkdirSync(path.dirname(stopPath), { recursive: true });
+    fsSync.writeFileSync(stopPath, `${JSON.stringify({ jobId: job.id, reason, requestedAt: stoppedAt }, null, 2)}\n`, "utf8");
+
+    let removedQueuedRequest = false;
+    try {
+      fsSync.unlinkSync(staleKeywordUserPruneRequestPath(job.id));
+      removedQueuedRequest = true;
+    } catch {
+      removedQueuedRequest = false;
+    }
+
+    const childPid = job.child?.pid ?? null;
+    if (job.child && job.child.exitCode === null) {
+      job.child.kill("SIGTERM");
+    }
+
+    const existingReport = readStaleKeywordUserPruneReport(job.id);
+    const stoppedReport = stoppedStaleKeywordUserPruneReport(job, existingReport, stoppedAt, reason);
+    writeStaleKeywordUserPruneReport(stoppedReport);
+    job.status = "stopped";
+    job.completedAt = stoppedAt;
+    job.error = stoppedReport.error;
+    job.blockedByAlertId = null;
+    return { stopPath, removedQueuedRequest, childPid };
+  }
+
+  function queueDockerStaleKeywordUserPruneJob(
+    mode: KeywordUserPruneMode,
+    maxAgeDays: number,
+    stoppedRun: RunRecord | null,
+    autoIgnoreAlert: boolean,
+    maxRetries: number,
+    startIndex: number,
+    restartCount = 0,
+    resumeStatePath?: string
+  ): StaleKeywordUserPruneJob {
+    const job = createStaleKeywordUserPruneJob(mode, maxAgeDays, stoppedRun, autoIgnoreAlert, maxRetries, startIndex, restartCount, resumeStatePath);
+    fsSync.mkdirSync(staleKeywordUserPruneRequestDir(), { recursive: true });
+    fsSync.writeFileSync(
+      staleKeywordUserPruneRequestPath(job.id),
+      `${JSON.stringify(
+        {
+          mode,
+          jobId: job.id,
+          maxAgeDays,
+          autoIgnoreAlert,
+          maxRetries,
+          startIndex,
+          restartCount,
+          requestedAt: job.startedAt,
+          reportPath: job.reportPath,
+          resumeStatePath: job.resumeStatePath
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+    staleKeywordUserPruneJob = job;
+    void recordSession("info", "keyword_user_prune.docker_queued", "Stale keyword user pruning queued for Docker VPN worker", {
+      jobId: job.id,
+      mode: job.mode,
+      maxAgeDays,
+      autoIgnoreAlert,
+      maxRetries,
+      startIndex,
+      restartCount,
+      requestPath: staleKeywordUserPruneRequestPath(job.id),
+      reportPath: job.reportPath,
+      resumeStatePath: job.resumeStatePath
+    });
+    return job;
+  }
+
+  function createStaleKeywordUserPruneJob(
+    mode: KeywordUserPruneMode,
+    maxAgeDays: number,
+    stoppedRun: RunRecord | null,
+    autoIgnoreAlert: boolean,
+    maxRetries: number,
+    startIndex: number,
+    restartCount = 0,
+    resumeStatePath?: string
+  ): StaleKeywordUserPruneJob {
+    const id = `stale-users-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+    return {
+      id,
+      status: "running",
+      mode,
+      maxAgeDays,
+      autoIgnoreAlert,
+      maxRetries,
+      startIndex,
+      restartCount,
+      blockedByAlertId: null,
+      restartedAfterAlertId: null,
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      reportPath: staleKeywordUserPruneReportPath(id),
+      resumeStatePath: resumeStatePath ?? staleKeywordUserPruneResumeStatePath(id),
+      stoppedRun: stoppedRun ? { id: stoppedRun.id, status: stoppedRun.status } : null,
+      child: null,
+      stdout: "",
+      stderr: "",
+      exitCode: null,
+      signal: null,
+      error: null
+    };
+  }
+
+  function staleKeywordUserPruneStatus() {
+    const job = staleKeywordUserPruneJob;
+    const staleUsers = staleKeywordUserSnapshot();
+    if (!job) {
+      return { running: false, job: null, staleUsers, estimates: staleKeywordUserPruneFallbackEstimates() };
+    }
+    const report = readStaleKeywordUserPruneReport(job.id);
+    const status = report?.status ?? job.status;
+    const estimates = staleKeywordUserPruneEstimates(job, report);
+    return {
+      running: status === "running",
+      staleUsers,
+      estimates,
+      job: {
+        id: job.id,
+        status,
+        mode: report?.mode ?? job.mode,
+        maxAgeDays: job.maxAgeDays,
+        autoIgnoreAlert: job.autoIgnoreAlert,
+        maxRetries: job.maxRetries,
+        startIndex: report?.startIndex ?? job.startIndex,
+        skippedBeforeStartIndex: report?.skippedBeforeStartIndex ?? Math.max(0, job.startIndex - 1),
+        estimatedCheckedUsers: estimates.checkedUsers,
+        suggestedStartIndex: estimates.suggestedStartIndex,
+        restartCount: job.restartCount,
+        blockedByAlertId: report?.blockedByAlertId ?? job.blockedByAlertId,
+        restartedAfterAlertId: job.restartedAfterAlertId,
+        startedAt: job.startedAt,
+        completedAt: report?.completedAt ?? job.completedAt,
+        reportPath: job.reportPath,
+        resumeStatePath: job.resumeStatePath,
+        stoppedRun: job.stoppedRun,
+        exitCode: job.exitCode,
+        signal: job.signal,
+        error: report?.error ?? job.error,
+        stdoutTail: lastOutputLines(job.stdout, 20),
+        stderrTail: lastOutputLines(job.stderr, 20),
+        report
+      }
+    };
+  }
+
+  async function staleKeywordUserPruneStatusFresh() {
+    await refreshStaleKeywordUserPruneJobFromReport();
+    recoverStaleKeywordUserPruneJobFromRuntime();
+    await refreshStaleKeywordUserPruneJobFromReport();
+    return staleKeywordUserPruneStatus();
+  }
+
+  function recoverStaleKeywordUserPruneJobFromRuntime(): void {
+    if (!staleKeywordUserPruneRuntimeRecoveryEnabled()) {
+      return;
+    }
+    const currentJob = staleKeywordUserPruneJob;
+    if (currentJob) {
+      const report = readStaleKeywordUserPruneReport(currentJob.id);
+      const status = report?.status ?? currentJob.status;
+      if (status === "running") {
+        return;
+      }
+    }
+
+    const recoveredJob = recoverStaleKeywordUserPruneJobFromRequest() ?? recoverStaleKeywordUserPruneJobFromReport();
+    if (!recoveredJob) {
+      return;
+    }
+
+    staleKeywordUserPruneJob = recoveredJob;
+  }
+
+  function staleKeywordUserPruneRuntimeRecoveryEnabled(): boolean {
+    const databaseName = (options.database as unknown as { name?: string }).name;
+    return Boolean(databaseName && databaseName !== ":memory:");
+  }
+
+  function recoverStaleKeywordUserPruneJobFromRequest(): StaleKeywordUserPruneJob | null {
+    const dir = staleKeywordUserPruneRequestDir();
+    let files: Array<{ filePath: string; mtimeMs: number }> = [];
+    try {
+      files = fsSync
+        .readdirSync(dir)
+        .filter((filename) => filename.endsWith(".json") || filename.endsWith(".running"))
+        .map((filename) => {
+          const filePath = path.join(dir, filename);
+          return { filePath, mtimeMs: fsSync.statSync(filePath).mtimeMs };
+        })
+        .sort((left, right) => right.mtimeMs - left.mtimeMs);
+    } catch {
+      return null;
+    }
+
+    for (const file of files) {
+      const job = staleKeywordUserPruneJobFromRequestFile(file.filePath);
+      if (job) {
+        return job;
+      }
+    }
+    return null;
+  }
+
+  function recoverStaleKeywordUserPruneJobFromReport(): StaleKeywordUserPruneJob | null {
+    for (const reportPath of staleKeywordUserPruneReportPaths()) {
+      const report = readStaleKeywordUserPruneReportFromPath(reportPath);
+      if (!report || report.status !== "running" || !staleKeywordUserPruneProcessIsRunning(report.jobId)) {
+        continue;
+      }
+      return staleKeywordUserPruneJobFromReportFile(report, reportPath);
+    }
+    return null;
+  }
+
+  function staleKeywordUserPruneJobFromRequestFile(filePath: string): StaleKeywordUserPruneJob | null {
+    try {
+      const parsed = JSON.parse(fsSync.readFileSync(filePath, "utf8")) as {
+        mode?: unknown;
+        jobId?: unknown;
+        maxAgeDays?: unknown;
+        autoIgnoreAlert?: unknown;
+        maxRetries?: unknown;
+        startIndex?: unknown;
+        restartCount?: unknown;
+        requestedAt?: unknown;
+        reportPath?: unknown;
+        resumeStatePath?: unknown;
+      };
+      const id = typeof parsed.jobId === "string" && parsed.jobId.trim() ? parsed.jobId : "";
+      const maxAgeDays = Number(parsed.maxAgeDays);
+      if (!id || !Number.isFinite(maxAgeDays) || maxAgeDays <= 0) {
+        return null;
+      }
+      const runtimeConfig = getXApiConfig();
+      const stat = fsSync.statSync(filePath);
+      return {
+        id,
+        status: "running",
+        mode: parsed.mode === "x_api" ? "x_api" : "without_api",
+        maxAgeDays,
+        autoIgnoreAlert: typeof parsed.autoIgnoreAlert === "boolean" ? parsed.autoIgnoreAlert : runtimeConfig.staleKeywordUserAutoIgnoreAlert,
+        maxRetries:
+          Number.isFinite(Number(parsed.maxRetries)) && Number(parsed.maxRetries) >= 0
+            ? Number(parsed.maxRetries)
+            : runtimeConfig.staleKeywordUserMaxRetries,
+        startIndex: Number.isFinite(Number(parsed.startIndex)) && Number(parsed.startIndex) > 0 ? Number(parsed.startIndex) : 1,
+        restartCount: Number.isFinite(Number(parsed.restartCount)) && Number(parsed.restartCount) >= 0 ? Number(parsed.restartCount) : 0,
+        blockedByAlertId: null,
+        restartedAfterAlertId: null,
+        startedAt: typeof parsed.requestedAt === "string" && parsed.requestedAt ? parsed.requestedAt : stat.mtime.toISOString(),
+        completedAt: null,
+        reportPath: typeof parsed.reportPath === "string" && parsed.reportPath ? parsed.reportPath : staleKeywordUserPruneReportPath(id),
+        resumeStatePath:
+          typeof parsed.resumeStatePath === "string" && parsed.resumeStatePath ? parsed.resumeStatePath : staleKeywordUserPruneResumeStatePath(id),
+        stoppedRun: null,
+        child: null,
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        signal: null,
+        error: null
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function staleKeywordUserPruneJobFromReportFile(report: StaleKeywordUserPruneReport, reportPath: string): StaleKeywordUserPruneJob | null {
+    if (!report.jobId) {
+      return null;
+    }
+    const runtimeConfig = getXApiConfig();
+    return {
+      id: report.jobId,
+      status: "running",
+      mode: report.mode === "x_api" ? "x_api" : "without_api",
+      maxAgeDays: report.maxAgeDays,
+      autoIgnoreAlert: runtimeConfig.staleKeywordUserAutoIgnoreAlert,
+      maxRetries: runtimeConfig.staleKeywordUserMaxRetries,
+      startIndex: report.startIndex,
+      restartCount: 0,
+      blockedByAlertId: typeof report.blockedByAlertId === "number" ? report.blockedByAlertId : null,
+      restartedAfterAlertId: null,
+      startedAt: report.startedAt,
+      completedAt: null,
+      reportPath,
+      resumeStatePath: staleKeywordUserPruneResumeStatePath(report.jobId),
+      stoppedRun: null,
+      child: null,
+      stdout: "",
+      stderr: "",
+      exitCode: null,
+      signal: null,
+      error: null
+    };
+  }
+
+  function staleKeywordUserPruneReportPaths(): string[] {
+    const runtimeDir = path.join(process.cwd(), "runtime");
+    try {
+      return fsSync
+        .readdirSync(runtimeDir)
+        .filter((filename) => /^stale-keyword-user-prune-stale-users-.+\.json$/.test(filename))
+        .map((filename) => {
+          const filePath = path.join(runtimeDir, filename);
+          return { filePath, mtimeMs: fsSync.statSync(filePath).mtimeMs };
+        })
+        .sort((left, right) => right.mtimeMs - left.mtimeMs)
+        .map((entry) => entry.filePath);
+    } catch {
+      return [];
+    }
+  }
+
+  function staleKeywordUserPruneProcessIsRunning(jobId: string): boolean {
+    try {
+      for (const entry of fsSync.readdirSync("/proc", { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) {
+          continue;
+        }
+        let commandLine = "";
+        try {
+          commandLine = fsSync.readFileSync(path.join("/proc", entry.name, "cmdline"), "utf8").replace(/\0/g, " ");
+        } catch {
+          continue;
+        }
+        if (
+          commandLine.includes(jobId) &&
+          (commandLine.includes("staleKeywordUserPruner") || commandLine.includes("keyword-users:prune-stale"))
+        ) {
+          return true;
+        }
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  }
+
+  async function refreshStaleKeywordUserPruneJobFromReport(): Promise<void> {
+    const job = staleKeywordUserPruneJob;
+    if (!job || job.child) {
+      return;
+    }
+    const report = readStaleKeywordUserPruneReport(job.id);
+    if (!report || report.status === "running") {
+      return;
+    }
+
+    const wasRunning = job.status === "running";
+    const previousBlockedAlertId = job.blockedByAlertId;
+    const reportBlockedAlertId = typeof report.blockedByAlertId === "number" ? report.blockedByAlertId : null;
+    job.status = report.status;
+    job.completedAt = report.completedAt ?? job.completedAt ?? new Date().toISOString();
+    job.error = report.status === "failed" || report.status === "stopped" ? report.error ?? job.error : job.error;
+    if (job.exitCode === null) {
+      job.exitCode = report.status === "completed" || report.status === "stopped" ? 0 : reportBlockedAlertId ? 2 : 1;
+    }
+    const effectiveBlockedAlertId = staleKeywordUserPruneBlockedAlertId(job, report);
+    if (effectiveBlockedAlertId) {
+      job.blockedByAlertId = effectiveBlockedAlertId;
+    }
+
+    if (wasRunning) {
+      const eventType =
+        report.status === "completed"
+          ? "keyword_user_prune.job_completed"
+          : report.status === "stopped"
+            ? "keyword_user_prune.job_stopped"
+            : "keyword_user_prune.job_failed";
+      const eventMessage =
+        report.status === "completed"
+          ? "Stale keyword user pruning job completed"
+          : report.status === "stopped"
+            ? "Stale keyword user pruning job stopped"
+            : "Stale keyword user pruning job failed";
+      await recordSession(
+        report.status === "failed" ? "prob" : "info",
+        eventType,
+        eventMessage,
+        {
+          jobId: job.id,
+          code: job.exitCode,
+          signal: job.signal,
+          reportPath: job.reportPath,
+          removedUsers: report.removedUsers.length,
+          keptUsers: report.keptUsers.length,
+          skippedUsers: report.skippedUsers.length,
+          error: job.error
+        }
+      );
+    }
+
+    if (report.status === "failed" && (wasRunning || (effectiveBlockedAlertId && previousBlockedAlertId !== effectiveBlockedAlertId))) {
+      await handleStaleKeywordUserPruneAlertStop(job, report);
+    }
+  }
+
+  function readStaleKeywordUserPruneReport(jobId: string): StaleKeywordUserPruneReport | null {
+    try {
+      return JSON.parse(fsSync.readFileSync(staleKeywordUserPruneReportPath(jobId), "utf8")) as StaleKeywordUserPruneReport;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeStaleKeywordUserPruneReport(report: StaleKeywordUserPruneReport): void {
+    fsSync.mkdirSync(path.dirname(staleKeywordUserPruneReportPath(report.jobId)), { recursive: true });
+    fsSync.writeFileSync(staleKeywordUserPruneReportPath(report.jobId), `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  }
+
+  function stoppedStaleKeywordUserPruneReport(
+    job: StaleKeywordUserPruneJob,
+    report: StaleKeywordUserPruneReport | null,
+    stoppedAt: string,
+    reason: string
+  ): StaleKeywordUserPruneReport {
+    return {
+      jobId: job.id,
+      mode: report?.mode ?? job.mode,
+      status: "stopped",
+      maxAgeDays: report?.maxAgeDays ?? job.maxAgeDays,
+      startedAt: report?.startedAt ?? job.startedAt,
+      completedAt: stoppedAt,
+      account: report?.account ?? null,
+      vpnProfilePath: report?.vpnProfilePath ?? null,
+      publicIpv4: report?.publicIpv4 ?? null,
+      totalCandidates: report?.totalCandidates ?? 0,
+      processedCandidates: report?.processedCandidates ?? 0,
+      startIndex: report?.startIndex ?? job.startIndex,
+      skippedBeforeStartIndex: report?.skippedBeforeStartIndex ?? Math.max(0, job.startIndex - 1),
+      removedUsers: report?.removedUsers ?? [],
+      keptUsers: report?.keptUsers ?? [],
+      skippedUsers: report?.skippedUsers ?? [],
+      deletedUsers: report?.deletedUsers ?? [],
+      error: `Stopped by request: ${reason}.`,
+      blockedByAlertId: null,
+      blockedByAccountId: null,
+      blockedByXIdentifier: null,
+      blockedKeyword: null
+    };
+  }
+
+  function staleKeywordUserSnapshot() {
+    const page = lists.listPage("stale_keyword_user", { limit: 100, order: "desc" });
+    return {
+      entries: page.entries,
+      total: page.total,
+      limit: page.limit,
+      offset: page.offset,
+      hasMore: page.hasMore
+    };
+  }
+
+  function staleKeywordUserPruneEstimates(
+    job: StaleKeywordUserPruneJob,
+    report: StaleKeywordUserPruneReport | null
+  ): { checkedUsers: number; suggestedStartIndex: number } {
+    const skippedBeforeStartIndex = report?.skippedBeforeStartIndex ?? Math.max(0, job.startIndex - 1);
+    const processed = report?.processedCandidates ?? 0;
+    const reportedCheckedUsers =
+      (report?.removedUsers.length ?? 0) +
+      (report?.deletedUsers?.length ?? 0) +
+      (report?.keptUsers.length ?? 0) +
+      (report?.skippedUsers.filter((user) => user.reason !== "already_in_stale_keyword_user").length ?? 0);
+    const resumeStats = readStaleKeywordUserPruneResumeStats(job.resumeStatePath);
+    const checkedAfterStartIndex = Math.max(processed, reportedCheckedUsers, resumeStats.checkedUsers);
+    const removedAfterStartIndex = Math.max((report?.removedUsers.length ?? 0) + (report?.deletedUsers?.length ?? 0), resumeStats.removedUsers);
+    const activeCheckedAfterStartIndex = Math.max(0, checkedAfterStartIndex - removedAfterStartIndex);
+    return {
+      checkedUsers: skippedBeforeStartIndex + checkedAfterStartIndex,
+      suggestedStartIndex: skippedBeforeStartIndex + activeCheckedAfterStartIndex + 1
+    };
+  }
+
+  function staleKeywordUserPruneFallbackEstimates(): { checkedUsers: number; suggestedStartIndex: number } {
+    const reportPath = latestStaleKeywordUserPruneReportPath();
+    const report = reportPath ? readStaleKeywordUserPruneReportFromPath(reportPath) : null;
+    if (report) {
+      const skippedBeforeStartIndex = report.skippedBeforeStartIndex ?? Math.max(0, report.startIndex - 1);
+      const processed = report.processedCandidates ?? 0;
+      const reportedCheckedUsers =
+        (report.removedUsers?.length ?? 0) +
+        (report.deletedUsers?.length ?? 0) +
+        (report.keptUsers?.length ?? 0) +
+        (report.skippedUsers?.filter((user) => user.reason !== "already_in_stale_keyword_user").length ?? 0);
+      const checkedAfterStartIndex = Math.max(processed, reportedCheckedUsers);
+      const removedAfterStartIndex = (report.removedUsers?.length ?? 0) + (report.deletedUsers?.length ?? 0);
+      const activeCheckedAfterStartIndex = Math.max(0, checkedAfterStartIndex - removedAfterStartIndex);
+      return {
+        checkedUsers: skippedBeforeStartIndex + checkedAfterStartIndex,
+        suggestedStartIndex: skippedBeforeStartIndex + activeCheckedAfterStartIndex + 1
+      };
+    }
+
+    const resumeStatePath = latestStaleKeywordUserPruneResumeStatePath();
+    if (!resumeStatePath) {
+      return { checkedUsers: 0, suggestedStartIndex: 1 };
+    }
+    const resumeStats = readStaleKeywordUserPruneResumeStats(resumeStatePath);
+    const activeCheckedUsers = Math.max(0, resumeStats.checkedUsers - resumeStats.removedUsers);
+    return {
+      checkedUsers: resumeStats.checkedUsers,
+      suggestedStartIndex: activeCheckedUsers + 1
+    };
+  }
+
+  function latestStaleKeywordUserPruneResumeStatePath(): string | undefined {
+    const runtimeDir = path.join(process.cwd(), "runtime");
+    try {
+      return fsSync
+        .readdirSync(runtimeDir)
+        .filter((filename) => /^stale-keyword-user-prune-resume-.+\.json$/.test(filename))
+        .map((filename) => {
+          const filePath = path.join(runtimeDir, filename);
+          return { filePath, mtimeMs: fsSync.statSync(filePath).mtimeMs };
+        })
+        .sort((left, right) => right.mtimeMs - left.mtimeMs)[0]?.filePath;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function latestStaleKeywordUserPruneReportPath(): string | undefined {
+    const runtimeDir = path.join(process.cwd(), "runtime");
+    try {
+      return fsSync
+        .readdirSync(runtimeDir)
+        .filter((filename) => /^stale-keyword-user-prune-stale-users-.+\.json$/.test(filename))
+        .map((filename) => {
+          const filePath = path.join(runtimeDir, filename);
+          return { filePath, mtimeMs: fsSync.statSync(filePath).mtimeMs };
+        })
+        .sort((left, right) => right.mtimeMs - left.mtimeMs)[0]?.filePath;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function readStaleKeywordUserPruneReportFromPath(reportPath: string): StaleKeywordUserPruneReport | null {
+    try {
+      return JSON.parse(fsSync.readFileSync(reportPath, "utf8")) as StaleKeywordUserPruneReport;
+    } catch {
+      return null;
+    }
+  }
+
+  function readStaleKeywordUserPruneResumeStats(resumeStatePath: string): { checkedUsers: number; removedUsers: number } {
+    try {
+      const parsed = JSON.parse(fsSync.readFileSync(resumeStatePath, "utf8")) as {
+        checkedUsers?: Array<{ handle?: string; keyword?: string; status?: string }>;
+      };
+      const checkedHandles = new Set<string>();
+      const removedHandles = new Set<string>();
+      for (const user of Array.isArray(parsed.checkedUsers) ? parsed.checkedUsers : []) {
+        const handle = normalizeHandle(user.handle ?? user.keyword ?? "");
+        if (!handle || user.status === "already_stale") {
+          continue;
+        }
+        checkedHandles.add(handle);
+        if (user.status === "remove" || user.status === "delete_keyword") {
+          removedHandles.add(handle);
+        }
+      }
+      return { checkedUsers: checkedHandles.size, removedUsers: removedHandles.size };
+    } catch {
+      return { checkedUsers: 0, removedUsers: 0 };
+    }
+  }
+
+  function staleKeywordUserPruneBlockedAlertId(
+    job: StaleKeywordUserPruneJob,
+    report: StaleKeywordUserPruneReport | null
+  ): number | null {
+    if ((report?.mode ?? job.mode) !== "without_api") {
+      return null;
+    }
+    if (typeof report?.blockedByAlertId === "number") {
+      return report.blockedByAlertId;
+    }
+    if (typeof job.blockedByAlertId === "number") {
+      return job.blockedByAlertId;
+    }
+    if (report && staleKeywordUserPruneErrorLooksAlertBlocked(report.error)) {
+      const openAlerts = xSessionAlerts.openAlerts();
+      const matchingAlerts = openAlerts.filter((alert) =>
+        report.blockedByAccountId
+          ? alert.accountId === report.blockedByAccountId
+          : report.blockedByXIdentifier
+            ? alert.xIdentifier === report.blockedByXIdentifier
+            : report.vpnProfilePath
+              ? alert.vpnProfilePath === report.vpnProfilePath
+              : true
+      );
+      return matchingAlerts.length === 1 ? matchingAlerts[0].id : null;
+    }
+    if (job.exitCode !== 2) {
+      return null;
+    }
+    const openAlerts = xSessionAlerts.openAlerts();
+    return openAlerts.length === 1 ? openAlerts[0].id : null;
+  }
+
+  function staleKeywordUserPruneErrorLooksAlertBlocked(error: string | null | undefined): boolean {
+    return Boolean(
+      error &&
+        (/X account is locked by an open manual verification alert/i.test(error) ||
+          /X returned a blocking error page/i.test(error) ||
+          /manual verification/i.test(error))
+    );
+  }
+
+  async function handleStaleKeywordUserPruneAlertStop(
+    job: StaleKeywordUserPruneJob,
+    report: StaleKeywordUserPruneReport | null
+  ): Promise<void> {
+    if ((report?.mode ?? job.mode) !== "without_api") {
+      return;
+    }
+    const alertId = staleKeywordUserPruneBlockedAlertId(job, report);
+    if (!alertId) {
+      return;
+    }
+    job.blockedByAlertId = alertId;
+    await recordSession("prob", "keyword_user_prune.waiting_alert_resolution", "Stale keyword user pruning is waiting for X session alert resolution", {
+      jobId: job.id,
+      alertId,
+      maxAgeDays: job.maxAgeDays,
+      autoIgnoreAlert: job.autoIgnoreAlert,
+      maxRetries: job.maxRetries,
+      restartCount: job.restartCount,
+      blockedKeyword: report?.blockedKeyword ?? null
+    });
+    if (!job.autoIgnoreAlert) {
+      return;
+    }
+    if (job.restartCount >= job.maxRetries) {
+      await recordSession("prob", "keyword_user_prune.auto_ignore_limit", "Stale keyword user pruning auto-ignore limit reached", {
+        jobId: job.id,
+        alertId,
+        restartCount: job.restartCount,
+        maxRestarts: job.maxRetries
+      });
+      return;
+    }
+    const alert = xSessionAlerts.find(alertId);
+    if (!alert) {
+      return;
+    }
+    const closedAlert = alert.status === "open" ? xSessionAlerts.ignore(alert.id) : alert;
+    if (alert.status === "open") {
+      markIgnoredAlertAccountReady(closedAlert);
+      await recordSession("prob", "keyword_user_prune.alert_auto_ignored", "X session alert auto-ignored for stale keyword user pruning", {
+        jobId: job.id,
+        alertId: closedAlert.id,
+        accountId: closedAlert.accountId,
+        xIdentifier: closedAlert.xIdentifier,
+        restartCount: job.restartCount
+      });
+    }
+    await maybeRestartStaleKeywordUserPruneAfterAlert(closedAlert, "auto_ignored");
+  }
+
+  async function maybeRestartStaleKeywordUserPruneAfterAlert(
+    alert: XSessionAlertRecord,
+    source: "resolved" | "ignored" | "auto_ignored"
+  ): Promise<StaleKeywordUserPruneJob | null> {
+    const job = staleKeywordUserPruneJob;
+    if (!job) {
+      return null;
+    }
+    if (job.mode !== "without_api") {
+      return null;
+    }
+    const report = readStaleKeywordUserPruneReport(job.id);
+    const effectiveStatus = report?.status ?? job.status;
+    const blockedAlertId = staleKeywordUserPruneBlockedAlertId(job, report);
+    if (effectiveStatus === "running" || blockedAlertId !== alert.id || job.restartedAfterAlertId === alert.id) {
+      return null;
+    }
+    if (job.restartCount >= job.maxRetries) {
+      await recordSession("prob", "keyword_user_prune.auto_restart_limit", "Stale keyword user pruning was not restarted because the retry limit was reached", {
+        jobId: job.id,
+        alertId: alert.id,
+        restartCount: job.restartCount,
+        maxRestarts: job.maxRetries
+      });
+      return null;
+    }
+    if (runs.current()) {
+      await recordSession("prob", "keyword_user_prune.auto_restart_skipped", "Stale keyword user pruning was not restarted because a run is active", {
+        jobId: job.id,
+        alertId: alert.id,
+        source
+      });
+      return null;
+    }
+    const runtimeConfig = getXApiConfig();
+    const startCheck = await checkWithoutApiRunStart();
+    if (!startCheck.ok) {
+      await recordSession("prob", "keyword_user_prune.auto_restart_blocked", "Stale keyword user pruning could not restart after X session alert was closed", {
+        jobId: job.id,
+        alertId: alert.id,
+        source,
+        reason: startCheck.reason,
+        error: startCheck.payload.error
+      });
+      return null;
+    }
+
+    job.restartedAfterAlertId = alert.id;
+    const nextRestartCount = job.restartCount + 1;
+    const restarted = usesDockerVpnIsolation(runtimeConfig)
+      ? queueDockerStaleKeywordUserPruneJob(job.mode, job.maxAgeDays, null, job.autoIgnoreAlert, job.maxRetries, job.startIndex, nextRestartCount, job.resumeStatePath)
+      : startStaleKeywordUserPruneJob(job.mode, job.maxAgeDays, runtimeConfig, null, job.autoIgnoreAlert, job.maxRetries, job.startIndex, nextRestartCount, job.resumeStatePath);
+    await recordSession("info", "keyword_user_prune.auto_restarted", "Stale keyword user pruning restarted after X session alert was closed", {
+      previousJobId: job.id,
+      jobId: restarted.id,
+      alertId: alert.id,
+      source,
+      maxAgeDays: restarted.maxAgeDays,
+      autoIgnoreAlert: restarted.autoIgnoreAlert,
+      maxRetries: restarted.maxRetries,
+      restartCount: restarted.restartCount,
+      resumeStatePath: restarted.resumeStatePath,
+      accountId: startCheck.account.id,
+      xIdentifier: startCheck.account.xIdentifier
+    });
+    return restarted;
+  }
+
+  function markIgnoredAlertAccountReady(alert: XSessionAlertRecord): void {
+    const account = xBrowserAccounts.findById(alert.accountId);
+    if (account?.storageStateExists) {
+      xBrowserAccounts.markStatus(alert.accountId, "valid");
+    }
+  }
+
+  function staleKeywordUserPruneReportPath(jobId: string): string {
+    return path.join(process.cwd(), "runtime", `stale-keyword-user-prune-${safeJobPathSegment(jobId)}.json`);
+  }
+
+  function staleKeywordUserPruneResumeStatePath(jobId: string): string {
+    return path.join(process.cwd(), "runtime", `stale-keyword-user-prune-resume-${safeJobPathSegment(jobId)}.json`);
+  }
+
+  function staleKeywordUserPruneResumeStatePathForStart(maxAgeDays: number): string | undefined {
+    const previousJob = staleKeywordUserPruneJob;
+    if (!previousJob || previousJob.maxAgeDays !== maxAgeDays) {
+      return undefined;
+    }
+    const report = readStaleKeywordUserPruneReport(previousJob.id);
+    const status = report?.status ?? previousJob.status;
+    return status === "failed" ? previousJob.resumeStatePath : undefined;
+  }
+
+  function staleKeywordUserPruneRequestDir(): string {
+    return path.join(process.cwd(), "runtime", "stale-keyword-user-prune-requests");
+  }
+
+  function staleKeywordUserPruneRequestPath(jobId: string): string {
+    return path.join(staleKeywordUserPruneRequestDir(), `${safeJobPathSegment(jobId)}.json`);
+  }
+
+  function staleKeywordUserPruneStopPath(jobId: string): string {
+    return path.join(process.cwd(), "runtime", "stale-keyword-user-prune-stops", `${safeJobPathSegment(jobId)}.stop`);
+  }
+
   async function checkVpnSudoStatus(): Promise<{
     available: boolean;
     message: string;
@@ -1811,14 +3233,23 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
   }
 
+  function xLoginCommand(accountId: number, config = getXApiConfig()): string {
+    return usesDockerVpnIsolation(config)
+      ? `docker compose run --rm x-login --account-id ${accountId}`
+      : `npm run netns:x-login -- --account-id ${accountId}`;
+  }
+
   function xAlertManualLoginCommands(accountId: number) {
-    const autoSaveLogin = `npm run netns:x-login -- --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`;
+    const runtimeConfig = getXApiConfig();
+    const autoSaveLogin = usesDockerVpnIsolation(runtimeConfig)
+      ? `docker compose run --rm x-login --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`
+      : `npm run netns:x-login -- --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`;
     return {
-      setup: "npm run setup:local",
+      setup: usesDockerVpnIsolation(runtimeConfig) ? "ops/docker/x11-bridge.sh" : "npm run setup:local",
       manualLogin: autoSaveLogin,
       webLaunch: autoSaveLogin,
-      diagnose: "npm run netns:diagnose",
-      worker: "npm run netns:worker"
+      diagnose: usesDockerVpnIsolation(runtimeConfig) ? "docker compose exec worker npm run diagnose:vpn" : "npm run netns:diagnose",
+      worker: usesDockerVpnIsolation(runtimeConfig) ? "docker compose up -d worker" : "npm run netns:worker"
     };
   }
 
@@ -1958,28 +3389,30 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   async function prepareWithoutApiRunStart(
     reply: FastifyReply
   ): Promise<{ ok: true; account: XBrowserAccountRecord } | { ok: false }> {
+    const result = await checkWithoutApiRunStart();
+    if (!result.ok) {
+      reply.code(result.code).send(result.payload);
+      return { ok: false };
+    }
+    return result;
+  }
+
+  async function checkWithoutApiRunStart(): Promise<WithoutApiRunStartCheck> {
     const runtimeConfig = getXApiConfig();
-    const account = xBrowserAccounts.findByVpnProfilePath(runtimeConfig.vpnConfig);
+    let account = xBrowserAccounts.findByVpnProfilePath(runtimeConfig.vpnConfig);
     if (!account) {
       await recordSession("prob", "browser.search.account_missing", "No X browser account is linked to the selected VPN profile", {
         vpnProfilePath: runtimeConfig.vpnConfig
       });
-      reply.code(409).send({
-        error:
-          "Search without API needs an X browser account linked to the selected OpenVPN profile. Configure it in Settings > X browser account."
-      });
-      return { ok: false };
-    }
-    if (!account.storageStateExists || account.sessionStatus !== "valid") {
-      await recordSession("prob", "browser.search.session_missing", "X browser session is missing or needs login", {
-        accountId: account.id,
-        xIdentifier: account.xIdentifier,
-        sessionStatus: account.sessionStatus
-      });
-      reply.code(409).send({
-        error: `X browser session for ${account.xIdentifier} is not ready. Run npm run netns:x-login -- --account-id ${account.id}.`
-      });
-      return { ok: false };
+      return {
+        ok: false,
+        code: 409,
+        reason: "account_missing",
+        payload: {
+          error:
+            "Search without API needs an X browser account linked to the selected OpenVPN profile. Configure it in Settings > X browser account."
+        }
+      };
     }
     const alert = xSessionAlerts.openForAccount(account.id);
     if (alert) {
@@ -1988,12 +3421,50 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         accountId: alert.accountId,
         xIdentifier: alert.xIdentifier
       });
-      reply.code(423).send({
-        error: "This X account is locked by an open manual verification alert.",
-        alert
-      });
-      return { ok: false };
+      return {
+        ok: false,
+        code: 423,
+        reason: "session_alert",
+        payload: {
+          error: "This X account is locked by an open manual verification alert.",
+          alert
+        }
+      };
     }
+
+    if (account.storageStateExists && account.sessionStatus === "needs_login") {
+      account = xBrowserAccounts.markStatus(account.id, "valid");
+      await recordSession("info", "browser.search.session_reused_after_alert_ignore", "Reusing stored X browser session after closed or ignored alert", {
+        accountId: account.id,
+        xIdentifier: account.xIdentifier,
+        vpnProfilePath: runtimeConfig.vpnConfig
+      });
+    }
+
+    if (!account.storageStateExists || account.sessionStatus !== "valid") {
+      await recordSession("prob", "browser.search.session_missing", "X browser session is missing or needs login", {
+        accountId: account.id,
+        xIdentifier: account.xIdentifier,
+        sessionStatus: account.sessionStatus
+      });
+      return {
+        ok: false,
+        code: 409,
+        reason: "session_missing",
+        payload: {
+          error: `X browser session for ${account.xIdentifier} is not ready. Run ${xLoginCommand(account.id, runtimeConfig)}.`
+        }
+      };
+    }
+    if (usesDockerVpnIsolation(runtimeConfig)) {
+      await recordSession("info", "browser.docker_vpn.preflight.deferred", "Docker VPN worker will run VPN diagnostics before browser work", {
+        vpnProfilePath: runtimeConfig.vpnConfig,
+        accountId: account.id,
+        xIdentifier: account.xIdentifier
+      });
+      return { ok: true, account };
+    }
+
     const vpnPreflight = await runWithoutApiVpnPreflight();
     if (!vpnPreflight.ok) {
       await recordSession("prob", "browser.vpn.preflight.failed", "Search without API start blocked because VPN diagnostics failed", {
@@ -2003,15 +3474,19 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         error: vpnPreflight.error,
         output: vpnPreflight.output
       });
-      reply.code(409).send({
-        error: [
-          "Search without API was not started because VPN diagnostics failed.",
-          "Start/Resume tried to prepare the VPN namespace automatically, but the VPN was not ready.",
-          "Check Show current session for vpn.autostart.* logs. If the root helper is missing, run npm run setup:local once, then press Start again.",
-          vpnPreflight.error
-        ].join(" ")
-      });
-      return { ok: false };
+      return {
+        ok: false,
+        code: 409,
+        reason: "vpn_preflight_failed",
+        payload: {
+          error: [
+            "Search without API was not started because VPN diagnostics failed.",
+            "Start/Resume tried to prepare the VPN namespace automatically, but the VPN was not ready.",
+            "Check Show current session for vpn.autostart.* logs. If the root helper is missing, run npm run setup:local once, then press Start again.",
+            vpnPreflight.error
+          ].join(" ")
+        }
+      };
     }
     await recordSession("info", "browser.vpn.preflight.passed", "Search without API VPN diagnostics passed before Start", {
       vpnProfilePath: runtimeConfig.vpnConfig,
@@ -2052,14 +3527,125 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
   }
 
+  async function maybeStartNextChainedRun(completedRunId: string, mode: "without_api" | "x_api"): Promise<void> {
+    const completedRun = runs.get(completedRunId);
+    if (!completedRun || completedRun.status !== "completed") {
+      return;
+    }
+    if (runs.current()) {
+      await recordSession("prob", "run.chain.skipped", "Sequential run was not started because another run is active", {
+        previousRunId: completedRunId,
+        mode
+      });
+      return;
+    }
+
+    const chain = nextRunChainState(parseRunStats(completedRun.statsJson));
+    if (!chain) {
+      return;
+    }
+
+    const runtimeConfig = getXApiConfig();
+    const keywords = plannedKeywords(lists, runtimeConfig);
+    if (keywords.length === 0) {
+      await recordSession("info", "run.chain.empty", "Sequential runs stopped because no eligible keywords remain", {
+        previousRunId: completedRunId,
+        mode,
+        chainIndex: chain.index,
+        chainTotal: chain.total
+      });
+      return;
+    }
+
+    if (mode === "without_api") {
+      if (!runtimeConfig.searchWithoutApiEnabled) {
+        await recordSession("prob", "run.chain.disabled", "Sequential run stopped because Search without API is disabled", {
+          previousRunId: completedRunId,
+          chainIndex: chain.index,
+          chainTotal: chain.total
+        });
+        return;
+      }
+      const startCheck = await checkWithoutApiRunStart();
+      if (!startCheck.ok) {
+        await recordSession("prob", "run.chain.blocked", "Sequential run stopped before start", {
+          previousRunId: completedRunId,
+          mode,
+          reason: startCheck.reason,
+          chainIndex: chain.index,
+          chainTotal: chain.total
+        });
+        return;
+      }
+      const nextRun = runs.start(createInitialRunStats(lists, runtimeConfig, keywords, chain));
+      runs.replaceKeywords(nextRun.id, keywords);
+      await recordSession("info", "run.chain.started", "Sequential run started", {
+        previousRunId: completedRunId,
+        runId: nextRun.id,
+        mode,
+        plannedKeywords: keywords.length,
+        chainIndex: chain.index,
+        chainTotal: chain.total,
+        accountId: startCheck.account.id,
+        xIdentifier: startCheck.account.xIdentifier
+      });
+      await startWithoutApiExecution(nextRun);
+      return;
+    }
+
+    if (!runtimeConfig.xApiEnabled) {
+      await recordSession("prob", "run.chain.disabled", "Sequential run stopped because X API search is disabled", {
+        previousRunId: completedRunId,
+        chainIndex: chain.index,
+        chainTotal: chain.total
+      });
+      return;
+    }
+    const nextRun = runs.start(createInitialRunStats(lists, runtimeConfig, keywords, chain));
+    runs.replaceKeywords(nextRun.id, keywords);
+    await recordSession("info", "run.chain.started", "Sequential run started", {
+      previousRunId: completedRunId,
+      runId: nextRun.id,
+      mode,
+      plannedKeywords: keywords.length,
+      chainIndex: chain.index,
+      chainTotal: chain.total
+    });
+    startCrawlerLoop(nextRun);
+  }
+
+  async function startWithoutApiExecution(run: RunRecord): Promise<void> {
+    const runtimeConfig = getXApiConfig();
+    if (usesDockerVpnIsolation(runtimeConfig)) {
+      await recordSession("info", "browser.worker.deferred", "Search without API run assigned to Docker VPN worker", {
+        runId: run.id,
+        isolation: runtimeConfig.searchWithoutApiIsolation
+      });
+      return;
+    }
+    startWithoutApiWorker(run);
+  }
+
   function startWithoutApiWorker(run: RunRecord): void {
     if (activeWithoutApiWorkerRunId === run.id && activeWithoutApiWorker && activeWithoutApiWorker.exitCode === null) {
       return;
     }
 
+    const runtimeConfig = getXApiConfig();
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...xApiConfigToEnvValues(runtimeConfig),
+      CURRENT_SESSION_FILE: options.currentSessionFilePath ?? options.config.currentSessionFile,
+      VPN_NETNS_AUTOSTART: "true"
+    };
+    const databasePath = databasePathForChild(options.database);
+    if (databasePath) {
+      childEnv.DATABASE_URL = databasePath;
+    }
+
     const child = spawn("npm", ["run", "netns:worker", "--", "--run-id", run.id], {
       cwd: process.cwd(),
-      env: process.env,
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"]
     });
     activeWithoutApiWorker = child;
@@ -2088,6 +3674,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       if (activeWithoutApiWorker === child) {
         activeWithoutApiWorker = null;
         activeWithoutApiWorkerRunId = null;
+      }
+      if (code === 0) {
+        void maybeStartNextChainedRun(run.id, "without_api");
       }
     });
   }
@@ -2157,10 +3746,20 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       lists,
       xClient,
       () => settings.getScoringConfig(),
-      (result) => timelineTweets.saveAccepted(result.keyword, result.tweet, result.decision)
+      (result) => {
+        timelineTweets.saveAccepted(result.keyword, result.tweet, result.decision);
+        queueAcceptedTweetMediaCache(result.tweet.id, result.tweet.entities?.media?.length ?? 0);
+      }
     );
-    const keywords = plannedKeywords(lists);
-    let completedKeywords = 0;
+    let keywords = runs.keywords(runId, 5_000).map((item) => item.keyword);
+    if (keywords.length === 0) {
+      const xApiConfig = getXApiConfig();
+      const existingStats = parseRunStats(runs.get(runId)?.statsJson ?? "{}");
+      keywords = plannedKeywords(lists, xApiConfig);
+      runs.replaceKeywords(runId, keywords);
+      runs.updateStats(runId, createInitialRunStats(lists, xApiConfig, keywords, runChainStateFromStats(existingStats, xApiConfig)));
+    }
+    let completedKeywords = Math.min(parseRunStats(runs.get(runId)?.statsJson ?? "{}").completedKeywords, keywords.length);
     await recordSession("info", "search.plan", "Search plan prepared", { runId, totalKeywords: keywords.length });
 
     while (completedKeywords < keywords.length) {
@@ -2340,6 +3939,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         acceptedTweets: stats.acceptedTweets,
         rejectedTweets: stats.rejectedTweets
       });
+      await maybeStartNextChainedRun(runId, "x_api");
     }
   }
 
@@ -2441,18 +4041,19 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
     const xApiConfig = getXApiConfig();
     const stats = parseRunStats(latest.statsJson);
-    const nextApiResetAt = new Date(Date.now() + xApiConfig.xSearchApiWindowMinutes * 60_000).toISOString();
+    const pauseMinutes = randomSearchPauseWindowMinutesForConfig(xApiConfig);
+    const nextApiResetAt = new Date(Date.now() + pauseMinutes * 60_000).toISOString();
     runs.pause(runId);
     runs.updateStats(runId, {
-      apiCallLimit: xApiConfig.xSearchApiCallLimit,
-      apiWindowMinutes: xApiConfig.xSearchApiWindowMinutes,
+      apiCallLimit: stats.apiCallLimit,
+      apiWindowMinutes: pauseMinutes,
       currentKeyword: null,
       nextApiResetAt
     });
     await recordSession("prob", "api.limit.reached", message, {
       runId,
       ...data,
-      apiWindowMinutes: xApiConfig.xSearchApiWindowMinutes,
+      apiWindowMinutes: pauseMinutes,
       nextApiResetAt
     });
     return nextApiResetAt;
@@ -2523,12 +4124,15 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
 
     const xApiConfig = getXApiConfig();
+    const apiCallLimit = apiSearchesBeforePauseForKeywords(stats.remainingKeywords, xApiConfig);
+    const pauseMinutes = searchPauseWindowMaxMinutesForConfig(xApiConfig);
     return runs.updateStats(run.id, {
       apiCallsUsed: 0,
-      apiCallLimit: xApiConfig.xSearchApiCallLimit,
-      apiWindowMinutes: xApiConfig.xSearchApiWindowMinutes,
+      apiCallLimit,
+      apiWindowMinutes: pauseMinutes,
+      apiCallsRemaining: apiCallLimit,
       currentKeyword: null,
-      nextApiResetAt: new Date(Date.now() + xApiConfig.xSearchApiWindowMinutes * 60_000).toISOString()
+      nextApiResetAt: new Date(Date.now() + pauseMinutes * 60_000).toISOString()
     });
   }
 
@@ -2606,6 +4210,72 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 function shouldLogRequest(url: string): boolean {
   const pathname = safePath(url);
   return pathname.startsWith("/admin");
+}
+
+function applySecurityHeaders(reply: FastifyReply): void {
+  reply.header("x-content-type-options", "nosniff");
+  reply.header("x-frame-options", "DENY");
+  reply.header("referrer-policy", "no-referrer");
+  reply.header(
+    "content-security-policy",
+    [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self'",
+      "img-src 'self' data: blob:",
+      "media-src 'self' blob:",
+      "connect-src 'self'",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'self'"
+    ].join("; ")
+  );
+}
+
+function isAdminMutationRequest(request: FastifyRequest): boolean {
+  return request.url.startsWith("/admin") && ["DELETE", "PATCH", "POST", "PUT"].includes(request.method);
+}
+
+function isSameOriginMutationRequest(request: FastifyRequest): boolean {
+  const fetchSite = headerValue(request.headers["sec-fetch-site"]);
+  if (fetchSite === "cross-site") {
+    return false;
+  }
+
+  const host = headerValue(request.headers.host);
+  if (!host) {
+    return true;
+  }
+
+  const origin = headerValue(request.headers.origin);
+  if (origin) {
+    return originMatchesHost(origin, host);
+  }
+
+  const referer = headerValue(request.headers.referer);
+  if (referer) {
+    try {
+      return originMatchesHost(new URL(referer).origin, host);
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function originMatchesHost(origin: string, host: string): boolean {
+  try {
+    const parsed = new URL(origin);
+    return parsed.host === host && (parsed.protocol === "http:" || parsed.protocol === "https:");
+  } catch {
+    return false;
+  }
+}
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function safePath(url: string): string {
@@ -3192,6 +4862,11 @@ function resolveProjectDirectory(inputPath: string) {
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
     throw new Error("Target directory must stay inside the RedqueenX project.");
   }
+  const vpnDirectory = path.resolve(process.cwd(), "ops/vpn");
+  const vpnRelative = path.relative(vpnDirectory, resolved);
+  if (vpnRelative.startsWith("..") || path.isAbsolute(vpnRelative)) {
+    throw new Error("File copy target must stay inside ./ops/vpn.");
+  }
   return resolved;
 }
 
@@ -3277,9 +4952,39 @@ function pinoLevelFromStatus(statusCode: number): number {
   return 30;
 }
 
+interface RunChainState {
+  total: number;
+  index: number;
+  remaining: number;
+}
+
+function initialRunChainState(config: { runChainCount?: number }): RunChainState {
+  const total = Math.max(1, Math.floor(config.runChainCount ?? 1));
+  return { total, index: 1, remaining: total - 1 };
+}
+
+function nextRunChainState(stats: RunStats): RunChainState | null {
+  const remaining = Math.max(0, Math.floor(stats.runChainRemaining ?? 0));
+  if (remaining <= 0) {
+    return null;
+  }
+  const total = Math.max(1, Math.floor(stats.runChainTotal ?? remaining + 1));
+  const index = Math.max(1, Math.floor(stats.runChainIndex ?? 1)) + 1;
+  return { total, index, remaining: remaining - 1 };
+}
+
+function runChainStateFromStats(stats: RunStats, config: { runChainCount?: number }): RunChainState {
+  const fallback = initialRunChainState(config);
+  return {
+    total: Math.max(1, Math.floor(stats.runChainTotal ?? fallback.total)),
+    index: Math.max(1, Math.floor(stats.runChainIndex ?? fallback.index)),
+    remaining: Math.max(0, Math.floor(stats.runChainRemaining ?? fallback.remaining))
+  };
+}
+
 function createInitialRunStats(
   lists: ListService,
-  config: Pick<XApiRuntimeConfig, "xSearchApiCallLimit" | "xSearchApiWindowMinutes"> &
+  config: Pick<XApiRuntimeConfig, "xSearchApiCallLimit" | "xSearchApiWindowMinutes" | "xKeywordsPerQuery"> &
     Partial<
       Pick<
         XApiRuntimeConfig,
@@ -3289,38 +4994,39 @@ function createInitialRunStats(
         | "searchWithoutApiRandomizeKeywordOrder"
         | "searchWithoutApiRequestsBeforePauseMin"
         | "searchWithoutApiRequestsBeforePauseMax"
+        | "searchWithoutApiPauseMinMinutes"
         | "searchWithoutApiPauseMaxMinutes"
+        | "runChainCount"
       >
-    >
+    >,
+  plannedKeywordList?: string[],
+  runChain = initialRunChainState(config)
 ): RunStats {
-  const apiWindowMinutes = config.searchWithoutApiEnabled
-    ? config.searchWithoutApiPauseMaxMinutes ?? 120
-    : config.xSearchApiWindowMinutes ?? 15;
-  const keywords = plannedKeywords(lists);
+  const apiWindowMinutes = searchPauseWindowMaxMinutesForConfig(config);
+  const availableKeywords = plannedKeywords(lists).length;
+  const keywords = plannedKeywordList ?? plannedKeywords(lists, config);
   const configuredLimit = config.searchWithoutApiSessionKeywordLimit ?? 0;
-  const maxKeywords =
-    config.searchWithoutApiEnabled && configuredLimit > 0 ? Math.min(keywords.length, configuredLimit) : keywords.length;
-  const totalKeywords =
-    config.searchWithoutApiEnabled && config.searchWithoutApiSessionKeywordLimitRandom && maxKeywords > 0
-      ? randomInt(1, maxKeywords)
-      : maxKeywords;
+  const totalKeywords = keywords.length;
   const apiCallLimit = config.searchWithoutApiEnabled
-    ? searchesBeforePauseForKeywords(totalKeywords)
-    : config.xSearchApiCallLimit ?? 180;
+    ? searchesBeforePauseForKeywords(totalKeywords, config)
+    : apiSearchesBeforePauseForKeywords(totalKeywords, config);
   return {
     currentKeyword: null,
     totalKeywords,
     completedKeywords: 0,
     remainingKeywords: totalKeywords,
-    availableKeywords: keywords.length,
+    availableKeywords,
     sessionKeywordLimit: config.searchWithoutApiEnabled ? configuredLimit : null,
     sessionKeywordLimitRandom: config.searchWithoutApiSessionKeywordLimitRandom ?? false,
     randomizeKeywordOrder: config.searchWithoutApiRandomizeKeywordOrder ?? false,
+    runChainTotal: runChain.total,
+    runChainIndex: runChain.index,
+    runChainRemaining: runChain.remaining,
     apiCallsUsed: 0,
     apiCallLimit,
     apiCallsRemaining: apiCallLimit,
     apiWindowMinutes,
-    nextApiResetAt: new Date(Date.now() + apiWindowMinutes * 60_000).toISOString(),
+    nextApiResetAt: null,
     acceptedTweets: 0,
     rejectedTweets: 0,
     lastScore: null,
@@ -3328,23 +5034,81 @@ function createInitialRunStats(
   };
 }
 
-function searchesBeforePauseForKeywords(remainingKeywords: number): number {
+function searchesBeforePauseForKeywords(
+  remainingKeywords: number,
+  config: { searchWithoutApiRequestsBeforePauseMax?: number }
+): number {
   const remaining = Math.max(0, Math.floor(remainingKeywords));
   if (remaining <= 0) {
     return 0;
   }
-  return Math.max(1, Math.ceil(remaining / 2));
+  const automaticLimit = Math.ceil(remaining / 2);
+  const manualMax = Math.max(1, Math.floor(config.searchWithoutApiRequestsBeforePauseMax ?? 180));
+  return Math.max(1, Math.min(remaining, automaticLimit, manualMax));
 }
 
-function plannedKeywords(lists: ListService): string[] {
+function apiSearchesBeforePauseForKeywords(
+  remainingKeywords: number,
+  config: { searchWithoutApiRequestsBeforePauseMax?: number; xKeywordsPerQuery?: number; xSearchApiCallLimit?: number }
+): number {
+  const keywordLimit = searchesBeforePauseForKeywords(remainingKeywords, config);
+  const keywordsPerSearch = Math.max(1, Math.floor(config.xKeywordsPerQuery ?? 1));
+  const pacingLimit = Math.max(1, Math.ceil(keywordLimit / keywordsPerSearch));
+  const apiLimit = Math.max(1, Math.floor(config.xSearchApiCallLimit ?? pacingLimit));
+  return Math.min(apiLimit, pacingLimit);
+}
+
+function searchPauseWindowMaxMinutesForConfig(config: {
+  searchWithoutApiPauseMinMinutes?: number;
+  searchWithoutApiPauseMaxMinutes?: number;
+  xSearchApiWindowMinutes?: number;
+}): number {
+  const fallback = Math.max(0, Math.floor(config.xSearchApiWindowMinutes ?? 15));
+  return Math.max(0, Math.floor(config.searchWithoutApiPauseMaxMinutes ?? fallback));
+}
+
+function randomSearchPauseWindowMinutesForConfig(config: {
+  searchWithoutApiPauseMinMinutes?: number;
+  searchWithoutApiPauseMaxMinutes?: number;
+  xSearchApiWindowMinutes?: number;
+}): number {
+  const fallback = searchPauseWindowMaxMinutesForConfig(config);
+  const min = Math.max(0, Math.floor(config.searchWithoutApiPauseMinMinutes ?? fallback));
+  const max = Math.max(min, searchPauseWindowMaxMinutesForConfig(config));
+  return min === max ? max : randomInt(min, max);
+}
+
+function plannedKeywords(
+  lists: ListService,
+  config?: {
+    searchWithoutApiSessionKeywordLimit?: number;
+    searchWithoutApiSessionKeywordLimitRandom?: boolean;
+    searchWithoutApiRandomizeKeywordOrder?: boolean;
+  }
+): string[] {
   const noResults = new Set(lists.activeValues("no_result").map(normalizeValue));
   const alreadyUsed = new Set(lists.activeValues("search_terms_used").map(normalizeValue));
-  return lists
+  const keywords = lists
     .activeValues("keyword")
     .filter((keyword) => {
       const normalized = normalizeValue(keyword);
       return normalized.length > 0 && !noResults.has(normalized) && !alreadyUsed.has(normalized);
     });
+  const orderedKeywords = config?.searchWithoutApiRandomizeKeywordOrder ? shuffleKeywordList(keywords) : keywords;
+  const configuredLimit = Math.max(0, Math.floor(config?.searchWithoutApiSessionKeywordLimit ?? 0));
+  const maxKeywords = configuredLimit > 0 ? Math.min(orderedKeywords.length, configuredLimit) : orderedKeywords.length;
+  const totalKeywords =
+    config?.searchWithoutApiSessionKeywordLimitRandom && maxKeywords > 0 ? randomInt(1, maxKeywords) : maxKeywords;
+  return orderedKeywords.slice(0, totalKeywords);
+}
+
+function shuffleKeywordList(keywords: string[]): string[] {
+  const shuffled = [...keywords];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = randomInt(0, index);
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+  }
+  return shuffled;
 }
 
 function keywordAvailability(lists: ListService) {
@@ -3432,6 +5196,9 @@ function xApiEnvValuesToConfig(
       configKey === "searchWithoutApiRandomizeKeywordOrder" ||
       configKey === "searchWithoutApiSaveSnapshots" ||
       configKey === "searchWithoutApiMediaCacheEnabled" ||
+      configKey === "staleKeywordUserAutoIgnoreAlert" ||
+      configKey === "rawTimelineEnabled" ||
+      configKey === "dockerX11ForwardEnabled" ||
       configKey === "xLoginSkipNetworkPrecheck" ||
       configKey === "xCountFirstMode" ||
       configKey === "vpnCheckHostIpv4Leak" ||
@@ -3443,12 +5210,16 @@ function xApiEnvValuesToConfig(
       config[configKey] = value === "true";
     } else if (configKey === "searchWithoutApiMouseProfile") {
       config[configKey] = z.enum(["smooth1", "smooth2", "smooth3"]).parse(value);
+    } else if (configKey === "searchWithoutApiIsolation") {
+      config[configKey] = z.enum(["host_netns", "docker_vpn"]).parse(value);
     } else if (configKey === "vpnRemoteProto") {
       config[configKey] = z.enum(["udp", "tcp"]).parse(value);
     } else if (
       configKey === "searchWithoutApiProfileDir" ||
       configKey === "searchWithoutApiStartUrl" ||
       configKey === "searchWithoutApiMediaCacheDir" ||
+      configKey === "dockerX11Host" ||
+      configKey === "dockerXauthority" ||
       configKey === "vpnNetnsName" ||
       configKey === "vpnHostIface" ||
       configKey === "vpnNetnsCidr" ||
@@ -3471,6 +5242,12 @@ function xApiConfigToEnvValues(config: XApiRuntimeConfig): Record<XApiEnvKey, st
   return Object.fromEntries(
     xApiEnvMap.map(([envKey, configKey]) => [envKey, String(config[configKey])])
   ) as Record<XApiEnvKey, string>;
+}
+
+function databasePathForChild(database: Database): string | undefined {
+  const name = (database as unknown as { name?: string }).name;
+  if (name && name !== ":memory:") return name;
+  return process.env.DATABASE_URL;
 }
 
 export function getMediaCacheConfigFromRuntime(config: XApiRuntimeConfig): MediaCacheConfig {
@@ -3707,6 +5484,16 @@ function lastOutputLines(value: string, limit: number): string {
     .join("\n");
 }
 
+function safeJobPathSegment(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "job"
+  );
+}
+
 const adminTestSpecs: Record<
   z.infer<typeof adminTestRunSchema>["test"],
   { label: string; script: string; description: string; timeoutMs: number; vpnAutostart?: boolean }
@@ -3756,6 +5543,7 @@ const adminTestSpecs: Record<
 type XApiEnvKey =
   | "X_API_ENABLED"
   | "SEARCH_WITHOUT_API_ENABLED"
+  | "SEARCH_WITHOUT_API_ISOLATION"
   | "SEARCH_WITHOUT_API_PROFILE_DIR"
   | "SEARCH_WITHOUT_API_START_URL"
   | "SEARCH_WITHOUT_API_MAX_SCROLLS"
@@ -3788,6 +5576,17 @@ type XApiEnvKey =
   | "SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB"
   | "SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS"
   | "SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS"
+  | "TIMELINE_DEFAULT_PAGE_SIZE"
+  | "RUN_CHAIN_COUNT"
+  | "STALE_KEYWORD_USER_MAX_AGE_DAYS"
+  | "STALE_KEYWORD_USER_START_INDEX"
+  | "STALE_KEYWORD_USER_AUTO_IGNORE_ALERT"
+  | "STALE_KEYWORD_USER_MAX_RETRIES"
+  | "RAW_TIMELINE_ENABLED"
+  | "DOCKER_X11_FORWARD_ENABLED"
+  | "DOCKER_X11_HOST"
+  | "DOCKER_X11_PORT"
+  | "DOCKER_XAUTHORITY"
   | "X_LOGIN_SKIP_NETWORK_PRECHECK"
   | "VPN_NETNS_NAME"
   | "VPN_HOST_IFACE"
@@ -3824,6 +5623,7 @@ type XApiEnvKey =
 const xApiEnvMap: Array<[XApiEnvKey, keyof XApiRuntimeConfig]> = [
   ["X_API_ENABLED", "xApiEnabled"],
   ["SEARCH_WITHOUT_API_ENABLED", "searchWithoutApiEnabled"],
+  ["SEARCH_WITHOUT_API_ISOLATION", "searchWithoutApiIsolation"],
   ["SEARCH_WITHOUT_API_PROFILE_DIR", "searchWithoutApiProfileDir"],
   ["SEARCH_WITHOUT_API_START_URL", "searchWithoutApiStartUrl"],
   ["SEARCH_WITHOUT_API_MAX_SCROLLS", "searchWithoutApiMaxScrolls"],
@@ -3856,6 +5656,17 @@ const xApiEnvMap: Array<[XApiEnvKey, keyof XApiRuntimeConfig]> = [
   ["SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB", "searchWithoutApiMediaCacheMaxFileMb"],
   ["SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS", "searchWithoutApiMediaCacheFetchDelayMinMs"],
   ["SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS", "searchWithoutApiMediaCacheFetchDelayMaxMs"],
+  ["TIMELINE_DEFAULT_PAGE_SIZE", "timelineDefaultPageSize"],
+  ["RUN_CHAIN_COUNT", "runChainCount"],
+  ["STALE_KEYWORD_USER_MAX_AGE_DAYS", "staleKeywordUserMaxAgeDays"],
+  ["STALE_KEYWORD_USER_START_INDEX", "staleKeywordUserStartIndex"],
+  ["STALE_KEYWORD_USER_AUTO_IGNORE_ALERT", "staleKeywordUserAutoIgnoreAlert"],
+  ["STALE_KEYWORD_USER_MAX_RETRIES", "staleKeywordUserMaxRetries"],
+  ["RAW_TIMELINE_ENABLED", "rawTimelineEnabled"],
+  ["DOCKER_X11_FORWARD_ENABLED", "dockerX11ForwardEnabled"],
+  ["DOCKER_X11_HOST", "dockerX11Host"],
+  ["DOCKER_X11_PORT", "dockerX11Port"],
+  ["DOCKER_XAUTHORITY", "dockerXauthority"],
   ["X_LOGIN_SKIP_NETWORK_PRECHECK", "xLoginSkipNetworkPrecheck"],
   ["VPN_NETNS_NAME", "vpnNetnsName"],
   ["VPN_HOST_IFACE", "vpnHostIface"],

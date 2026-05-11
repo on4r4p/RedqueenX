@@ -1,0 +1,134 @@
+services:
+  init-runtime:
+    build: .
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p \
+          /app/runtime/media-cache \
+          /app/runtime/playwright-profile \
+          /app/runtime/x-auth \
+          /app/runtime/x-browser
+        chown -R "${REDQUEENX_UID:-1000}:${REDQUEENX_GID:-1000}" /app/runtime
+    volumes:
+      - ./runtime/docker:/app/runtime:rw
+    restart: "no"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - admin
+    environment:
+      REDQUEENX_SITE: ${REDQUEENX_SITE:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./ops/docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  admin:
+    build: .
+    restart: unless-stopped
+    user: "${REDQUEENX_UID:-1000}:${REDQUEENX_GID:-1000}"
+    command: ["npm", "run", "start"]
+    depends_on:
+      init-runtime:
+        condition: service_completed_successfully
+    environment:
+      ADMIN_HOST: 0.0.0.0
+      DATABASE_URL: /app/runtime/redqueenx.sqlite
+      CURRENT_SESSION_FILE: /app/runtime/current-session.log
+      SEARCH_WITHOUT_API_ISOLATION: docker_vpn
+      SEARCH_WITHOUT_API_PROFILE_DIR: /app/runtime/playwright-profile
+      SEARCH_WITHOUT_API_MEDIA_CACHE_DIR: /app/runtime/media-cache
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
+      PLAYWRIGHT_DISABLE_SANDBOX: "true"
+    volumes:
+      - ./.env:/app/.env:rw
+      - ./runtime/docker:/app/runtime:rw
+      - ./ops/vpn:/app/ops/vpn:rw
+
+  vpn:
+    build: .
+    restart: unless-stopped
+    command: ["/app/ops/docker/openvpn-entrypoint.sh"]
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      SEARCH_WITHOUT_API_ISOLATION: docker_vpn
+      VPN_CONFIG: ${VPN_CONFIG:-/app/ops/vpn/custom.conf}
+      VPN_REMOTE_HOST: ${VPN_REMOTE_HOST:-}
+      VPN_REMOTE_PORT: ${VPN_REMOTE_PORT:-1194}
+      VPN_REMOTE_PROTO: ${VPN_REMOTE_PROTO:-udp}
+    volumes:
+      - ./runtime/docker:/app/runtime:rw
+      - ./ops/vpn:/app/ops/vpn:ro
+
+  worker:
+    build: .
+    restart: unless-stopped
+    user: "${REDQUEENX_UID:-1000}:${REDQUEENX_GID:-1000}"
+    command: ["npm", "run", "worker:docker-vpn"]
+    network_mode: service:vpn
+    depends_on:
+      init-runtime:
+        condition: service_completed_successfully
+      vpn:
+        condition: service_started
+      admin:
+        condition: service_started
+    environment:
+      DATABASE_URL: /app/runtime/redqueenx.sqlite
+      CURRENT_SESSION_FILE: /app/runtime/current-session.log
+      SEARCH_WITHOUT_API_ISOLATION: docker_vpn
+      SEARCH_WITHOUT_API_PROFILE_DIR: /app/runtime/playwright-profile
+      SEARCH_WITHOUT_API_MEDIA_CACHE_DIR: /app/runtime/media-cache
+      REDQUEENX_DOCKER_VPN: "true"
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
+      PLAYWRIGHT_DISABLE_SANDBOX: "true"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./runtime/docker:/app/runtime:rw
+      - ./ops/vpn:/app/ops/vpn:ro
+
+  x-login:
+    build: .
+    profiles:
+      - manual
+    user: "${REDQUEENX_UID:-1000}:${REDQUEENX_GID:-1000}"
+    entrypoint: ["dumb-init", "--", "/app/ops/docker/x-login-entrypoint.sh"]
+    network_mode: service:vpn
+    depends_on:
+      init-runtime:
+        condition: service_completed_successfully
+      vpn:
+        condition: service_started
+    environment:
+      DATABASE_URL: /app/runtime/redqueenx.sqlite
+      CURRENT_SESSION_FILE: /app/runtime/current-session.log
+      SEARCH_WITHOUT_API_ISOLATION: docker_vpn
+      SEARCH_WITHOUT_API_PROFILE_DIR: /app/runtime/playwright-profile
+      SEARCH_WITHOUT_API_MEDIA_CACHE_DIR: /app/runtime/media-cache
+      REDQUEENX_DOCKER_VPN: "true"
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
+      PLAYWRIGHT_DISABLE_SANDBOX: "true"
+      DOCKER_X11_FORWARD_ENABLED: ${DOCKER_X11_FORWARD_ENABLED:-false}
+      DOCKER_X11_HOST: ${DOCKER_X11_HOST:-}
+      DOCKER_X11_PORT: ${DOCKER_X11_PORT:-6010}
+      DOCKER_XAUTHORITY: /tmp/redqueenx-docker.xauth
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./runtime/docker:/app/runtime:rw
+      - ./ops/vpn:/app/ops/vpn:ro
+      - ${DOCKER_XAUTHORITY:-/tmp/redqueenx-docker.xauth}:/tmp/redqueenx-docker.xauth:ro
+
+volumes:
+  caddy_data:
+  caddy_config:

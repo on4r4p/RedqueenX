@@ -13,6 +13,8 @@ export const LIST_KINDS = [
   "update_status_call",
   "current_session",
   "search_terms_used",
+  "stale_keyword_user",
+  "skipped_keyword_user",
   "rss_sent",
   "hidden_session"
 ] as const;
@@ -53,6 +55,9 @@ export interface RunStats {
   sessionKeywordLimit?: number | null;
   sessionKeywordLimitRandom?: boolean;
   randomizeKeywordOrder?: boolean;
+  runChainTotal?: number | null;
+  runChainIndex?: number | null;
+  runChainRemaining?: number | null;
   apiCallsUsed: number;
   apiCallLimit: number;
   apiCallsRemaining: number;
@@ -121,6 +126,7 @@ export interface ScoringConfig {
   enableMaximumHashtags: boolean;
   enableMaximumMentions: boolean;
   enableMaximumTweetsByUser: boolean;
+  enableSimilarTweetText: boolean;
   minimumSearchResults: number;
   luckFactorDenominator: number;
   allowedLanguages: string[];
@@ -135,6 +141,7 @@ export interface ScoringConfig {
   maximumHashtags: number;
   maximumMentions: number;
   maximumTweetsByUser: number;
+  similarTweetTextThreshold: number;
 }
 
 export interface ScoreDecision {

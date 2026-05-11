@@ -34,7 +34,7 @@ export function textContainsBannedTerm(text: string, bannedTerm: string): boolea
   const searchableText = stripIgnoredBannedWordContexts(text);
 
   if (containsLiteralSyntax(term)) {
-    return normalizeLiteralText(searchableText).includes(normalizeLiteralText(term));
+    return containsBoundedLiteralTerm(searchableText, term);
   }
 
   const normalizedText = normalizeSearchText(searchableText);
@@ -59,6 +59,28 @@ function containsLiteralSyntax(value: string): boolean {
 
 function normalizeLiteralText(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function containsBoundedLiteralTerm(text: string, term: string): boolean {
+  const normalizedText = normalizeLiteralText(text);
+  const normalizedTerm = normalizeLiteralText(term);
+  if (!normalizedText || !normalizedTerm) {
+    return false;
+  }
+  let index = normalizedText.indexOf(normalizedTerm);
+  while (index !== -1) {
+    const before = index > 0 ? normalizedText[index - 1] : "";
+    const after = normalizedText[index + normalizedTerm.length] ?? "";
+    if (!isLiteralContinuation(before) && !isLiteralContinuation(after)) {
+      return true;
+    }
+    index = normalizedText.indexOf(normalizedTerm, index + 1);
+  }
+  return false;
+}
+
+function isLiteralContinuation(value: string): boolean {
+  return /^[a-z0-9_]$/i.test(value);
 }
 
 export function parseLegacyLines(content: string): string[] {

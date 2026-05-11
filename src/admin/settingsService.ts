@@ -35,6 +35,7 @@ export const scoringConfigSchema = z.object({
   enableMaximumHashtags: booleanSettingSchema.default(DEFAULT_SCORING_CONFIG.enableMaximumHashtags),
   enableMaximumMentions: booleanSettingSchema.default(DEFAULT_SCORING_CONFIG.enableMaximumMentions),
   enableMaximumTweetsByUser: booleanSettingSchema.default(DEFAULT_SCORING_CONFIG.enableMaximumTweetsByUser),
+  enableSimilarTweetText: booleanSettingSchema.default(DEFAULT_SCORING_CONFIG.enableSimilarTweetText),
   minimumSearchResults: z.coerce.number().int().min(0).default(DEFAULT_SCORING_CONFIG.minimumSearchResults),
   luckFactorDenominator: z.coerce.number().int().min(0).default(DEFAULT_SCORING_CONFIG.luckFactorDenominator),
   allowedLanguages: z
@@ -51,7 +52,8 @@ export const scoringConfigSchema = z.object({
   maximumTweetAgeDays: z.coerce.number().min(0),
   maximumHashtags: z.coerce.number().int().min(0),
   maximumMentions: z.coerce.number().int().min(0),
-  maximumTweetsByUser: z.coerce.number().int().min(0)
+  maximumTweetsByUser: z.coerce.number().int().min(0),
+  similarTweetTextThreshold: z.coerce.number().min(0).max(1).default(DEFAULT_SCORING_CONFIG.similarTweetTextThreshold)
 });
 
 const accessListSchema = z
@@ -80,6 +82,7 @@ export const xApiConfigSchema = z.object({
     if (value === "false") return false;
     return value;
   }, z.boolean()),
+  searchWithoutApiIsolation: z.enum(["host_netns", "docker_vpn"]),
   searchWithoutApiProfileDir: z.string(),
   searchWithoutApiStartUrl: z.string(),
   searchWithoutApiMaxScrolls: z.coerce.number().int().min(1),
@@ -132,10 +135,25 @@ export const xApiConfigSchema = z.object({
   }, z.boolean()),
   searchWithoutApiMediaCacheDir: z.string(),
   searchWithoutApiMediaCacheTtlHours: z.coerce.number().min(0),
-  searchWithoutApiMediaCacheMaxMb: z.coerce.number().min(1),
+  searchWithoutApiMediaCacheMaxMb: z.coerce.number().min(0),
   searchWithoutApiMediaCacheMaxFileMb: z.coerce.number().min(1),
   searchWithoutApiMediaCacheFetchDelayMinMs: z.coerce.number().int().min(0),
   searchWithoutApiMediaCacheFetchDelayMaxMs: z.coerce.number().int().min(0),
+  timelineDefaultPageSize: z.coerce.number().int().min(1).max(200),
+  runChainCount: z.coerce.number().int().min(1),
+  staleKeywordUserMaxAgeDays: z.coerce.number().int().min(1).max(3650),
+  staleKeywordUserStartIndex: z.coerce.number().int().min(1),
+  staleKeywordUserAutoIgnoreAlert: booleanSettingSchema,
+  staleKeywordUserMaxRetries: z.coerce.number().int().min(0).max(20),
+  rawTimelineEnabled: booleanSettingSchema,
+  dockerX11ForwardEnabled: z.preprocess((value) => {
+    if (value === "true") return true;
+    if (value === "false") return false;
+    return value;
+  }, z.boolean()),
+  dockerX11Host: z.string(),
+  dockerX11Port: z.coerce.number().int().min(1).max(65535),
+  dockerXauthority: z.string(),
   xLoginSkipNetworkPrecheck: z.preprocess((value) => {
     if (value === "true") return true;
     if (value === "false") return false;

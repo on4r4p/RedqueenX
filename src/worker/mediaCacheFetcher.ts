@@ -8,13 +8,13 @@ import { formatDiagnosticsReport, runVpnDiagnostics } from "../diagnostics/vpn";
 import { CurrentSessionService, type CurrentSessionLevel } from "../admin/currentSessionService";
 import { MediaCacheService, type MediaCacheConfig, type MediaSource } from "../admin/mediaCacheService";
 import { TimelineTweetService } from "../admin/timelineTweetService";
-import { assertVpnNamespaceRuntime } from "./vpnGuard";
+import { assertVpnRuntime } from "./vpnGuard";
 
 interface Args {
   tweetId: string;
 }
 
-const allowedMediaHosts = new Set(["pbs.twimg.com", "video.twimg.com", "ton.twimg.com"]);
+const allowedMediaHosts = new Set(["abs.twimg.com", "pbs.twimg.com", "video.twimg.com", "ton.twimg.com"]);
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -31,7 +31,7 @@ async function main() {
   const record = (level: CurrentSessionLevel, type: string, message: string, data: Record<string, unknown> = {}) =>
     currentSession.record(level, type, message, data).catch(() => undefined);
 
-  await assertVpnNamespaceRuntime(config.vpnNetnsName, "Media cache fetcher");
+  await assertVpnRuntime(config, "Media cache fetcher");
   const report = await runVpnDiagnostics({ includePlaywright: false, strict: true });
   console.log(formatDiagnosticsReport(report));
   await record("info", "media_cache.vpn.diagnostics", "Media cache VPN diagnostics completed", {
@@ -138,7 +138,7 @@ async function fetchOneSource(
   }
 }
 
-function assertAllowedXMediaSource(sourceUrl: string): void {
+export function assertAllowedXMediaSource(sourceUrl: string): void {
   const url = new URL(sourceUrl);
   if (url.protocol !== "https:") {
     throw new Error("Only HTTPS X media URLs are allowed.");
@@ -186,7 +186,7 @@ function mediaCacheConfigFromAppConfig(config: ReturnType<typeof loadConfig>): M
 function parseArgs(argv: string[]): Args {
   const tweetId = readArg(argv, "--tweet-id");
   if (!tweetId || !/^\d+$/.test(tweetId)) {
-    throw new Error("Usage: npm run netns:media-cache:fetch -- --tweet-id <numeric tweet id>");
+    throw new Error("Usage: npm run media-cache:fetch -- --tweet-id <numeric tweet id>");
   }
   return { tweetId };
 }
@@ -218,7 +218,9 @@ function formatSummary(summary: {
   return lines.join("\n");
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack ?? error.message : error);
+    process.exitCode = 1;
+  });
+}

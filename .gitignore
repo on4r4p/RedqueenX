@@ -1,0 +1,32 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+
+# Local environment and secrets
+.env*
+!.env.example
+
+# SQLite databases and generated runtime state
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+runtime/
+playwright/.auth/
+
+# Legacy private/source material. Keep this local only.
+oldpython/
+__pycache__/
+*.pyc
+
+# OpenVPN profiles, auth files, keys, and local namespace overrides
+ops/vpn/*
+!ops/vpn/README.md
+!ops/vpn/custom.conf.example
+ops/netns/env.local
+
+# Local editor/OS/log noise
+.DS_Store
+*.log
+.codex

@@ -17,6 +17,7 @@ export interface LegacyTimelineItem {
   retweetCount: number | null;
   favoriteCount: number | null;
   score: number | null;
+  reasons: string[];
   media: [];
   likedAt: string | null;
   retweetedAt: string | null;
@@ -46,12 +47,12 @@ export class LegacyTimelineService {
     this.timelineTweets = new TimelineTweetService(database);
   }
 
-  latest(limit = 40): Array<LegacyTimelineItem | TimelineTweetItem> {
+  latest(limit = 50): Array<LegacyTimelineItem | TimelineTweetItem> {
     return this.page({ limit, offset: 0 }).items;
   }
 
   page(options: { limit?: number; offset?: number } = {}): LegacyTimelinePage {
-    const limit = Math.max(1, Math.min(options.limit ?? 40, 200));
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
     const offset = Math.max(0, Math.floor(options.offset ?? 0));
     const runtimeTotal = this.timelineTweets.count();
     const legacyTotal = this.countLegacy();
@@ -116,6 +117,7 @@ export class LegacyTimelineService {
         retweetCount: null,
         favoriteCount: null,
         score: null,
+        reasons: [],
         media: [],
         likedAt: null,
         retweetedAt: null,

@@ -67,6 +67,35 @@ describe("scoreTweet", () => {
     expect(tweet.text).toContain("Important malware research");
   });
 
+  it("rejects tweets that are too similar to already accepted text", () => {
+    const previousText =
+      "A threat actor on a cybercrime forum is claiming to sell an alleged unpatched Boolean-based Blind SQL Injection vulnerability targeting a French government-related imports website. According to the post, the vulnerability allegedly affects a high-traffic backend system.";
+    const tweet: TweetCandidate = {
+      id: "similar-2",
+      text: "A threat actor is advertising access to an alleged SQL injection vulnerability affecting a French government-related system. According to the post, the vulnerability is described as a Boolean-based blind SQLi, reportedly allowing unauthorized access to backend databases.",
+      lang: "en",
+      retweetCount: 10,
+      favoriteCount: 10,
+      user: {
+        screenName: "intelbreaches",
+        followersCount: 1000
+      }
+    };
+
+    const decision = scoreTweet(tweet, {
+      keywords: ["SQL injection"],
+      following: [],
+      friends: [],
+      bannedUsers: [],
+      bannedWords: [],
+      sentTweetIds: [],
+      sentTexts: [previousText]
+    });
+
+    expect(decision.accepted).toBe(false);
+    expect(decision.reasons).toEqual(expect.arrayContaining([expect.stringMatching(/^tweet_text_too_similar:/)]));
+  });
+
   it("does not require a handle search keyword to appear in tweet text", () => {
     const tweet: TweetCandidate = {
       id: "handle-1",
@@ -99,6 +128,32 @@ describe("scoreTweet", () => {
     );
 
     expect(decision.reasons).not.toContain("missing_keyword");
+  });
+
+  it("rejects unknown or disallowed tweet languages when allowed languages are enabled", () => {
+    const baseTweet: TweetCandidate = {
+      id: "lang-1",
+      text: "Fresh malware research with enough context and mitigation detail to be useful",
+      retweetCount: 10,
+      favoriteCount: 10,
+      user: {
+        screenName: "researcher",
+        followersCount: 1000
+      }
+    };
+    const lists = {
+      keywords: ["malware"],
+      following: [],
+      friends: [],
+      bannedUsers: [],
+      bannedWords: [],
+      sentTweetIds: [],
+      sentTexts: []
+    };
+
+    expect(scoreTweet(baseTweet, lists).reasons).toContain("language_unknown");
+    expect(scoreTweet({ ...baseTweet, lang: "es" }, lists).reasons).toContain("language_not_allowed");
+    expect(scoreTweet({ ...baseTweet, lang: "en-US" }, lists).reasons).not.toContain("language_not_allowed");
   });
 
   it("matches banned words as complete terms instead of normalized fragments", () => {
@@ -229,6 +284,44 @@ describe("scoreTweet", () => {
       config
     );
     expect(exactHeart.reasons).toContain("banned_word:<3");
+
+    const hashtagPrefix = scoreTweet(
+      {
+        ...baseTweet,
+        id: "banned-hashtag-prefix-1",
+        text: "Day 56 - #AdventOfCyber found some amazing resources about ethical hacking"
+      },
+      {
+        keywords: ["ethical"],
+        following: [],
+        friends: [],
+        bannedUsers: [],
+        bannedWords: ["#ad"],
+        sentTweetIds: [],
+        sentTexts: []
+      },
+      config
+    );
+    expect(hashtagPrefix.reasons).not.toContain("banned_word:#ad");
+
+    const exactHashtag = scoreTweet(
+      {
+        ...baseTweet,
+        id: "banned-hashtag-exact-1",
+        text: "Suspicious sponsored post #ad about cyber security resources"
+      },
+      {
+        keywords: ["cyber"],
+        following: [],
+        friends: [],
+        bannedUsers: [],
+        bannedWords: ["#ad"],
+        sentTweetIds: [],
+        sentTexts: []
+      },
+      config
+    );
+    expect(exactHashtag.reasons).toContain("banned_word:#ad");
   });
 
   it("can disable individual scoring checks", () => {

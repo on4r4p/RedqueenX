@@ -43,7 +43,7 @@ describe("media cache", () => {
     expect(JSON.stringify(cached)).not.toContain("pbs.twimg.com");
   });
 
-  it("marks expired or failed media without serving a stale remote URL", () => {
+  it("keeps cached media indefinitely when ttl is zero", () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-media-cache-"));
     const database = openMemoryDatabase();
     const timeline = new TimelineTweetService(database);
@@ -62,6 +62,31 @@ describe("media cache", () => {
     fs.writeFileSync(localPath, "image-bytes");
     mediaCache.upsertSuccess(sourceUrl, localPath, "image/jpeg", 11);
 
+    const cached = mediaCache.decorateTimelineItem(raw);
+    expect(cached.media[0].cacheStatus).toBe("cached");
+    expect(cached.media[0].cachedUrl).toMatch(/^\/media-cache\/[a-f0-9]{32}$/);
+    expect(mediaCache.getServeableEntry(mediaCache.cacheIdForUrl(sourceUrl))).not.toBeNull();
+  });
+
+  it("marks expired or failed media without serving a stale remote URL", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-media-cache-"));
+    const database = openMemoryDatabase();
+    const timeline = new TimelineTweetService(database);
+    const mediaCache = new MediaCacheService(database, {
+      enabled: true,
+      cacheDir: tmp,
+      ttlHours: 0.000001,
+      maxBytes: 10 * 1024 * 1024,
+      maxFileBytes: 1024 * 1024
+    });
+
+    timeline.saveAcceptedFromTest("cloudflare", testTweet(), testDecision());
+    const raw = timeline.find("2050000000000000001")!;
+    const sourceUrl = testTweet().entities!.media![0].url!;
+    const localPath = path.join(tmp, "expired-image.jpg");
+    fs.writeFileSync(localPath, "image-bytes");
+    mediaCache.upsertSuccess(sourceUrl, localPath, "image/jpeg", 11, new Date(Date.now() - 60_000));
+
     const expired = mediaCache.decorateTimelineItem(raw);
     expect(expired.media[0].cacheStatus).toBe("expired");
     expect(expired.media[0].cachedUrl).toBeNull();
@@ -72,6 +97,40 @@ describe("media cache", () => {
     expect(failed.media[0].cacheStatus).toBe("error");
     expect(failed.media[0].lastError).toContain("HTTP 403");
     expect(JSON.stringify(failed)).not.toContain(sourceUrl);
+  });
+
+  it("finds timeline tweets with retryable failed media cache sources", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-media-cache-"));
+    const database = openMemoryDatabase();
+    const timeline = new TimelineTweetService(database);
+    const mediaCache = new MediaCacheService(database, {
+      enabled: true,
+      cacheDir: tmp,
+      ttlHours: 24,
+      maxBytes: 10 * 1024 * 1024,
+      maxFileBytes: 1024 * 1024
+    });
+    const tweet: TweetCandidate = {
+      ...testTweet(),
+      id: "2050000000000000002",
+      entities: {
+        ...testTweet().entities,
+        media: [
+          {
+            type: "photo",
+            url: "https://abs.twimg.com/hashflags/test-image.png",
+            previewImageUrl: "https://abs.twimg.com/hashflags/test-image.png"
+          }
+        ]
+      }
+    };
+
+    timeline.saveAcceptedFromTest("cloudflare", tweet, testDecision());
+    mediaCache.upsertFailure("https://abs.twimg.com/hashflags/test-image.png", "Refusing non-X media host abs.twimg.com.");
+
+    expect(mediaCache.tweetIdsForFailedSourceError("Refusing non-X media host abs.twimg.com.", "abs.twimg.com")).toEqual([
+      "2050000000000000002"
+    ]);
   });
 
   it("prunes expired and over-quota cache files", async () => {
@@ -97,6 +156,32 @@ describe("media cache", () => {
     expect(result.overQuota).toBe(1);
     expect(fs.existsSync(first)).toBe(false);
     expect(fs.existsSync(second)).toBe(true);
+  });
+
+  it("skips cache quota pruning when max bytes is zero", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-media-cache-"));
+    const database = openMemoryDatabase();
+    const mediaCache = new MediaCacheService(database, {
+      enabled: true,
+      cacheDir: tmp,
+      ttlHours: 24,
+      maxBytes: 0,
+      maxFileBytes: 1024 * 1024
+    });
+
+    const first = path.join(tmp, "first.jpg");
+    const second = path.join(tmp, "second.jpg");
+    fs.mkdirSync(tmp, { recursive: true });
+    fs.writeFileSync(first, "1234567890");
+    fs.writeFileSync(second, "1234567890");
+    mediaCache.upsertSuccess("https://pbs.twimg.com/media/first.jpg", first, "image/jpeg", 10);
+    mediaCache.upsertSuccess("https://pbs.twimg.com/media/second.jpg", second, "image/jpeg", 10);
+
+    const result = await mediaCache.prune();
+    expect(result.overQuota).toBe(0);
+    expect(fs.existsSync(first)).toBe(true);
+    expect(fs.existsSync(second)).toBe(true);
+    expect(result.bytesAfter).toBe(20);
   });
 });
 

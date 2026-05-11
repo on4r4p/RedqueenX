@@ -783,6 +783,10 @@ h2 {
   opacity: 0.48;
 }
 
+#stale-keyword-user-max-retries-label.is-check-disabled {
+  opacity: 0.48;
+}
+
 .switch-field {
   display: inline-grid;
   grid-template-columns: max-content 52px;
@@ -1029,6 +1033,12 @@ h2 {
   gap: 14px;
 }
 
+.settings-inner-form {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
 .settings-fieldset {
   display: grid;
   gap: 14px;
@@ -1053,6 +1063,13 @@ h2 {
   padding: 0 6px;
   color: var(--text);
   font-weight: 700;
+}
+
+.settings-subsection-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .nested-subsection {
@@ -1234,6 +1251,111 @@ h2 {
   flex: 0 0 auto;
 }
 
+.list-row-with-actions {
+  cursor: default;
+}
+
+.list-row-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 10px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.list-row-action {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+}
+
+.job-result {
+  margin-top: 10px;
+  color: var(--muted);
+}
+
+.job-result-summary {
+  display: grid;
+  gap: 8px;
+}
+
+.job-result-summary p {
+  margin: 0;
+}
+
+.stale-prune-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.stale-prune-progress-head,
+.stale-prune-progress-meta,
+.stale-keyword-users-inline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.stale-prune-progress progress {
+  width: 100%;
+  height: 12px;
+  accent-color: var(--accent);
+}
+
+.stale-prune-progress-meta {
+  font-size: 12px;
+}
+
+.status-problem {
+  color: var(--danger);
+}
+
+.stale-keyword-users-inline {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.stale-prune-removed,
+.stale-keyword-users-inline-list {
+  display: grid;
+  gap: 6px;
+}
+
+.stale-prune-user {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid rgba(41, 65, 83, 0.65);
+  padding: 6px 0;
+}
+
+.stale-prune-user code {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.stale-prune-user span {
+  flex: 0 0 auto;
+}
+
+.stale-prune-user-inline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
+}
+
+.stale-prune-empty {
+  margin: 0;
+}
+
 .list-loader {
   color: var(--muted);
   padding: 12px 0;
@@ -1379,6 +1501,69 @@ h2 {
   border-bottom: 1px solid rgba(41, 65, 83, 0.55);
 }
 
+.timeline-filter-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 10px 28px;
+  border-bottom: 1px solid rgba(41, 65, 83, 0.55);
+  color: var(--muted);
+}
+
+.timeline-filter-field,
+.timeline-filter-bar > label {
+  display: grid;
+  gap: 6px;
+  min-width: min(520px, 100%);
+  font-size: 12px;
+}
+
+.timeline-filter-bar select {
+  min-height: 92px;
+}
+
+.timeline-filter-options {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 18px;
+  row-gap: 8px;
+  align-items: center;
+  min-height: 34px;
+}
+
+.timeline-filter-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: var(--text);
+  background: transparent;
+  white-space: nowrap;
+}
+
+.timeline-filter-option input {
+  margin: 0;
+}
+
+.timeline-filter-count {
+  color: var(--muted);
+}
+
+.timeline-filter-empty {
+  color: var(--muted);
+}
+
+.timeline-maintenance-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 28px;
+  border-bottom: 1px solid rgba(41, 65, 83, 0.55);
+}
+
 .timeline-pagination {
   display: flex;
   flex-wrap: wrap;
@@ -1492,6 +1677,12 @@ h2 {
 .raw-rejected-pill {
   border-color: rgba(255, 111, 145, 0.55);
   color: #ff9eb8;
+}
+
+.luck-factor-pill {
+  border-color: rgba(255, 207, 91, 0.62);
+  color: #ffd978;
+  background: rgba(255, 207, 91, 0.08);
 }
 
 .raw-decision {
@@ -1612,6 +1803,27 @@ h2 {
   padding: 14px;
 }
 
+.tweet-media-placeholder-button {
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tweet-media-placeholder-button:hover {
+  border-color: rgba(99, 179, 237, 0.72);
+  background: #0d2130;
+}
+
+.tweet-media-placeholder-button:disabled {
+  cursor: progress;
+  opacity: 0.72;
+}
+
+.tweet-media-placeholder-button.is-loading {
+  border-color: rgba(116, 240, 180, 0.65);
+}
+
 .tweet-media-placeholder strong {
   color: #d4fbe8;
 }
@@ -1628,9 +1840,57 @@ h2 {
   flex-wrap: wrap;
 }
 
+.tweet-list-command-row {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(49, 80, 100, 0.55);
+}
+
 .tweet-action-button {
-  min-height: 32px;
-  padding: 6px 10px;
+  min-height: 26px;
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.tweet-list-button {
+  border-color: rgba(255, 187, 112, 0.45);
+  background: rgba(54, 35, 16, 0.42);
+  color: #ffd9a3;
+}
+
+.tweet-list-command-row .tweet-action-button,
+.tweet-command-row [data-media-cache-reload] {
+  min-height: 24px;
+  padding: 3px 7px;
+}
+
+.tweet-list-feedback {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tweet-list-feedback.is-error {
+  color: #ff9eb8;
+}
+
+.tweet-list-feedback.is-success {
+  color: var(--accent-2);
+}
+
+.tweet-inline-status {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tweet-inline-status.is-error {
+  color: #ff9eb8;
+}
+
+.tweet-inline-status.is-success {
+  color: var(--accent-2);
 }
 
 .empty-state {
@@ -1666,6 +1926,15 @@ h2 {
   .session-summary,
   .settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .stale-prune-user-inline {
+    grid-template-columns: 1fr;
+  }
+
+  .stale-prune-user-inline span,
+  .stale-prune-user-inline .list-row-action {
+    justify-self: start;
   }
 
   .section-header {

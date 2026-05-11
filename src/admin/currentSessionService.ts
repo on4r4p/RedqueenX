@@ -22,7 +22,7 @@ export interface CurrentSessionReadOptions {
 export class CurrentSessionService {
   constructor(
     private readonly filePath = path.resolve(process.cwd(), "runtime/current-session.log"),
-    private readonly maxReadBytes = 512 * 1024
+    private readonly maxReadBytes = 4 * 1024 * 1024
   ) {}
 
   async record(
@@ -172,6 +172,9 @@ function formatLine(line: string, options: CurrentSessionReadOptions): string {
   if (isBrowserLine(line)) {
     return formatJsonPayloadLine(line);
   }
+  if (isKeywordUserPruneLine(line)) {
+    return formatKeywordUserPruneLine(line);
+  }
   if (isTweetLine(line)) {
     return formatTweetLine(line, options);
   }
@@ -200,6 +203,8 @@ function formatManualVerificationLine(line: string): string {
       valueText(payload.recommendation) ||
       "Log in manually from the usual IP/VPN profile used by this X account, resolve the challenge, then mark the alert as resolved.";
     const details = payload.details && typeof payload.details === "object" ? (payload.details as Record<string, unknown>) : {};
+    const refreshRetry =
+      details.refreshRetry && typeof details.refreshRetry === "object" ? (details.refreshRetry as Record<string, unknown>) : null;
     const commands = Array.isArray(payload.commands)
       ? payload.commands.map((command) => `  ${String(command)}`).join("\n")
       : accountId
@@ -227,6 +232,7 @@ function formatManualVerificationLine(line: string): string {
       Array.isArray(details.detectionSignals) && details.detectionSignals.length
         ? `Detection signals: ${details.detectionSignals.map(valueText).join(" | ")}`
         : "",
+      refreshRetry ? formatManualVerificationRefreshRetry(refreshRetry) : "",
       details.snapshotPath ? `Evidence snapshot: ${valueText(details.snapshotPath)}` : "",
       "",
       "What to do:",
@@ -241,12 +247,91 @@ function formatManualVerificationLine(line: string): string {
   }
 }
 
+function formatManualVerificationRefreshRetry(refreshRetry: Record<string, unknown>): string {
+  const retryDelayMs = Number(refreshRetry.retryDelayMs);
+  const waitedSeconds = Number.isFinite(retryDelayMs) ? Math.round(retryDelayMs / 1_000) : null;
+  const confirmedSameAlert = refreshRetry.confirmedSameAlert === true;
+  const confirmedReason = valueText(refreshRetry.confirmedReason);
+  return [
+    `Refresh retry: waited ${waitedSeconds ?? "?"}s and reloaded X once before opening this alert.`,
+    confirmedSameAlert ? "Same alert confirmed after refresh." : "A session alert was still present after refresh.",
+    confirmedReason ? `Confirmed reason: ${confirmedReason}` : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
 function isVpnLine(line: string): boolean {
   return line.includes(" vpn.");
 }
 
 function isBrowserLine(line: string): boolean {
   return line.includes(" browser.");
+}
+
+function isKeywordUserPruneLine(line: string): boolean {
+  return line.includes(" keyword_user_prune.");
+}
+
+function formatKeywordUserPruneLine(line: string): string {
+  const payloadStart = line.indexOf("{");
+  if (payloadStart < 0) {
+    return line;
+  }
+
+  try {
+    const prefix = line.slice(0, payloadStart).trimEnd();
+    const payload = JSON.parse(line.slice(payloadStart)) as Record<string, unknown>;
+    const event = prefix.match(/\s(keyword_user_prune\.[^\s]+)/)?.[1] ?? "keyword_user_prune";
+    const keyword = valueText(payload.keyword);
+    const handle = valueText(payload.handle);
+    const position = valueText(payload.position);
+    const total = valueText(payload.totalCandidates);
+    const remaining = valueText(payload.remainingUsers);
+    const processed = valueText(payload.processedUsers);
+    const progress = total
+      ? `${processed || position || "0"}/${total} checked, ${remaining || "0"} @user remaining`
+      : "";
+
+    if (event.endsWith(".started")) {
+      const alreadyChecked = valueText(payload.skippedAlreadyCheckedUsers);
+      return `${prefix}\nStale @keyword cleanup started: ${valueText(payload.totalCandidates) || "0"} @user to check, threshold ${valueText(payload.maxAgeDays) || "?"} days${alreadyChecked ? `, ${alreadyChecked} already checked skipped` : ""}.`;
+    }
+    if (event.endsWith(".resume_skipped")) {
+      return `${prefix}\nSkipped ${valueText(payload.skippedAlreadyCheckedUsers) || "0"} @user already checked by this cleanup. ${valueText(payload.remainingUsers) || "0"} @user remaining to check.`;
+    }
+    if (event.endsWith(".user_search")) {
+      return `${prefix}\nChecking ${keyword || handle || "unknown user"}${progress ? ` (${progress})` : ""}. Search: ${valueText(payload.searchQuery) || "unknown"}`;
+    }
+    if (event.endsWith(".random_pause")) {
+      const seconds = Math.round(Number(payload.delayMs || 0) / 1000);
+      return `${prefix}\nPause ${seconds}s before ${valueText(payload.phase) || "next action"} for ${keyword || handle || "unknown user"}${progress ? ` (${progress})` : ""}.`;
+    }
+    if (event.endsWith(".progress")) {
+      return `${prefix}\nChecked ${keyword || handle || "unknown user"}: ${valueText(payload.decision) || "done"}. ${progress}. Removed ${valueText(payload.removedUsers) || "0"}, kept ${valueText(payload.keptUsers) || "0"}, skipped ${valueText(payload.skippedUsers) || "0"}.`;
+    }
+    if (event.endsWith(".removed")) {
+      if (valueText(payload.reason) === "protected_posts") {
+        return `${prefix}\nRemoved ${keyword || handle || "unknown user"} from Keywords and moved it to Stale keyword users because posts are protected. ${progress}.`;
+      }
+      return `${prefix}\nRemoved ${keyword || handle || "unknown user"} from Keywords: latest tweet ${valueText(payload.latestTweetCreatedAt) || "unknown date"}, age ${valueText(payload.ageDays) || "?"} days. ${progress}.`;
+    }
+    if (event.endsWith(".user_kept")) {
+      return `${prefix}\nKept ${keyword || handle || "unknown user"}: latest tweet age ${valueText(payload.ageDays) || "?"} days. ${progress}.`;
+    }
+    if (event.endsWith(".user_skipped")) {
+      return `${prefix}\nSkipped ${keyword || handle || "unknown user"}: ${valueText(payload.reason) || "unknown reason"}. ${progress}.`;
+    }
+    if (event.endsWith(".already_stale_skipped")) {
+      return `${prefix}\nSkipped ${keyword || handle || "unknown user"}: already in Stale keyword users. Removed ${valueText(payload.deletedKeywords) || "0"} matching keyword entry without opening X. ${valueText(payload.remainingUsers) || "0"} @user remaining to check.`;
+    }
+    if (event.endsWith(".completed")) {
+      return `${prefix}\nStale @keyword cleanup completed: ${valueText(payload.processedCandidates) || "0"}/${valueText(payload.totalCandidates) || "0"} checked, ${valueText(payload.removedUsers) || "0"} removed, ${valueText(payload.keptUsers) || "0"} kept, ${valueText(payload.skippedUsers) || "0"} skipped.`;
+    }
+    return formatJsonPayloadLine(line);
+  } catch {
+    return line;
+  }
 }
 
 function valueText(value: unknown): string {

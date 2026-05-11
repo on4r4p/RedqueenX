@@ -63,7 +63,7 @@ Main pages:
 - `GET /admin/login`: login page
 - `GET /admin`: protected admin console
 - `GET /timeline`: accepted tweets timeline
-- `GET /raw-timeline`: raw Playwright/API results, including rejected items and rejection reasons
+- `GET /rejected-timeline`: rejected Playwright/API results with rejection reasons
 
 The admin console manages:
 
@@ -209,3 +209,59 @@ runtime/netns-openvpn-autostart.log
 ```
 
 If a run is blocked by an X session alert, resolve the account manually from the usual VPN/IP profile first, then mark the alert as resolved in admin.
+
+## Docker Deployment Without VNC
+
+Docker is optional. The local install above still uses the existing `host_netns` isolation backend by default.
+
+To use Docker, set:
+
+```env
+SEARCH_WITHOUT_API_ISOLATION=docker_vpn
+```
+
+Then start the main services:
+
+```bash
+export REDQUEENX_UID=$(id -u)
+export REDQUEENX_GID=$(id -g)
+docker compose up -d caddy admin vpn worker
+```
+
+Docker services are split deliberately:
+
+- `admin`: non-privileged RedqueenX admin server behind Caddy; no Docker socket is mounted.
+- `caddy`: HTTPS reverse proxy to `admin:3005`.
+- `vpn`: the only service with `NET_ADMIN` and `/dev/net/tun`; it runs OpenVPN and applies an internal kill switch.
+- `worker`: shares `vpn` networking with `network_mode: service:vpn`; it picks up without-API runs and media-cache jobs from SQLite.
+- `x-login`: temporary service for visible X login only; it uses SSH X forwarding, never VNC/noVNC.
+- `init-runtime`: one-shot helper that creates persistent runtime directories and fixes ownership for the configured UID/GID.
+
+In Docker mode, admin does not call `npm run netns:*`. `Load medias` records a media-cache job in SQLite, then the Docker worker downloads it through the VPN container. The full `.env` file is not injected into every service environment: `admin` mounts it read/write for settings, `worker` and `x-login` mount it read-only, and `vpn` receives only explicit VPN variables.
+
+For visible X login, connect to the server with SSH X forwarding, run the bridge, export the variables it prints, then launch the temporary service:
+
+```bash
+ops/docker/x11-bridge.sh
+docker compose run --rm x-login --account-id <id>
+```
+
+For alert recovery:
+
+```bash
+docker compose run --rm x-login --account-id <id> --resolve-alert --auto-save-on-login --hold-open-after-save
+```
+
+There is no VNC, no noVNC, and no browser display exposed through the web UI.
+The X11 bridge is temporary and bound to the Docker host interface for the `x-login` session only; stop the bridge process after the login window is closed.
+
+Useful Docker validation commands:
+
+```bash
+docker compose config --quiet
+docker compose build
+docker compose exec worker ip route get 1.1.1.1
+docker compose exec worker npm run diagnose:vpn
+```
+
+The route check must show `dev tun...`. If OpenVPN is stopped or `tun+` disappears, the worker and media fetcher fail closed instead of using the host route.

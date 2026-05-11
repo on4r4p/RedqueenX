@@ -1,0 +1,4 @@
+{$REDQUEENX_SITE} {
+  encode zstd gzip
+  reverse_proxy admin:3005
+}

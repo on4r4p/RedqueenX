@@ -13,7 +13,7 @@ import { runVpnDiagnostics, type VpnDiagnosticsReport } from "../diagnostics/vpn
 import { EnvService } from "../admin/envService";
 import { XBrowserAccountService, type XBrowserAccountRecord } from "../admin/xBrowserAccountService";
 import { XSessionAlertService } from "../admin/xSessionAlertService";
-import { assertVpnNamespaceRuntime } from "./vpnGuard";
+import { assertVpnRuntime } from "./vpnGuard";
 
 interface LoginArgs {
   accountId?: number;
@@ -48,7 +48,7 @@ async function main() {
       xSessionAlerts.openForAccountOrThrow(account);
     }
     assertActiveVpnProfileLinked(account, config.vpnConfig);
-    await assertVpnNamespaceRuntime(config.vpnNetnsName, "X browser login");
+    await assertVpnRuntime(config, "X browser login");
     const report = await runVpnDiagnostics({ includePlaywright: false, strict: true });
     if (report.failures.length > 0) {
       throw new Error(`VPN diagnostics failed before X login: ${report.failures.join(" ")}`);
@@ -532,6 +532,7 @@ function printUsage() {
   console.log("  npm run netns:x-login -- --vpn-profile ./ops/vpn/client.ovpn");
   console.log("  npm run netns:x-login -- --account-id <id> --resolve-alert");
   console.log("  npm run netns:x-login -- --account-id <id> --resolve-alert --auto-save-on-login --hold-open-after-save");
+  console.log("  docker compose run --rm x-login --account-id <id>");
 }
 
 if (require.main === module) {

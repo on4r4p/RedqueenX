@@ -42,11 +42,64 @@ describe("x session alerts", () => {
     expect(() => alerts.openForAccountOrThrow(account)).toThrow(XSessionAlertOpenError);
     expect(() => alerts.resolve(alert.id, "")).toThrow(/resolution note/i);
 
-    const resolved = alerts.resolve(alert.id, "Human solved the X challenge from the usual VPN profile.");
+    const resolved = alerts.resolve(alert.id, "ok");
     expect(resolved.status).toBe("resolved");
-    expect(resolved.resolvedByNote).toContain("Human solved");
+    expect(resolved.resolvedByNote).toBe("ok");
     expect(alerts.openForAccount(account.id)).toBeNull();
     expect(() => alerts.openForAccountOrThrow(account)).not.toThrow();
+
+    const ignoredAlert = alerts.createOpen({
+      accountId: account.id,
+      xIdentifier: account.xIdentifier,
+      vpnProfilePath: account.vpnProfilePath,
+      publicIpv4: "203.0.113.10",
+      alertType: "x_blocked"
+    });
+    const ignored = alerts.ignore(ignoredAlert.id);
+    expect(ignored.status).toBe("ignored");
+    expect(ignored.resolvedByNote).toContain("Ignored from admin");
+    expect(alerts.openForAccount(account.id)).toBeNull();
+  });
+
+  it("refreshes evidence when an account already has an open X session alert", () => {
+    const database = openMemoryDatabase();
+    const accounts = new XBrowserAccountService(database);
+    const alerts = new XSessionAlertService(database);
+    const account = accounts.upsert({
+      vpnProfilePath: "./ops/vpn/locked.ovpn",
+      xIdentifier: "@locked_account"
+    });
+
+    const first = alerts.createOpen({
+      accountId: account.id,
+      xIdentifier: account.xIdentifier,
+      vpnProfilePath: account.vpnProfilePath,
+      publicIpv4: "203.0.113.10",
+      alertType: "two_factor",
+      details: { snapshotPath: "./runtime/x-session-alert-snapshots/old.json", visibleText: "" }
+    });
+    const second = alerts.createOpen({
+      accountId: account.id,
+      xIdentifier: account.xIdentifier,
+      vpnProfilePath: account.vpnProfilePath,
+      publicIpv4: "203.0.113.11",
+      alertType: "x_blocked",
+      details: {
+        snapshotPath: "./runtime/x-session-alert-snapshots/new.json",
+        visibleText: "Something went wrong. Try reloading.",
+        bodyTextLength: 38
+      }
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(second.alertType).toBe("x_blocked");
+    expect(second.publicIpv4).toBe("203.0.113.11");
+    expect(second.details).toMatchObject({
+      snapshotPath: "./runtime/x-session-alert-snapshots/new.json",
+      visibleText: "Something went wrong. Try reloading.",
+      bodyTextLength: 38
+    });
+    expect(alerts.openAlerts()).toHaveLength(1);
   });
 
   it("formats manual verification alerts as a readable current session block", async () => {

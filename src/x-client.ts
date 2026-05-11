@@ -3,10 +3,19 @@ import type { TweetCandidate, TweetMedia } from "./types";
 
 export type XSearchMode = "minimal" | "detailed";
 
+export interface XUserProfile {
+  id: string;
+  username: string;
+  name?: string;
+  protected?: boolean;
+}
+
 export interface XSearchClient {
   countRecent(query: string): Promise<number>;
   searchRecent(query: string, maxResults: number, mode?: XSearchMode): Promise<TweetCandidate[]>;
   lookupTweetsDetailed(tweetIds: string[]): Promise<TweetCandidate[]>;
+  lookupUserByUsername?(username: string): Promise<XUserProfile | null>;
+  userTimeline?(userId: string, maxResults: number, mode?: XSearchMode): Promise<TweetCandidate[]>;
 }
 
 export interface XClientOptions {
@@ -52,6 +61,40 @@ export class XApiClient implements XSearchClient {
     }
     const result = await this.client.v2.tweets(tweetIds, tweetFieldsForMode("detailed"));
     return mapTweets((result as any).data ?? [], (result as any).includes);
+  }
+
+  async lookupUserByUsername(username: string): Promise<XUserProfile | null> {
+    const result = await this.client.v2.userByUsername(username, {
+      "user.fields": ["username", "name", "protected"]
+    });
+    const user = (result as any)?.data;
+    if (!user?.id || !user?.username) {
+      return null;
+    }
+    return {
+      id: user.id,
+      username: user.username,
+      name: user.name,
+      protected: user.protected
+    };
+  }
+
+  async userTimeline(userId: string, maxResults: number, mode: XSearchMode = "detailed"): Promise<TweetCandidate[]> {
+    const cappedMaxResults = Math.max(5, Math.min(maxResults, 100));
+    const results = await this.client.v2.userTimeline(userId, {
+      max_results: cappedMaxResults,
+      ...tweetFieldsForMode(mode)
+    });
+
+    const tweets: any[] = [];
+    for await (const tweet of results) {
+      tweets.push(tweet);
+      if (tweets.length >= cappedMaxResults) {
+        break;
+      }
+    }
+
+    return mapTweets(tweets, results.includes);
   }
 }
 

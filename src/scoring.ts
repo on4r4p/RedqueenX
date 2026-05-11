@@ -16,6 +16,7 @@ export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
   enableMaximumHashtags: true,
   enableMaximumMentions: true,
   enableMaximumTweetsByUser: true,
+  enableSimilarTweetText: true,
   minimumSearchResults: 3,
   luckFactorDenominator: 200,
   allowedLanguages: ["en", "fr"],
@@ -29,7 +30,8 @@ export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
   maximumTweetAgeDays: 2,
   maximumHashtags: 3,
   maximumMentions: 3,
-  maximumTweetsByUser: 2
+  maximumTweetsByUser: 2,
+  similarTweetTextThreshold: 0.52
 };
 
 export interface ScoreLists {
@@ -57,16 +59,27 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
     reasons.push("tweet_too_short");
   }
 
-  if (config.enableAllowedLanguages && tweet.lang && !config.allowedLanguages.includes(tweet.lang)) {
-    reasons.push("language_not_allowed");
+  if (config.enableAllowedLanguages) {
+    const tweetLang = normalizeLanguageCode(tweet.lang);
+    if (!tweetLang) {
+      reasons.push("language_unknown");
+    } else if (!isAllowedLanguage(tweetLang, config.allowedLanguages)) {
+      reasons.push("language_not_allowed");
+    }
   }
 
   if (lists.sentTweetIds.includes(tweet.id)) {
     reasons.push("tweet_id_already_seen");
   }
 
-  if (lists.sentTexts.some((sentText) => normalizeSearchText(sentText) === normalizedText)) {
+  const exactSentTextMatch = lists.sentTexts.some((sentText) => normalizeSearchText(sentText) === normalizedText);
+  if (exactSentTextMatch) {
     reasons.push("tweet_text_already_seen");
+  } else if (config.enableSimilarTweetText) {
+    const similarMatch = findSimilarSentText(tweet.text, lists.sentTexts, config.similarTweetTextThreshold);
+    if (similarMatch) {
+      reasons.push(`tweet_text_too_similar:${Math.round(similarMatch.score * 100)}%`);
+    }
   }
 
   if (bannedUsers.has(userHandle)) {
@@ -178,8 +191,141 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
   };
 }
 
+export function normalizeLanguageCode(value: string | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "und") return null;
+  return normalized.split("-")[0] || null;
+}
+
+export function isAllowedLanguage(lang: string, allowedLanguages: string[]): boolean {
+  const normalizedLang = normalizeLanguageCode(lang);
+  if (!normalizedLang) return false;
+  return allowedLanguages.some((allowed) => normalizeLanguageCode(allowed) === normalizedLang);
+}
+
 function boundedPopularityScore(value: number): number {
   if (value <= 0) return 0;
   if (value <= 23) return value;
   return 23 + Math.min(23, Math.floor((value - 20) / 10));
 }
+
+export interface SimilarSentTextMatch {
+  score: number;
+}
+
+export function findSimilarSentText(text: string, sentTexts: string[], threshold: number): SimilarSentTextMatch | null {
+  const normalizedThreshold = normalizeSimilarityThreshold(threshold);
+  let best: SimilarSentTextMatch | null = null;
+  for (const sentText of sentTexts) {
+    const score = tweetTextSimilarity(text, sentText);
+    if (score >= normalizedThreshold && (!best || score > best.score)) {
+      best = { score };
+    }
+  }
+  return best;
+}
+
+export function tweetTextSimilarity(left: string, right: string): number {
+  const leftText = normalizeSearchText(left);
+  const rightText = normalizeSearchText(right);
+  if (!leftText || !rightText) return 0;
+  if (leftText === rightText) return 1;
+  if (hasLongSharedWindow(leftText, rightText)) return 1;
+
+  const leftTokens = meaningfulTokenSet(leftText);
+  const rightTokens = meaningfulTokenSet(rightText);
+  if (leftTokens.size < 6 || rightTokens.size < 6) return 0;
+
+  let shared = 0;
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) {
+      shared += 1;
+    }
+  }
+  if (shared < 6) return 0;
+
+  const dice = (2 * shared) / (leftTokens.size + rightTokens.size);
+  const overlap = shared / Math.min(leftTokens.size, rightTokens.size);
+  return Math.max(dice, overlap);
+}
+
+function normalizeSimilarityThreshold(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_SCORING_CONFIG.similarTweetTextThreshold;
+  return Math.max(0, Math.min(1, value));
+}
+
+function hasLongSharedWindow(left: string, right: string): boolean {
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length <= right.length ? right : left;
+  if (shorter.length < 40) return false;
+  const windowSize = Math.max(40, Math.floor(shorter.length * 0.45));
+  for (let start = 0; start + windowSize <= shorter.length; start += 1) {
+    const sample = shorter.slice(start, start + windowSize).trim();
+    if (sample.length >= 40 && longer.includes(sample)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function meaningfulTokenSet(text: string): Set<string> {
+  const tokens = text
+    .split(" ")
+    .map(normalizeSimilarityToken)
+    .filter((token) => token.length >= 3 && !similarityStopWords.has(token));
+  return new Set(tokens);
+}
+
+function normalizeSimilarityToken(token: string): string {
+  if (token === "sqli") return "sql";
+  if (token.length > 5 && token.endsWith("ies")) return `${token.slice(0, -3)}y`;
+  if (token.length > 5 && token.endsWith("ing")) return token.slice(0, -3);
+  if (token.length > 4 && token.endsWith("ed")) return token.slice(0, -2);
+  if (token.length > 4 && token.endsWith("es")) return token.slice(0, -2);
+  if (token.length > 4 && token.endsWith("s") && !token.endsWith("ss")) return token.slice(0, -1);
+  return token;
+}
+
+const similarityStopWords = new Set([
+  "about",
+  "according",
+  "after",
+  "again",
+  "against",
+  "also",
+  "and",
+  "another",
+  "are",
+  "because",
+  "been",
+  "before",
+  "being",
+  "between",
+  "but",
+  "can",
+  "could",
+  "described",
+  "for",
+  "from",
+  "has",
+  "have",
+  "into",
+  "its",
+  "may",
+  "more",
+  "not",
+  "now",
+  "over",
+  "post",
+  "reportedly",
+  "says",
+  "that",
+  "the",
+  "their",
+  "this",
+  "through",
+  "was",
+  "were",
+  "with",
+  "would"
+]);

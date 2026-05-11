@@ -20,11 +20,14 @@
           </div>
         </div>
         <div class="topbar-actions">
-          <a class="nav-link" href="/raw-timeline">Raw Timeline</a>
+          <a class="nav-link" href="/rejected-timeline" data-raw-timeline-link>Rejected Timeline</a>
           <a class="nav-link" href="/admin">Admin</a>
         </div>
       </header>
       <p id="timeline-status" class="timeline-status"></p>
+      <section class="timeline-maintenance-bar">
+        <button id="retry-abs-twimg-failures" type="button" class="tweet-action-button" title="Retry timeline media downloads that previously failed because abs.twimg.com was blocked.">Retry failed media</button>
+      </section>
       <nav id="timeline-pagination" class="timeline-pagination is-hidden" aria-label="Timeline pagination" data-timeline-pagination>
         <button type="button" class="tweet-action-button" data-page-action="prev">Previous</button>
         <span data-pagination-label></span>
@@ -33,6 +36,7 @@
           Per page
           <input data-page-size type="number" min="1" max="200" step="1" value="50" aria-label="Timeline items per page" />
         </label>
+        <button type="button" class="tweet-action-button" data-scroll-top>Back to top</button>
       </nav>
       <section id="timeline" class="timeline"></section>
       <nav id="timeline-pagination-bottom" class="timeline-pagination timeline-pagination-bottom is-hidden" aria-label="Timeline pagination bottom" data-timeline-pagination>
@@ -43,6 +47,7 @@
           Per page
           <input data-page-size type="number" min="1" max="200" step="1" value="50" aria-label="Timeline items per page" />
         </label>
+        <button type="button" class="tweet-action-button" data-scroll-top>Back to top</button>
       </nav>
     </main>
     <script src="/assets/timeline.js" defer></script>

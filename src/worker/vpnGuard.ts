@@ -3,6 +3,19 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+export type VpnIsolationRuntime = {
+  searchWithoutApiIsolation: "host_netns" | "docker_vpn";
+  vpnNetnsName: string;
+};
+
+export async function assertVpnRuntime(config: VpnIsolationRuntime, purpose: string): Promise<void> {
+  if (config.searchWithoutApiIsolation === "docker_vpn") {
+    await assertDockerVpnRuntime(purpose);
+    return;
+  }
+  await assertVpnNamespaceRuntime(config.vpnNetnsName, purpose);
+}
+
 export async function assertVpnNamespaceRuntime(netnsName: string, purpose: string): Promise<void> {
   const marker = process.env.REDQUEENX_VPN_NETNS;
   if (marker !== netnsName) {
@@ -15,6 +28,24 @@ export async function assertVpnNamespaceRuntime(netnsName: string, purpose: stri
     );
   }
 
+  await assertTunRoute(purpose);
+}
+
+async function assertDockerVpnRuntime(purpose: string): Promise<void> {
+  if (process.env.REDQUEENX_DOCKER_VPN !== "true") {
+    throw new Error(
+      [
+        `${purpose} must run inside the Docker VPN network before any browser action starts.`,
+        `Expected REDQUEENX_DOCKER_VPN=true, got ${process.env.REDQUEENX_DOCKER_VPN || "unset"}.`,
+        "Launch it through docker compose up -d worker or docker compose run --rm x-login, not through direct worker scripts."
+      ].join(" ")
+    );
+  }
+
+  await assertTunRoute(purpose);
+}
+
+async function assertTunRoute(purpose: string): Promise<void> {
   const links = await execIp(["-o", "link", "show"]);
   if (!/^\d+:\s+tun[^:]*:/m.test(links)) {
     throw new Error(`${purpose} refused to start: no tun+ interface is visible in the current network namespace.`);

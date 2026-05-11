@@ -27,6 +27,7 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  SEARCH_WITHOUT_API_ISOLATION: z.enum(["host_netns", "docker_vpn"]).default("host_netns"),
   SEARCH_WITHOUT_API_PROFILE_DIR: z.string().default("./runtime/playwright-profile"),
   SEARCH_WITHOUT_API_START_URL: z.string().default("https://x.com/search"),
   SEARCH_WITHOUT_API_MAX_SCROLLS: z.coerce.number().int().min(1).default(20),
@@ -73,10 +74,30 @@ const envSchema = z.object({
     .transform((value) => value === "true"),
   SEARCH_WITHOUT_API_MEDIA_CACHE_DIR: z.string().default("./runtime/media-cache"),
   SEARCH_WITHOUT_API_MEDIA_CACHE_TTL_HOURS: z.coerce.number().min(0).default(24),
-  SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_MB: z.coerce.number().min(1).default(256),
+  SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_MB: z.coerce.number().min(0).default(256),
   SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB: z.coerce.number().min(1).default(15),
   SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS: z.coerce.number().int().min(0).default(800),
   SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS: z.coerce.number().int().min(0).default(3000),
+  TIMELINE_DEFAULT_PAGE_SIZE: z.coerce.number().int().min(1).max(200).default(50),
+  RUN_CHAIN_COUNT: z.coerce.number().int().min(1).default(1),
+  STALE_KEYWORD_USER_MAX_AGE_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
+  STALE_KEYWORD_USER_START_INDEX: z.coerce.number().int().min(1).default(1),
+  STALE_KEYWORD_USER_AUTO_IGNORE_ALERT: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  STALE_KEYWORD_USER_MAX_RETRIES: z.coerce.number().int().min(0).max(20).default(3),
+  RAW_TIMELINE_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  DOCKER_X11_FORWARD_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  DOCKER_X11_HOST: z.string().default(""),
+  DOCKER_X11_PORT: z.coerce.number().int().min(1).max(65535).default(6010),
+  DOCKER_XAUTHORITY: z.string().default("/tmp/redqueenx-docker.xauth"),
   X_LOGIN_SKIP_NETWORK_PRECHECK: z
     .enum(["true", "false"])
     .default("false")
@@ -154,6 +175,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     xSearchApiCallLimit: parsed.X_SEARCH_API_CALL_LIMIT,
     xApiEnabled: parsed.X_API_ENABLED,
     searchWithoutApiEnabled: parsed.SEARCH_WITHOUT_API_ENABLED,
+    searchWithoutApiIsolation: parsed.SEARCH_WITHOUT_API_ISOLATION,
     searchWithoutApiProfileDir: parsed.SEARCH_WITHOUT_API_PROFILE_DIR,
     searchWithoutApiStartUrl: parsed.SEARCH_WITHOUT_API_START_URL,
     searchWithoutApiMaxScrolls: parsed.SEARCH_WITHOUT_API_MAX_SCROLLS,
@@ -186,6 +208,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     searchWithoutApiMediaCacheMaxFileMb: parsed.SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB,
     searchWithoutApiMediaCacheFetchDelayMinMs: parsed.SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS,
     searchWithoutApiMediaCacheFetchDelayMaxMs: parsed.SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS,
+    timelineDefaultPageSize: parsed.TIMELINE_DEFAULT_PAGE_SIZE,
+    runChainCount: parsed.RUN_CHAIN_COUNT,
+    staleKeywordUserMaxAgeDays: parsed.STALE_KEYWORD_USER_MAX_AGE_DAYS,
+    staleKeywordUserStartIndex: parsed.STALE_KEYWORD_USER_START_INDEX,
+    staleKeywordUserAutoIgnoreAlert: parsed.STALE_KEYWORD_USER_AUTO_IGNORE_ALERT,
+    staleKeywordUserMaxRetries: parsed.STALE_KEYWORD_USER_MAX_RETRIES,
+    rawTimelineEnabled: parsed.RAW_TIMELINE_ENABLED,
+    dockerX11ForwardEnabled: parsed.DOCKER_X11_FORWARD_ENABLED,
+    dockerX11Host: parsed.DOCKER_X11_HOST,
+    dockerX11Port: parsed.DOCKER_X11_PORT,
+    dockerXauthority: parsed.DOCKER_XAUTHORITY,
     xLoginSkipNetworkPrecheck: parsed.X_LOGIN_SKIP_NETWORK_PRECHECK,
     vpnNetnsName: parsed.VPN_NETNS_NAME,
     vpnHostIface: parsed.VPN_HOST_IFACE,

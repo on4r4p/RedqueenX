@@ -39,6 +39,64 @@ export interface RawTimelineTweetPage {
   hasMore: boolean;
 }
 
+export interface RawTimelineReasonOption {
+  reason: string;
+  count: number;
+}
+
+export interface RawTimelineReasonGroupOption {
+  id: string;
+  label: string;
+  count: number;
+}
+
+export interface RawTimelinePageOptions {
+  limit?: number;
+  offset?: number;
+  decisionStatus?: "pending" | "accepted" | "rejected";
+  rejectionReasons?: string[];
+  rejectionReasonGroups?: string[];
+}
+
+type RawTimelineReasonGroupDefinition = {
+  id: string;
+  label: string;
+  exact: string[];
+  prefixes: string[];
+};
+
+export const rawTimelineReasonGroups: RawTimelineReasonGroupDefinition[] = [
+  { id: "banned_word", label: "Banned word", exact: ["banned_word"], prefixes: ["banned_word:"] },
+  { id: "banned_user", label: "Banned user", exact: ["banned_user"], prefixes: ["banned_user:"] },
+  { id: "tweet_too_old", label: "Too old", exact: ["tweet_too_old"], prefixes: ["tweet_too_old:"] },
+  { id: "tweet_too_short", label: "Too short", exact: ["tweet_too_short"], prefixes: [] },
+  { id: "language", label: "Language", exact: ["language_unknown", "language_not_allowed"], prefixes: ["language_not_allowed:"] },
+  { id: "duplicate", label: "Duplicate", exact: ["tweet_id_already_seen", "tweet_text_already_seen"], prefixes: ["tweet_text_too_similar:"] },
+  { id: "missing_keyword", label: "Missing keyword", exact: ["missing_keyword"], prefixes: [] },
+  { id: "hashtags", label: "Too many hashtags", exact: ["too_many_hashtags"], prefixes: ["too_many_hashtags:"] },
+  { id: "mentions", label: "Too many mentions", exact: ["too_many_mentions"], prefixes: ["too_many_mentions:"] },
+  { id: "user_frequency", label: "Too many tweets by user", exact: ["too_many_tweets_by_user"], prefixes: [] },
+  { id: "retweets", label: "Retweets", exact: ["not_enough_retweets", "too_many_retweets"], prefixes: ["not_enough_retweets:", "too_many_retweets:"] },
+  { id: "favorites", label: "Favorites", exact: ["not_enough_favorites", "too_many_favorites"], prefixes: ["not_enough_favorites:", "too_many_favorites:"] },
+  { id: "followers", label: "Followers", exact: ["not_enough_followers"], prefixes: ["not_enough_followers:"] },
+  { id: "score", label: "Score too low", exact: ["score_too_low"], prefixes: [] },
+  { id: "prefilter", label: "Prefilter", exact: ["prefilter_rejected"], prefixes: [] }
+];
+
+const rawTimelineReasonGroupById = new Map(rawTimelineReasonGroups.map((group) => [group.id, group]));
+
+export function normalizeRawTimelineReasonGroupIds(values: string[] | undefined): string[] {
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values ?? []) {
+    const id = value.trim();
+    if (!id || seen.has(id) || !rawTimelineReasonGroupById.has(id)) continue;
+    seen.add(id);
+    normalized.push(id);
+  }
+  return normalized;
+}
+
 type RawTimelineTweetRow = {
   run_id: string;
   tweet_id: string;
@@ -61,7 +119,7 @@ type RawTimelineTweetRow = {
 };
 
 export class RawTimelineTweetService {
-  constructor(private readonly database: Database) {}
+  constructor(private readonly database: Database) { }
 
   saveVisible(runId: string, keyword: string, tweets: TweetCandidate[]): number {
     if (tweets.length === 0) return 0;
@@ -167,26 +225,33 @@ export class RawTimelineTweetService {
     return save(decisions);
   }
 
-  latest(limit = 80, offset = 0): RawTimelineTweetItem[] {
+  latest(limit = 50, offset = 0, options: Omit<RawTimelinePageOptions, "limit" | "offset"> = {}): RawTimelineTweetItem[] {
     const safeLimit = Math.max(1, Math.min(limit, 300));
     const safeOffset = Math.max(0, Math.floor(offset));
+    const filter = rawTimelineFilterSql(options);
     const rows = this.database
       .prepare(`
         SELECT *
         FROM raw_timeline_tweets
+        ${filter.whereClause}
         ORDER BY captured_at DESC, run_id DESC, tweet_id DESC
         LIMIT ?
         OFFSET ?
       `)
-      .all(safeLimit, safeOffset) as RawTimelineTweetRow[];
+      .all(...filter.params, safeLimit, safeOffset) as RawTimelineTweetRow[];
     return rows.map(mapRawTweetRow);
   }
 
-  page(options: { limit?: number; offset?: number } = {}): RawTimelineTweetPage {
-    const limit = Math.max(1, Math.min(options.limit ?? 80, 300));
+  page(options: RawTimelinePageOptions = {}): RawTimelineTweetPage {
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 300));
     const offset = Math.max(0, Math.floor(options.offset ?? 0));
-    const total = this.count();
-    const items = this.latest(limit, offset);
+    const filterOptions = {
+      decisionStatus: options.decisionStatus,
+      rejectionReasons: options.rejectionReasons,
+      rejectionReasonGroups: options.rejectionReasonGroups
+    };
+    const total = this.count(filterOptions);
+    const items = this.latest(limit, offset, filterOptions);
     return {
       items,
       total,
@@ -196,10 +261,96 @@ export class RawTimelineTweetService {
     };
   }
 
-  count(): number {
-    const row = this.database.prepare("SELECT COUNT(*) AS total FROM raw_timeline_tweets").get() as { total: number };
+  count(options: Omit<RawTimelinePageOptions, "limit" | "offset"> = {}): number {
+    const filter = rawTimelineFilterSql(options);
+    const row = this.database
+      .prepare(`SELECT COUNT(*) AS total FROM raw_timeline_tweets ${filter.whereClause}`)
+      .get(...filter.params) as { total: number };
     return row.total;
   }
+
+  rejectionReasonOptions(limit = 200): RawTimelineReasonOption[] {
+    const safeLimit = Math.max(1, Math.min(limit, 500));
+    return this.database
+      .prepare(`
+        SELECT json_each.value AS reason, COUNT(*) AS count
+        FROM raw_timeline_tweets, json_each(raw_timeline_tweets.rejection_reasons_json)
+        WHERE raw_timeline_tweets.decision_status = 'rejected'
+          AND json_each.type = 'text'
+          AND TRIM(json_each.value) <> ''
+        GROUP BY json_each.value
+        ORDER BY count DESC, reason ASC
+        LIMIT ?
+      `)
+      .all(safeLimit) as RawTimelineReasonOption[];
+  }
+
+  rejectionReasonGroupOptions(): RawTimelineReasonGroupOption[] {
+    return rawTimelineReasonGroups
+      .map((group) => ({
+        id: group.id,
+        label: group.label,
+        count: this.count({ decisionStatus: "rejected", rejectionReasonGroups: [group.id] })
+      }))
+      .filter((group) => group.count > 0);
+  }
+
+  clearRejected(): number {
+    const result = this.database.prepare("DELETE FROM raw_timeline_tweets WHERE decision_status = 'rejected'").run();
+    return result.changes;
+  }
+}
+
+function rawTimelineFilterSql(options: Omit<RawTimelinePageOptions, "limit" | "offset">) {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (options.decisionStatus) {
+    clauses.push("decision_status = ?");
+    params.push(options.decisionStatus);
+  }
+  const rejectionReasons = Array.from(new Set((options.rejectionReasons ?? []).map((reason) => reason.trim()).filter(Boolean)));
+  const rejectionReasonGroups = normalizeRawTimelineReasonGroupIds(options.rejectionReasonGroups);
+  if (rejectionReasons.length > 0 || rejectionReasonGroups.length > 0) {
+    const reasonFilters: string[] = [];
+    const reasonParams: unknown[] = [];
+    if (rejectionReasons.length > 0) {
+      reasonFilters.push(`json_each.value IN (${rejectionReasons.map(() => "?").join(", ")})`);
+      reasonParams.push(...rejectionReasons);
+    }
+    for (const groupId of rejectionReasonGroups) {
+      const group = rawTimelineReasonGroupById.get(groupId);
+      if (!group) continue;
+      reasonFilters.push(rawTimelineReasonGroupSql(group, "json_each.value", reasonParams));
+    }
+    if (reasonFilters.length > 0) {
+      clauses.push(`
+        EXISTS (
+          SELECT 1
+          FROM json_each(raw_timeline_tweets.rejection_reasons_json)
+          WHERE json_each.type = 'text'
+            AND (${reasonFilters.join(" OR ")})
+        )
+      `);
+      params.push(...reasonParams);
+    }
+  }
+  return {
+    whereClause: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "",
+    params
+  };
+}
+
+function rawTimelineReasonGroupSql(group: RawTimelineReasonGroupDefinition, expression: string, params: unknown[]): string {
+  const clauses: string[] = [];
+  for (const exact of group.exact) {
+    clauses.push(`${expression} = ?`);
+    params.push(exact);
+  }
+  for (const prefix of group.prefixes) {
+    clauses.push(`substr(${expression}, 1, ?) = ?`);
+    params.push(prefix.length, prefix);
+  }
+  return clauses.length > 0 ? `(${clauses.join(" OR ")})` : "0";
 }
 
 function mapRawTweetRow(row: RawTimelineTweetRow): RawTimelineTweetItem {

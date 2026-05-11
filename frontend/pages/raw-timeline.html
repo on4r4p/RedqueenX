@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'none'; connect-src 'self'; object-src 'none'; base-uri 'self'" />
-    <title>RedqueenX Raw Timeline</title>
+    <title>RedqueenX Rejected Timeline</title>
     <link rel="icon" type="image/x-icon" href="/trinity.ico?v=1" sizes="any" />
     <link rel="shortcut icon" type="image/x-icon" href="/trinity.ico?v=1" />
     <link rel="stylesheet" href="/assets/styles.css" />
@@ -15,8 +15,8 @@
         <div class="brand-row">
           <div class="brand-mark" aria-label="RedqueenX"></div>
           <div>
-            <h1>Raw Timeline</h1>
-            <p>Every visible tweet captured by Playwright before scoring, even when scoring rejects it</p>
+            <h1>Rejected Timeline</h1>
+            <p>Rejected captured tweets with their scoring or prefilter reasons</p>
           </div>
         </div>
         <div class="topbar-actions">
@@ -25,24 +25,34 @@
         </div>
       </header>
       <p id="raw-timeline-status" class="timeline-status"></p>
-      <nav id="raw-timeline-pagination" class="timeline-pagination is-hidden" aria-label="Raw timeline pagination" data-raw-timeline-pagination>
+      <section class="timeline-filter-bar" id="rejected-timeline-filters">
+        <div class="timeline-filter-field">
+          <span>Rejection reasons</span>
+          <div id="rejection-reason-filter" class="timeline-filter-options" role="group" aria-label="Rejected timeline rejection reason filters"></div>
+        </div>
+        <button id="rejection-reason-clear" type="button" class="tweet-action-button">Clear filters</button>
+        <button id="rejected-timeline-clear-all" type="button" class="tweet-action-button danger-button">Clear rejected timeline</button>
+      </section>
+      <nav id="raw-timeline-pagination" class="timeline-pagination is-hidden" aria-label="Rejected timeline pagination" data-raw-timeline-pagination>
         <button type="button" class="tweet-action-button" data-page-action="prev">Previous</button>
         <span data-pagination-label></span>
         <button type="button" class="tweet-action-button" data-page-action="next">Next</button>
         <label class="timeline-page-size">
           Per page
-          <input data-page-size type="number" min="1" max="300" step="1" value="50" aria-label="Raw timeline items per page" />
+          <input data-page-size type="number" min="1" max="300" step="1" value="50" aria-label="Rejected timeline items per page" />
         </label>
+        <button type="button" class="tweet-action-button" data-scroll-top>Back to top</button>
       </nav>
       <section id="raw-timeline" class="timeline raw-timeline"></section>
-      <nav id="raw-timeline-pagination-bottom" class="timeline-pagination timeline-pagination-bottom is-hidden" aria-label="Raw timeline pagination bottom" data-raw-timeline-pagination>
+      <nav id="raw-timeline-pagination-bottom" class="timeline-pagination timeline-pagination-bottom is-hidden" aria-label="Rejected timeline pagination bottom" data-raw-timeline-pagination>
         <button type="button" class="tweet-action-button" data-page-action="prev">Previous</button>
         <span data-pagination-label></span>
         <button type="button" class="tweet-action-button" data-page-action="next">Next</button>
         <label class="timeline-page-size">
           Per page
-          <input data-page-size type="number" min="1" max="300" step="1" value="50" aria-label="Raw timeline items per page" />
+          <input data-page-size type="number" min="1" max="300" step="1" value="50" aria-label="Rejected timeline items per page" />
         </label>
+        <button type="button" class="tweet-action-button" data-scroll-top>Back to top</button>
       </nav>
     </main>
     <script src="/assets/raw-timeline.js" defer></script>

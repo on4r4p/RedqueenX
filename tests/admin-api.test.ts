@@ -35,6 +35,7 @@ describe("admin api", () => {
         currentSessionFile: currentSessionFilePath,
         xApiEnabled: true,
         searchWithoutApiEnabled: false,
+        searchWithoutApiIsolation: "host_netns",
         searchWithoutApiProfileDir: "./runtime/playwright-profile",
         searchWithoutApiStartUrl: "https://x.com/search",
         searchWithoutApiMaxScrolls: 20,
@@ -67,6 +68,17 @@ describe("admin api", () => {
         searchWithoutApiMediaCacheMaxFileMb: 15,
         searchWithoutApiMediaCacheFetchDelayMinMs: 800,
         searchWithoutApiMediaCacheFetchDelayMaxMs: 3000,
+        timelineDefaultPageSize: 50,
+        runChainCount: 1,
+        staleKeywordUserMaxAgeDays: 90,
+        staleKeywordUserStartIndex: 1,
+        staleKeywordUserAutoIgnoreAlert: false,
+        staleKeywordUserMaxRetries: 3,
+        rawTimelineEnabled: true,
+        dockerX11ForwardEnabled: false,
+        dockerX11Host: "",
+        dockerX11Port: 6010,
+        dockerXauthority: "/tmp/redqueenx-docker.xauth",
         xLoginSkipNetworkPrecheck: false,
         vpnNetnsName: "redqueenx-vpn",
         vpnHostIface: "",
@@ -127,6 +139,11 @@ describe("admin api", () => {
     const rawTimeline = await app.inject({ method: "GET", url: "/raw-timeline" });
     expect(rawTimeline.statusCode).toBe(200);
     expect(rawTimeline.body).toContain("/assets/raw-timeline.js");
+    const rejectedTimeline = await app.inject({ method: "GET", url: "/rejected-timeline" });
+    expect(rejectedTimeline.statusCode).toBe(200);
+    expect(rejectedTimeline.body).toContain("Rejected Timeline");
+    expect(rejectedTimeline.body).toContain('id="rejected-timeline-clear-all"');
+    expect(rejectedTimeline.body).toContain("/assets/raw-timeline.js");
 
     const stylesheet = await app.inject({ method: "GET", url: "/assets/styles.css" });
     expect(stylesheet.statusCode).toBe(200);
@@ -146,12 +163,18 @@ describe("admin api", () => {
     expect(publicTimelineData.json()).toEqual({
       items: [],
       pagination: { total: 0, limit: 50, offset: 0, hasMore: false },
+      rawTimelineEnabled: true,
       actionsEnabled: false
     });
     const rawTimelineData = await app.inject({ method: "GET", url: "/raw-timeline/data" });
     expect(rawTimelineData.statusCode).toBe(200);
     expect(rawTimelineData.json()).toEqual({
+      enabled: true,
       items: [],
+      availableRejectionReasons: [],
+      availableRejectionReasonGroups: [],
+      selectedRejectionReasons: [],
+      selectedRejectionReasonGroups: [],
       pagination: { total: 0, limit: 50, offset: 0, hasMore: false }
     });
 
@@ -174,12 +197,62 @@ describe("admin api", () => {
 
     const authHeaders = { cookie: Array.isArray(cookie) ? cookie[0] : String(cookie) };
 
+    database.prepare("INSERT INTO runs (id, status, started_at, updated_at, stats_json) VALUES (?, ?, ?, ?, ?)").run(
+      "run-clear-rejected",
+      "stopped",
+      "2026-05-07T12:00:00.000Z",
+      "2026-05-07T12:00:00.000Z",
+      "{}"
+    );
+    database
+      .prepare(
+        `INSERT INTO raw_timeline_tweets (
+          run_id,
+          tweet_id,
+          source_keyword,
+          text,
+          decision_status,
+          rejection_reasons_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run("run-clear-rejected", "tweet-rejected", "keyword", "rejected tweet", "rejected", JSON.stringify(["score_too_low"]));
+    database
+      .prepare(
+        `INSERT INTO raw_timeline_tweets (
+          run_id,
+          tweet_id,
+          source_keyword,
+          text,
+          decision_status,
+          rejection_reasons_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run("run-clear-rejected", "tweet-accepted", "keyword", "accepted tweet", "accepted", "[]");
+    const clearRejectedTimeline = await app.inject({
+      method: "DELETE",
+      url: "/admin/rejected-timeline",
+      headers: authHeaders
+    });
+    expect(clearRejectedTimeline.statusCode).toBe(200);
+    expect(clearRejectedTimeline.json()).toEqual({ deleted: 1 });
+    expect(database.prepare("SELECT COUNT(*) AS total FROM raw_timeline_tweets WHERE decision_status = 'rejected'").get()).toEqual({
+      total: 0
+    });
+    expect(database.prepare("SELECT COUNT(*) AS total FROM raw_timeline_tweets WHERE decision_status = 'accepted'").get()).toEqual({
+      total: 1
+    });
+
     const adminPage = await app.inject({
       method: "GET",
       url: "/admin",
       headers: { ...authHeaders, accept: "text/html" }
     });
     expect(adminPage.statusCode).toBe(200);
+    expect(adminPage.headers["x-frame-options"]).toBe("DENY");
+    expect(adminPage.headers["x-content-type-options"]).toBe("nosniff");
+    expect(adminPage.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
     expect(adminPage.body).toContain("/assets/admin.js");
     expect(adminPage.body).not.toContain("Commande legacy");
     expect(adminPage.body).not.toContain("Anciennes commandes IRC");
@@ -194,7 +267,10 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="save-import-button"');
     expect(adminPage.body).toContain('id="save-all-import-button"');
     expect(adminPage.body).toContain('id="list-search"');
+    expect(adminPage.body).toContain('id="cleanup-lists-button"');
     expect(adminPage.body).toContain('<option value="no_result">No.Result</option>');
+    expect(adminPage.body).toContain('<option value="stale_keyword_user">Stale keyword users</option>');
+    expect(adminPage.body).toContain('<option value="skipped_keyword_user">Skipped keyword users</option>');
     expect(adminPage.body).not.toContain('data-admin-section-target="import"');
     expect(adminPage.body).not.toContain('id="admin-section-import"');
     expect(adminPage.body).not.toContain("Import & Compteurs");
@@ -206,7 +282,7 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="admin-nav-more"');
     expect(adminPage.body).toContain("More ...");
     expect(adminPage.body).toContain('data-run-action="start"');
-    expect(adminPage.body).toContain('href="/raw-timeline"');
+    expect(adminPage.body).toContain('href="/rejected-timeline"');
     expect(adminPage.body).toContain('id="server-access-form"');
     expect(adminPage.body).toContain("RedqueenX");
     expect(adminPage.body).toContain("Whitelist limits HTTPS access");
@@ -225,9 +301,25 @@ describe("admin api", () => {
     expect(adminPage.body).toContain("<legend>X Api env</legend>");
     expect(adminPage.body).toContain('id="search-without-api-form"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_ENABLED"');
+    expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_ISOLATION"');
+    expect(adminPage.body).toContain('name="DOCKER_X11_FORWARD_ENABLED"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM"');
+    expect(adminPage.body).toContain('name="TIMELINE_DEFAULT_PAGE_SIZE"');
+    expect(adminPage.body).toContain('name="RUN_CHAIN_COUNT"');
+    expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_MAX_AGE_DAYS"');
+    expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_START_INDEX"');
+    expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_AUTO_IGNORE_ALERT"');
+    expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_MAX_RETRIES"');
+    expect(adminPage.body).toContain('name="RAW_TIMELINE_ENABLED"');
+    expect(adminPage.body).toContain('id="stale-keyword-user-days"');
+    expect(adminPage.body).toContain('id="stale-keyword-user-start-index"');
+    expect(adminPage.body).toContain('id="stale-keyword-user-max-retries"');
+    expect(adminPage.body).toContain('id="open-stale-keyword-users-button"');
+    expect(adminPage.body).toContain('id="open-skipped-keyword-users-button"');
+    expect(adminPage.body).toContain('id="prune-stale-keyword-users-button"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER"');
+    expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX"');
     expect(adminPage.body).toContain('<option value="search_terms_used">SearchTerms.Used</option>');
     expect(adminPage.body).toContain("Linux namespace / OpenVPN");
     expect(adminPage.body).toContain("VPN diagnostics");
@@ -244,8 +336,9 @@ describe("admin api", () => {
     expect(adminPage.body).not.toContain('id="openvpn-bulk-profile-auth-button"');
     expect(adminPage.body).toContain('id="openvpn-auth-modal"');
     expect(adminPage.body).toContain('id="openvpn-auth-form"');
-    expect(adminPage.body).toContain('id="x-session-alert-header"');
-    expect(adminPage.body).toContain('id="x-session-alert-resolve"');
+	    expect(adminPage.body).toContain('id="x-session-alert-header"');
+	    expect(adminPage.body).toContain('id="x-session-alert-resolve"');
+	    expect(adminPage.body).not.toContain('id="x-session-alert-ignore"');
     expect(adminPage.body).toContain('id="x-browser-account-select"');
     expect(adminPage.body).toContain('id="x-browser-identifier"');
     expect(adminPage.body).toContain('id="x-browser-session-validation"');
@@ -269,8 +362,9 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="session-fullscreen-button"');
     expect(adminPage.body).not.toContain('id="session-grow-button"');
     expect(adminPage.body).not.toContain('id="session-shrink-button"');
-    expect(adminPage.body).toContain('id="session-keywords-list"');
-    expect(adminPage.body).toContain('id="admin-section-tests"');
+	    expect(adminPage.body).toContain('id="session-keywords-list"');
+	    expect(adminPage.body).toContain('id="toggle-inline-stale-keyword-users-button"');
+	    expect(adminPage.body).toContain('id="admin-section-tests"');
     expect(adminPage.body).toContain('data-admin-test="visible-x-login-vpn"');
     expect(adminPage.body).toContain('data-admin-test="media-cache"');
     expect(adminPage.body).toContain("Visible X login VPN preflight");
@@ -281,9 +375,10 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="x-session-alert-login"');
     expect(adminPage.body).toContain('id="x-session-alert-login-status"');
     expect(adminPage.body).toContain('id="x-session-alert-commands"');
-    expect(adminPage.body).toContain('id="session-alert-detail-login"');
-    expect(adminPage.body).toContain('id="session-alert-detail-login-status"');
-    expect(adminPage.body).toContain('id="session-alert-detail-resolve"');
+	    expect(adminPage.body).toContain('id="session-alert-detail-login"');
+	    expect(adminPage.body).toContain('id="session-alert-detail-login-status"');
+	    expect(adminPage.body).toContain('id="session-alert-detail-resolve"');
+	    expect(adminPage.body).not.toContain('id="session-alert-detail-ignore"');
     expect(adminPage.body).toContain('name="X_API_TOTAL_CREDIT_USED_USD"');
 
     const accountService = new XBrowserAccountService(database);
@@ -373,16 +468,34 @@ describe("admin api", () => {
       method: "POST",
       url: `/admin/x-session-alerts/${openAlert.id}/resolve`,
       headers: authHeaders,
-      payload: { note: "Human solved the challenge from the usual VPN IP." }
+      payload: { note: "ok" }
     });
     expect(resolveWithNote.statusCode).toBe(200);
     expect(resolveWithNote.json().alert).toMatchObject({ id: openAlert.id, status: "resolved" });
+    const ignoredOpenAlert = alertService.createOpen({
+      accountId: account.id,
+      xIdentifier: account.xIdentifier,
+      vpnProfilePath: account.vpnProfilePath,
+      publicIpv4: "203.0.113.42",
+      alertType: "x_blocked"
+    });
+    const ignoreAlert = await app.inject({
+      method: "POST",
+      url: `/admin/x-session-alerts/${ignoredOpenAlert.id}/ignore`,
+      headers: authHeaders,
+      payload: {}
+    });
+    expect(ignoreAlert.statusCode).toBe(200);
+    expect(ignoreAlert.json().alert).toMatchObject({ id: ignoredOpenAlert.id, status: "ignored" });
+    expect(ignoreAlert.json().alert.resolvedByNote).toContain("Ignored from admin");
+    expect(alertService.openForAccount(account.id)).toBeNull();
     fs.rmSync(capturedStorageStatePath, { force: true });
     expect(adminPage.body).not.toContain('id="reset-no-results-button"');
     expect(adminPage.body).toContain('id="reset-x-counters-button"');
     expect(adminPage.body).toContain('id="reset-x-budget-button"');
     expect(adminPage.body).toContain('id="env-form"');
     expect(adminPage.body).toContain('id="session-log"');
+    expect(adminPage.body).toContain('id="session-stale-prune-status"');
     expect(adminPage.body).toContain('data-session-level="info"');
     expect(adminPage.body).toContain('data-session-level="prob"');
     expect(adminPage.body).toContain('data-session-level="debug"');
@@ -447,6 +560,14 @@ describe("admin api", () => {
     });
     expect(serverAccessSelfBlacklist.statusCode).toBe(400);
 
+    const crossOriginMutation = await app.inject({
+      method: "POST",
+      url: "/admin/lists/keyword",
+      headers: { ...authHeaders, origin: "https://evil.example.test", "sec-fetch-site": "cross-site" },
+      payload: { value: "csrf-keyword" }
+    });
+    expect(crossOriginMutation.statusCode).toBe(403);
+
     const filesystemBrowse = await app.inject({
       method: "GET",
       url: `/admin/filesystem/browse?mode=file&path=${encodeURIComponent(tmp)}`,
@@ -486,7 +607,7 @@ describe("admin api", () => {
     expect(openVpnOnlyNames).not.toContain("notes.txt");
 
     const openVpnSourcePath = path.join(tmp, "client.ovpn");
-    const openVpnTargetDir = `runtime/admin-api-vpn-copy-${process.pid}-${Date.now()}`;
+    const openVpnTargetDir = `ops/vpn/admin-api-vpn-copy-${process.pid}-${Date.now()}`;
     fs.writeFileSync(path.join(tmp, "client.auth"), "vpn-user\nvpn-pass\n", "utf8");
     fs.writeFileSync(
       openVpnSourcePath,
@@ -540,6 +661,17 @@ describe("admin api", () => {
     expect(copiedProfile).not.toContain("\nscript-security 2\n");
     expect(fs.readFileSync(path.resolve(openVpnTargetDir, "client.auth"), "utf8")).toBe("vpn-user\nvpn-pass\n");
     fs.rmSync(path.resolve(openVpnTargetDir), { recursive: true, force: true });
+
+    const copyOutsideVpnDir = await app.inject({
+      method: "POST",
+      url: "/admin/filesystem/copy",
+      headers: authHeaders,
+      payload: {
+        sourcePath: path.join(tmp, "notes.txt"),
+        targetDir: "frontend/assets"
+      }
+    });
+    expect(copyOutsideVpnDir.statusCode).toBe(400);
 
     const openVpnProfileDir = path.resolve("ops/vpn");
     const openVpnProfileName = `admin-api-profile-${process.pid}-${Date.now()}.ovpn`;
@@ -765,6 +897,7 @@ describe("admin api", () => {
     expect(xApiDefaults.json().values).toMatchObject({
       X_API_ENABLED: "true",
       SEARCH_WITHOUT_API_ENABLED: "false",
+      SEARCH_WITHOUT_API_ISOLATION: "host_netns",
       SEARCH_WITHOUT_API_MAX_SCROLLS: "20",
       SEARCH_WITHOUT_API_SCROLL_DELAY_MIN_MS: "5000",
       SEARCH_WITHOUT_API_SCROLL_DELAY_MAX_MS: "12000",
@@ -775,6 +908,17 @@ describe("admin api", () => {
       SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: "50",
       SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: "false",
       SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: "false",
+      TIMELINE_DEFAULT_PAGE_SIZE: "50",
+      RUN_CHAIN_COUNT: "1",
+      STALE_KEYWORD_USER_MAX_AGE_DAYS: "90",
+      STALE_KEYWORD_USER_START_INDEX: "1",
+      STALE_KEYWORD_USER_AUTO_IGNORE_ALERT: "false",
+      STALE_KEYWORD_USER_MAX_RETRIES: "3",
+      RAW_TIMELINE_ENABLED: "true",
+      DOCKER_X11_FORWARD_ENABLED: "false",
+      DOCKER_X11_HOST: "",
+      DOCKER_X11_PORT: "6010",
+      DOCKER_XAUTHORITY: "/tmp/redqueenx-docker.xauth",
       SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN: "10",
       SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX: "180",
       SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES: "15",
@@ -801,6 +945,94 @@ describe("admin api", () => {
       X_COUNT_FIRST_MODE: "true",
       X_KEYWORDS_PER_QUERY: "5"
     });
+
+    const generalRuntimeUpdate = await app.inject({
+      method: "PATCH",
+      url: "/admin/settings/x-api",
+      headers: authHeaders,
+      payload: {
+        values: {
+          RUN_CHAIN_COUNT: "3",
+          STALE_KEYWORD_USER_MAX_AGE_DAYS: "120",
+          STALE_KEYWORD_USER_START_INDEX: "2332",
+          STALE_KEYWORD_USER_AUTO_IGNORE_ALERT: "true",
+          STALE_KEYWORD_USER_MAX_RETRIES: "5",
+          SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_MB: "0"
+        }
+      }
+    });
+    expect(generalRuntimeUpdate.statusCode).toBe(200);
+    expect(generalRuntimeUpdate.json().values.RUN_CHAIN_COUNT).toBe("3");
+    expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_MAX_AGE_DAYS).toBe("120");
+    expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_START_INDEX).toBe("2332");
+    expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_AUTO_IGNORE_ALERT).toBe("true");
+    expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_MAX_RETRIES).toBe("5");
+    expect(generalRuntimeUpdate.json().values.SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_MB).toBe("0");
+
+    const timelinePageSizeUpdate = await app.inject({
+      method: "PATCH",
+      url: "/admin/settings/x-api",
+      headers: authHeaders,
+      payload: {
+        values: {
+          TIMELINE_DEFAULT_PAGE_SIZE: "75"
+        }
+      }
+    });
+    expect(timelinePageSizeUpdate.statusCode).toBe(200);
+    expect(timelinePageSizeUpdate.json().values.TIMELINE_DEFAULT_PAGE_SIZE).toBe("75");
+    const timelineDefaultPageSize = await app.inject({ method: "GET", url: "/timeline/data" });
+    expect(timelineDefaultPageSize.statusCode).toBe(200);
+    expect(timelineDefaultPageSize.json().pagination.limit).toBe(75);
+    const rawTimelineDefaultPageSize = await app.inject({ method: "GET", url: "/raw-timeline/data" });
+    expect(rawTimelineDefaultPageSize.statusCode).toBe(200);
+    expect(rawTimelineDefaultPageSize.json().pagination.limit).toBe(75);
+    expect(rawTimelineDefaultPageSize.json().enabled).toBe(true);
+    const timelineExplicitPageSize = await app.inject({ method: "GET", url: "/timeline/data?limit=3" });
+    expect(timelineExplicitPageSize.statusCode).toBe(200);
+    expect(timelineExplicitPageSize.json().pagination.limit).toBe(3);
+    const rawTimelineDisable = await app.inject({
+      method: "PATCH",
+      url: "/admin/settings/x-api",
+      headers: authHeaders,
+      payload: {
+        values: {
+          RAW_TIMELINE_ENABLED: "false"
+        }
+      }
+    });
+    expect(rawTimelineDisable.statusCode).toBe(200);
+    expect(rawTimelineDisable.json().values.RAW_TIMELINE_ENABLED).toBe("false");
+    const timelineWithRawDisabled = await app.inject({ method: "GET", url: "/timeline/data" });
+    expect(timelineWithRawDisabled.statusCode).toBe(200);
+    expect(timelineWithRawDisabled.json().rawTimelineEnabled).toBe(false);
+    const rawTimelineDisabledData = await app.inject({ method: "GET", url: "/raw-timeline/data?offset=50" });
+    expect(rawTimelineDisabledData.statusCode).toBe(200);
+    expect(rawTimelineDisabledData.json()).toEqual({
+      enabled: false,
+      items: [],
+      availableRejectionReasons: [],
+      availableRejectionReasonGroups: [],
+      selectedRejectionReasons: [],
+      selectedRejectionReasonGroups: [],
+      pagination: { total: 0, limit: 75, offset: 0, hasMore: false }
+    });
+    const timelinePageSizeReset = await app.inject({
+      method: "PATCH",
+      url: "/admin/settings/x-api",
+      headers: authHeaders,
+      payload: {
+        values: {
+          TIMELINE_DEFAULT_PAGE_SIZE: "50",
+          RUN_CHAIN_COUNT: "1",
+          STALE_KEYWORD_USER_MAX_AGE_DAYS: "90",
+          STALE_KEYWORD_USER_AUTO_IGNORE_ALERT: "false",
+          STALE_KEYWORD_USER_MAX_RETRIES: "3",
+          RAW_TIMELINE_ENABLED: "true"
+        }
+      }
+    });
+    expect(timelinePageSizeReset.statusCode).toBe(200);
 
     const xApiUpdate = await app.inject({
       method: "PATCH",
@@ -1071,6 +1303,10 @@ describe("admin api", () => {
       },
       currentRun: {
         status: "running"
+      },
+      staleKeywordUserPrune: {
+        running: false,
+        job: null
       }
     });
     expect(currentSession.json().session.lines.join("\n")).toContain("run.started");
@@ -1311,6 +1547,131 @@ describe("admin api", () => {
       payload: { value: "xss" }
     });
     expect(add.statusCode).toBe(200);
+
+    const removableKeyword = await app.inject({
+      method: "POST",
+      url: "/admin/lists/keyword",
+      headers: authHeaders,
+      payload: { value: "RemoveMe" }
+    });
+    expect(removableKeyword.statusCode).toBe(200);
+    const banMatchingKeyword = await app.inject({
+      method: "POST",
+      url: "/admin/lists/banned_word",
+      headers: authHeaders,
+      payload: { value: " removeme " }
+    });
+    expect(banMatchingKeyword.statusCode).toBe(200);
+    expect(banMatchingKeyword.json().removedKeywords).toBe(1);
+    const keywordsAfterBan = await app.inject({
+      method: "GET",
+      url: "/admin/lists/keyword?limit=100",
+      headers: authHeaders
+    });
+    expect(keywordsAfterBan.statusCode).toBe(200);
+    expect(keywordsAfterBan.json().entries.map((entry: { rawValue: string }) => entry.rawValue)).not.toContain("RemoveMe");
+
+    const staleUser = await app.inject({
+      method: "POST",
+      url: "/admin/lists/stale_keyword_user",
+      headers: authHeaders,
+      payload: { value: "@old_user" }
+    });
+    expect(staleUser.statusCode).toBe(200);
+    const restoredStaleUser = await app.inject({
+      method: "POST",
+      url: `/admin/lists/stale_keyword_user/${staleUser.json().entry.id}/restore-keyword`,
+      headers: authHeaders
+    });
+    expect(restoredStaleUser.statusCode).toBe(200);
+    expect(restoredStaleUser.json().entry.rawValue).toBe("@old_user");
+    expect(restoredStaleUser.json().deletedFromStaleList).toBe(1);
+    const staleAfterRestore = await app.inject({
+      method: "GET",
+      url: "/admin/lists/stale_keyword_user",
+      headers: authHeaders
+    });
+    expect(staleAfterRestore.statusCode).toBe(200);
+    expect(staleAfterRestore.json().entries).toEqual([]);
+    const deleteRestoredKeyword = await app.inject({
+      method: "DELETE",
+      url: "/admin/lists/keyword",
+      headers: authHeaders,
+      payload: { value: "@old_user" }
+    });
+    expect(deleteRestoredKeyword.statusCode).toBe(200);
+    expect(deleteRestoredKeyword.json().deleted).toBe(1);
+
+    const skippedUser = await app.inject({
+      method: "POST",
+      url: "/admin/lists/skipped_keyword_user",
+      headers: authHeaders,
+      payload: { value: "@skip_to_stale" }
+    });
+    expect(skippedUser.statusCode).toBe(200);
+    const skippedKeyword = await app.inject({
+      method: "POST",
+      url: "/admin/lists/keyword",
+      headers: authHeaders,
+      payload: { value: "@skip_to_stale" }
+    });
+    expect(skippedKeyword.statusCode).toBe(200);
+    const movedSkippedUser = await app.inject({
+      method: "POST",
+      url: `/admin/lists/skipped_keyword_user/${skippedUser.json().entry.id}/move-to-stale`,
+      headers: authHeaders
+    });
+    expect(movedSkippedUser.statusCode).toBe(200);
+    expect(movedSkippedUser.json().entry.rawValue).toBe("@skip_to_stale");
+    expect(movedSkippedUser.json().deletedFromKeywords).toBe(1);
+    expect(movedSkippedUser.json().deletedFromSkippedList).toBe(1);
+    const skippedAfterMove = await app.inject({
+      method: "GET",
+      url: "/admin/lists/skipped_keyword_user",
+      headers: authHeaders
+    });
+    expect(skippedAfterMove.statusCode).toBe(200);
+    expect(skippedAfterMove.json().entries).toEqual([]);
+    const staleAfterSkippedMove = await app.inject({
+      method: "GET",
+      url: "/admin/lists/stale_keyword_user?limit=100",
+      headers: authHeaders
+    });
+    expect(staleAfterSkippedMove.statusCode).toBe(200);
+    expect(staleAfterSkippedMove.json().entries.map((entry: { rawValue: string }) => entry.rawValue)).toContain("@skip_to_stale");
+
+    const activeCleanupKeyword = await app.inject({
+      method: "POST",
+      url: "/admin/lists/keyword",
+      headers: authHeaders,
+      payload: { value: "@cleanup_user" }
+    });
+    expect(activeCleanupKeyword.statusCode).toBe(200);
+    const staleCleanupUser = await app.inject({
+      method: "POST",
+      url: "/admin/lists/stale_keyword_user",
+      headers: authHeaders,
+      payload: { value: "cleanup_user" }
+    });
+    expect(staleCleanupUser.statusCode).toBe(200);
+    const cleanupLists = await app.inject({
+      method: "POST",
+      url: "/admin/lists/maintenance/cleanup",
+      headers: authHeaders
+    });
+    expect(cleanupLists.statusCode).toBe(200);
+    expect(cleanupLists.json()).toMatchObject({
+      staleActiveKeywordsDeleted: 1
+    });
+    expect(cleanupLists.json().totalDeleted).toBeGreaterThanOrEqual(1);
+    const deleteCleanupKeyword = await app.inject({
+      method: "DELETE",
+      url: "/admin/lists/keyword",
+      headers: authHeaders,
+      payload: { value: "@cleanup_user" }
+    });
+    expect(deleteCleanupKeyword.statusCode).toBe(200);
+    expect(deleteCleanupKeyword.json().deleted).toBe(1);
 
     const command = await app.inject({
       method: "POST",

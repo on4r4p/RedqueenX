@@ -83,7 +83,6 @@ describe("rss and crawler adapters", () => {
     const database = openMemoryDatabase();
     const lists = new ListService(database);
     lists.add("keyword", "malware");
-    lists.add("banned_word", "spam");
 
     const xClient: XSearchClient = {
       countRecent: vi.fn().mockResolvedValue(1),
@@ -91,13 +90,133 @@ describe("rss and crawler adapters", () => {
       searchRecent: vi.fn().mockResolvedValue([
         {
           id: "lucky-1",
-          text: "Fresh malware research with spam marker and enough context to evaluate this tweet",
+          text: "Fresh malware research with enough context to evaluate this tweet",
           lang: "en",
           retweetCount: 0,
           favoriteCount: 0,
           user: {
             screenName: "bob",
-            followersCount: 10
+            followersCount: 1000
+          }
+        }
+      ])
+    };
+
+    const crawler = new Crawler(
+      lists,
+      xClient,
+      () => ({
+        ...DEFAULT_SCORING_CONFIG,
+        luckFactorDenominator: 200,
+        minimumTweetLength: 0,
+        minimumTweetRetweets: 1,
+        minimumUserFollowers: 0,
+        enableMinimumTweetScore: false
+      }),
+      undefined,
+      () => 0
+    );
+
+    const results = await crawler.crawlKeyword("malware");
+
+    expect(results[0].decision.accepted).toBe(true);
+    expect(results[0].decision.reasons).toEqual(expect.arrayContaining(["not_enough_retweets", "luck_factor:1/200"]));
+    expect(lists.activeValues("tweet_sent")).toEqual(["lucky-1"]);
+  });
+
+  it("enforces the maximum accepted tweets per author across crawler scoring", async () => {
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+    lists.add("keyword", "drupal vulnerability");
+
+    const tweets = Array.from({ length: 4 }, (_, index) => ({
+      id: `vigilance-${index + 1}`,
+      text: `Fresh drupal vulnerability advisory ${index + 1} with enough context and remediation detail to evaluate`,
+      lang: "en",
+      retweetCount: 0,
+      favoriteCount: 0,
+      user: {
+        screenName: "@vigilance_en",
+        followersCount: 1000
+      }
+    }));
+    const xClient: XSearchClient = {
+      countRecent: vi.fn().mockResolvedValue(tweets.length),
+      lookupTweetsDetailed: vi.fn().mockResolvedValue([]),
+      searchRecent: vi.fn().mockResolvedValue(tweets)
+    };
+    const crawler = new Crawler(
+      lists,
+      xClient,
+      () => ({
+        ...DEFAULT_SCORING_CONFIG,
+        enableLuckFactor: true,
+        luckFactorDenominator: 200,
+        enableSimilarTweetText: false,
+        maximumTweetsByUser: 3,
+        minimumTweetLength: 0,
+        minimumTweetRetweets: 0,
+        minimumUserFollowers: 0,
+        enableMinimumTweetScore: false
+      }),
+      undefined,
+      () => 0
+    );
+
+    const results = await crawler.crawlKeyword("drupal vulnerability");
+
+    expect(results.map((result) => result.decision.accepted)).toEqual([true, true, true, false]);
+    expect(results[3].decision.reasons).toContain("too_many_tweets_by_user");
+    expect(results[3].decision.reasons).not.toContain("luck_factor:1/200");
+    expect(lists.activeValues("tweet_sent")).toEqual(["vigilance-1", "vigilance-2", "vigilance-3"]);
+
+    const nextResults = crawler.scoreTweets("drupal vulnerability", [
+      {
+        id: "vigilance-5",
+        text: "Fresh drupal vulnerability advisory 5 with enough context and remediation detail to evaluate",
+        lang: "en",
+        retweetCount: 0,
+        favoriteCount: 0,
+        user: {
+          screenName: "vigilance_en",
+          followersCount: 1000
+        }
+      }
+    ]);
+    expect(nextResults[0].decision.accepted).toBe(false);
+    expect(nextResults[0].decision.reasons).toContain("too_many_tweets_by_user");
+  });
+
+  it("does not let luck factor bypass banned words or disallowed languages", async () => {
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+    lists.add("keyword", "malware");
+    lists.add("banned_word", "spam");
+
+    const xClient: XSearchClient = {
+      countRecent: vi.fn().mockResolvedValue(1),
+      lookupTweetsDetailed: vi.fn().mockResolvedValue([]),
+      searchRecent: vi.fn().mockResolvedValue([
+        {
+          id: "blocked-word",
+          text: "Fresh malware research with spam marker and enough context to evaluate this tweet",
+          lang: "en",
+          retweetCount: 2,
+          favoriteCount: 2,
+          user: {
+            screenName: "bob",
+            followersCount: 1000
+          }
+        },
+        {
+          id: "blocked-lang",
+          text: "Increible noticia sobre malware con suficiente contexto para evaluar este tweet",
+          lang: "es",
+          retweetCount: 2,
+          favoriteCount: 2,
+          user: {
+            screenName: "carlos",
+            followersCount: 1000
           }
         }
       ])
@@ -112,7 +231,7 @@ describe("rss and crawler adapters", () => {
         minimumTweetLength: 0,
         minimumTweetRetweets: 0,
         minimumUserFollowers: 0,
-        minimumTweetScore: 0
+        enableMinimumTweetScore: false
       }),
       undefined,
       () => 0
@@ -120,9 +239,11 @@ describe("rss and crawler adapters", () => {
 
     const results = await crawler.crawlKeyword("malware");
 
-    expect(results[0].decision.accepted).toBe(true);
-    expect(results[0].decision.reasons).toEqual(expect.arrayContaining(["banned_word:spam", "luck_factor:1/200"]));
-    expect(lists.activeValues("tweet_sent")).toEqual(["lucky-1"]);
+    expect(results.map((result) => result.decision.accepted)).toEqual([false, false]);
+    expect(results[0].decision.reasons).toContain("banned_word:spam");
+    expect(results[1].decision.reasons).toContain("language_not_allowed");
+    expect(results.flatMap((result) => result.decision.reasons)).not.toContain("luck_factor:1/200");
+    expect(lists.activeValues("tweet_sent")).toEqual([]);
   });
 
   it("keeps profile-dependent rejects for detailed hydration", () => {
@@ -182,6 +303,7 @@ describe("rss and crawler adapters", () => {
     const decision = crawler.explainTweetForHydration("infosec", {
       id: "candidate-2",
       text: "infosec blockedterm writeup",
+      lang: "en",
       createdAt: new Date(),
       user: {
         screenName: "@alice"
@@ -219,6 +341,7 @@ describe("rss and crawler adapters", () => {
     const decision = crawler.explainTweetForHydration("@secviz", {
       id: "candidate-symbol-fragment",
       text: "Excited to see what comes next for @AdvizorSolution and #FF @ethicalhack3r @secviz",
+      lang: "en",
       createdAt: new Date(),
       user: {
         screenName: "@alice"
@@ -231,6 +354,7 @@ describe("rss and crawler adapters", () => {
     const ignoredContextDecision = crawler.explainTweetForHydration("@secviz", {
       id: "candidate-ignored-context",
       text: "The BIGGEST Crypto PUMP is here! http://t.me/premium_pump_signal from @premium_signal_team @secviz",
+      lang: "en",
       createdAt: new Date(),
       user: {
         screenName: "@alice"
@@ -261,6 +385,7 @@ describe("rss and crawler adapters", () => {
     const decision = crawler.explainTweetForHydration("@alice", {
       id: "candidate-handle",
       text: "new research notes with no handle mention in the body",
+      lang: "en",
       createdAt: new Date(),
       user: {
         screenName: "@alice"

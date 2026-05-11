@@ -1,5 +1,5 @@
 import { ListService } from "./admin/listService";
-import { scoreTweet, type ScoreLists, DEFAULT_SCORING_CONFIG } from "./scoring";
+import { findSimilarSentText, isAllowedLanguage, normalizeLanguageCode, scoreTweet, type ScoreLists, DEFAULT_SCORING_CONFIG } from "./scoring";
 import type { ScoreDecision, ScoringConfig, TweetCandidate } from "./types";
 import { isHandleSearchKeyword, normalizeHandle, normalizeSearchText, textContainsBannedTerm } from "./text";
 import type { XSearchClient, XSearchMode } from "./x-client";
@@ -23,6 +23,8 @@ export interface TweetPrefilterResult {
 }
 
 export class Crawler {
+  private readonly acceptedTweetsByUser = new Map<string, number>();
+
   constructor(
     private readonly lists: ListService,
     private readonly xClient: XSearchClient,
@@ -74,11 +76,18 @@ export class Crawler {
       const config = this.getScoringConfig();
       const decision = this.applyLuckFactor(scoreTweet(tweet, scoreLists, config), config);
       if (decision.accepted) {
+        const userHandle = normalizedTweetUserHandle(tweet);
         const importedAt = new Date().toISOString();
         this.lists.add("tweet_sent", tweet.id, `runtime:x-search:${keyword}`, null, importedAt);
         this.lists.add("text_sent", tweet.text, `runtime:x-search:${keyword}`, null, importedAt);
         scoreLists.sentTweetIds.push(tweet.id);
         scoreLists.sentTexts.push(tweet.text);
+        const nextUserTweetCount = (scoreLists.tweetsByUser?.[userHandle] ?? 0) + 1;
+        this.acceptedTweetsByUser.set(userHandle, nextUserTweetCount);
+        scoreLists.tweetsByUser = {
+          ...(scoreLists.tweetsByUser ?? {}),
+          [userHandle]: nextUserTweetCount
+        };
       }
 
       const result = {
@@ -94,7 +103,7 @@ export class Crawler {
   }
 
   private applyLuckFactor(decision: ScoreDecision, config: ScoringConfig): ScoreDecision {
-    if (!config.enableLuckFactor || decision.accepted || config.luckFactorDenominator <= 0) {
+    if (!config.enableLuckFactor || decision.accepted || config.luckFactorDenominator <= 0 || hasLuckFactorBlocker(decision.reasons)) {
       return decision;
     }
     if (this.random() >= 1 / config.luckFactorDenominator) {
@@ -120,9 +129,30 @@ export class Crawler {
       bannedUsers: this.lists.activeValues("banned_user"),
       bannedWords: this.lists.activeValues("banned_word"),
       sentTweetIds: this.lists.activeValues("tweet_sent"),
-      sentTexts: this.lists.activeValues("text_sent")
+      sentTexts: this.lists.activeValues("text_sent"),
+      tweetsByUser: Object.fromEntries(this.acceptedTweetsByUser)
     };
   }
+}
+
+function hasLuckFactorBlocker(reasons: string[]): boolean {
+  return reasons.some((reason) =>
+    [
+      "banned_user",
+      "banned_word:",
+      "language_not_allowed",
+      "language_unknown",
+      "missing_keyword",
+      "tweet_id_already_seen",
+      "tweet_text_already_seen",
+      "tweet_text_too_similar:",
+      "too_many_tweets_by_user"
+    ].some((prefix) => reason === prefix || reason.startsWith(prefix))
+  );
+}
+
+function normalizedTweetUserHandle(tweet: TweetCandidate): string {
+  return normalizeHandle(tweet.user.screenName) ?? tweet.user.screenName.toLowerCase();
 }
 
 export function explainTweetPrefilter(
@@ -136,14 +166,25 @@ export function explainTweetPrefilter(
   if (config.enableMinimumTweetLength && tweet.text.length < config.minimumTweetLength) {
     reasons.push("tweet_too_short");
   }
-  if (config.enableAllowedLanguages && tweet.lang && !config.allowedLanguages.includes(tweet.lang)) {
-    reasons.push(`language_not_allowed:${tweet.lang}`);
+  if (config.enableAllowedLanguages) {
+    const tweetLang = normalizeLanguageCode(tweet.lang);
+    if (!tweetLang) {
+      reasons.push("language_unknown");
+    } else if (!isAllowedLanguage(tweetLang, config.allowedLanguages)) {
+      reasons.push(`language_not_allowed:${tweetLang}`);
+    }
   }
   if (lists.sentTweetIds.includes(tweet.id)) {
     reasons.push("tweet_id_already_seen");
   }
-  if (lists.sentTexts.some((sentText) => normalizeSearchText(sentText) === normalizedText)) {
+  const exactSentTextMatch = lists.sentTexts.some((sentText) => normalizeSearchText(sentText) === normalizedText);
+  if (exactSentTextMatch) {
     reasons.push("tweet_text_already_seen");
+  } else if (config.enableSimilarTweetText) {
+    const similarMatch = findSimilarSentText(tweet.text, lists.sentTexts, config.similarTweetTextThreshold);
+    if (similarMatch) {
+      reasons.push(`tweet_text_too_similar:${Math.round(similarMatch.score * 100)}%`);
+    }
   }
 
   const userHandle = normalizeHandle(tweet.user.screenName) ?? tweet.user.screenName.toLowerCase();

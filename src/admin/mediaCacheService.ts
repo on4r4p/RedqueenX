@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "better-sqlite3";
 import type { TweetMedia } from "../types";
+import { isEmojiMedia, mediaWithoutEmojiImages } from "../tweetMedia";
 import type { TimelineTweetItem } from "./timelineTweetService";
 
 export type MediaCacheStatus = "cached" | "missing" | "expired" | "error" | "disabled" | "no_source";
@@ -96,7 +97,7 @@ export class MediaCacheService {
 
   decorateTimelineItem<T extends TimelineMediaItem>(item: T) {
     const avatarCache = this.decorateAvatar(item.avatarUrl);
-    const media = item.media.map((mediaItem) => this.decorateMedia(mediaItem));
+    const media = mediaWithoutEmojiImages(item.media).map((mediaItem) => this.decorateMedia(mediaItem));
     const summary = media.reduce(
       (acc, mediaItem) => {
         acc[mediaItem.cacheStatus] = (acc[mediaItem.cacheStatus] ?? 0) + 1;
@@ -128,7 +129,7 @@ export class MediaCacheService {
     if (item.avatarUrl) {
       sources.push({ sourceUrl: item.avatarUrl, kind: "avatar", mediaType: "image" });
     }
-    for (const media of item.media) {
+    for (const media of mediaWithoutEmojiImages(item.media)) {
       const sourceUrl = sourceUrlFromMedia(media);
       if (sourceUrl) {
         sources.push({ sourceUrl, kind: "media", mediaType: media.videoUrl || media.type === "video" ? "video" : "image" });
@@ -155,10 +156,34 @@ export class MediaCacheService {
     return entry;
   }
 
+  tweetIdsForFailedSourceError(errorMessage: string, hostname: string, limit?: number): string[] {
+    const safeLimit = limit === undefined ? null : Math.max(1, Math.floor(limit));
+    const sourcePrefix = `https://${hostname}/`;
+    const statement = this.database.prepare(
+      `
+          SELECT DISTINCT timeline_tweets.tweet_id AS tweetId
+          FROM media_cache_entries
+          JOIN timeline_tweets
+            ON timeline_tweets.author_avatar_url = media_cache_entries.source_url
+            OR instr(timeline_tweets.media_json, media_cache_entries.source_url) > 0
+          WHERE media_cache_entries.last_error = ?
+            AND instr(media_cache_entries.source_url, ?) = 1
+          ORDER BY timeline_tweets.tweet_id ASC
+          ${safeLimit === null ? "" : "LIMIT ?"}
+        `
+    );
+    const rows =
+      safeLimit === null
+        ? (statement.all(errorMessage, sourcePrefix) as Array<{ tweetId: string }>)
+        : (statement.all(errorMessage, sourcePrefix, safeLimit) as Array<{ tweetId: string }>);
+    return rows.map((row) => row.tweetId);
+  }
+
   upsertSuccess(sourceUrl: string, localPath: string, contentType: string, sizeBytes: number, now = new Date()): MediaCacheEntry {
     const cacheId = this.cacheIdForUrl(sourceUrl);
     const cachedAt = now.toISOString();
-    const expiresAt = new Date(now.getTime() + this.config.ttlHours * 60 * 60 * 1000).toISOString();
+    const expiresAt =
+      this.config.ttlHours > 0 ? new Date(now.getTime() + this.config.ttlHours * 60 * 60 * 1000).toISOString() : null;
     this.database
       .prepare(
         `
@@ -221,7 +246,7 @@ export class MediaCacheService {
     let bytesBefore = rows.reduce((sum, row) => sum + row.size_bytes, 0);
     let total = bytesBefore;
     let overQuota = 0;
-    while (total > this.config.maxBytes && rows.length > 0) {
+    while (this.config.maxBytes > 0 && total > this.config.maxBytes && rows.length > 0) {
       const row = rows.shift()!;
       await removeFileIfExists(row.local_path);
       this.database.prepare("DELETE FROM media_cache_entries WHERE cache_id = ?").run(row.cache_id);
@@ -303,6 +328,9 @@ export class MediaCacheService {
 }
 
 export function sourceUrlFromMedia(media: TweetMedia): string | null {
+  if (isEmojiMedia(media)) {
+    return null;
+  }
   return media.videoUrl ?? media.url ?? media.previewImageUrl ?? null;
 }
 

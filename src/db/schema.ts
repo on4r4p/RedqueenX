@@ -148,6 +148,25 @@ export function migrate(database: Database): void {
     CREATE INDEX IF NOT EXISTS idx_media_cache_entries_cached_at
       ON media_cache_entries(cached_at);
 
+    CREATE TABLE IF NOT EXISTS media_cache_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tweet_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      source TEXT NOT NULL DEFAULT 'admin',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_media_cache_jobs_status_requested
+      ON media_cache_jobs(status, requested_at, id);
+
+    CREATE INDEX IF NOT EXISTS idx_media_cache_jobs_tweet_status
+      ON media_cache_jobs(tweet_id, status);
+
     CREATE TABLE IF NOT EXISTS x_budget_usage (
       usage_date TEXT PRIMARY KEY,
       search_calls INTEGER NOT NULL DEFAULT 0,
@@ -245,7 +264,7 @@ function ensureListEntryUniqueness(database: Database): void {
             PARTITION BY
               kind,
               CASE
-                WHEN kind IN ('following', 'friend', 'banned_user') AND handle_normalized IS NOT NULL
+                WHEN kind IN ('following', 'friend', 'banned_user', 'stale_keyword_user', 'skipped_keyword_user') AND handle_normalized IS NOT NULL
                   THEN 'handle:' || handle_normalized
                 ELSE 'value:' || normalized_value
               END
