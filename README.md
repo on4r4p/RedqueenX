@@ -346,6 +346,32 @@ Configure the webhook sender with:
 This webhook is separate from any CI or registry secrets. Registry credentials
 are only needed if another system builds or pushes Docker images.
 
+The distribution-provided `webhook.service` is not used by this setup. Use the
+project service named `redqueenx-webhook.service`; the generic service may stay
+inactive unless you intentionally manage `/etc/webhook.conf`.
+
+### Docker Publish Workflow
+
+`.github/workflows/docker-publish.yml` builds one Docker image from the repo and
+pushes it to the service tags used by `compose.prod.yaml`:
+
+- `redqueenx-admin`
+- `redqueenx-worker`
+- `redqueenx-vpn`
+- `redqueenx-init-runtime`
+- `redqueenx-x-login`
+
+Configure these repository secrets in the CI provider before enabling the
+workflow:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+- `REDQUEENX_DEPLOY_WEBHOOK_URL`, for example `https://example.com/hooks/redqueenx-deploy`
+- `REDQUEENX_DEPLOY_WEBHOOK_SECRET`, matching the HMAC secret in `ops/webhook/hooks.json`
+
+On a push to `main`, the workflow pushes `latest` and `sha-<commit>` tags, then
+calls the signed deploy webhook.
+
 ### Admin Access Hardening
 
 The safest setup is to keep the admin UI off the public web and expose only the
