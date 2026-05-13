@@ -69,15 +69,17 @@ jobs:
       WEBHOOK_SECRET: ${{ secrets.REDQUEENX_DEPLOY_WEBHOOK_SECRET }}
 
     steps:
+      - name: Skip deploy webhook when secrets are missing
+        if: env.WEBHOOK_URL == '' || env.WEBHOOK_SECRET == ''
+        run: |
+          echo "REDQUEENX_DEPLOY_WEBHOOK_URL or REDQUEENX_DEPLOY_WEBHOOK_SECRET is missing."
+          echo "Docker images were pushed, but the deploy webhook was skipped."
+
       - name: Trigger signed deploy webhook
+        if: env.WEBHOOK_URL != '' && env.WEBHOOK_SECRET != ''
         shell: bash
         run: |
           set -euo pipefail
-
-          if [ -z "${WEBHOOK_URL}" ] || [ -z "${WEBHOOK_SECRET}" ]; then
-            echo "REDQUEENX_DEPLOY_WEBHOOK_URL and REDQUEENX_DEPLOY_WEBHOOK_SECRET are required."
-            exit 1
-          fi
 
           payload="$(
             jq -nc \
