@@ -8,7 +8,9 @@ import { loadConfig } from "../config";
 import { openDatabase } from "../db/database";
 import { formatDiagnosticsReport, runVpnDiagnostics, type VpnDiagnosticsReport } from "../diagnostics/vpn";
 import { CurrentSessionService, type CurrentSessionLevel } from "../admin/currentSessionService";
+import { EnvService } from "../admin/envService";
 import { ListService } from "../admin/listService";
+import { SettingsService } from "../admin/settingsService";
 import {
   defaultManualVerificationMessage,
   defaultManualVerificationRecommendation,
@@ -19,11 +21,13 @@ import {
 import { XBrowserAccountService, type XBrowserAccountRecord } from "../admin/xBrowserAccountService";
 import { isHandleSearchKeyword, normalizeHandle } from "../text";
 import type { TweetCandidate } from "../types";
+import { looksLikeXApiCreditsDepleted, xApiCreditsDepletedMessage, xApiErrorCode } from "../xApiErrors";
 import { XApiClient } from "../x-client";
 import {
   buildBrowserSearchUrl,
   detectManualVerification,
   extractVisibleTweets,
+  gotoWithTransientRetry,
   sameManualVerificationDetection,
   type ManualVerificationDetection
 } from "./browserSearch";
@@ -32,12 +36,17 @@ import { assertVpnRuntime } from "./vpnGuard";
 
 export type KeywordUserPruneMode = "without_api" | "x_api";
 
+const xApiUserRequestMaxAttempts = 3;
+const xApiUserRequestRetryDelaysMs = [5_000, 15_000];
+
 interface PrunerArgs {
   maxAgeDays: number;
   jobId: string;
   resumeStatePath: string | null;
   startIndex: number;
   mode: KeywordUserPruneMode;
+  actionDelayMinSeconds?: number;
+  actionDelayMaxSeconds?: number;
 }
 
 export interface KeywordUserCandidate {
@@ -99,6 +108,8 @@ export interface StaleKeywordUserPruneReport {
   mode?: KeywordUserPruneMode;
   status: "running" | "completed" | "failed" | "stopped";
   maxAgeDays: number;
+  actionDelayMinSeconds?: number;
+  actionDelayMaxSeconds?: number;
   startedAt: string;
   completedAt: string | null;
   account: string | null;
@@ -137,6 +148,22 @@ class StopRequestedError extends Error {
     this.name = "StopRequestedError";
   }
 }
+
+class XApiCreditsDepletedError extends Error {
+  constructor(readonly sourceError: unknown) {
+    super(xApiCreditsDepletedMessage());
+    this.name = "XApiCreditsDepletedError";
+  }
+}
+
+let staleKeywordUserActionDelayRangeMs = { minMs: 1_000, maxMs: 5_000 };
+let staleKeywordUserActionDelayControlState: {
+  jobId: string;
+  report: StaleKeywordUserPruneReport;
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>;
+  controlPath: string;
+  lastControlMtimeMs: number;
+} | null = null;
 
 export function keywordUserCandidates(keywords: string[]): KeywordUserCandidate[] {
   return planKeywordUserCandidates(keywords).candidates;
@@ -216,21 +243,39 @@ export function isProtectedPostsText(value: string): boolean {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig();
+  const actionDelayMinSeconds = Math.max(0, Math.floor(args.actionDelayMinSeconds ?? config.staleKeywordUserActionDelayMinSeconds));
+  const actionDelayMaxSeconds = Math.max(
+    actionDelayMinSeconds,
+    Math.floor(args.actionDelayMaxSeconds ?? config.staleKeywordUserActionDelayMaxSeconds)
+  );
+  staleKeywordUserActionDelayRangeMs = {
+    minMs: actionDelayMinSeconds * 1000,
+    maxMs: actionDelayMaxSeconds * 1000
+  };
   if (args.mode === "without_api" && config.searchWithoutApiIsolation === "docker_vpn" && !process.env.REDQUEENX_DOCKER_VPN) {
     throw new Error("Stale keyword user pruning must run inside the Docker VPN worker when docker_vpn isolation is selected.");
   }
 
   const database = openDatabase(config.databaseUrl);
   const lists = new ListService(database);
+  const settings = new SettingsService(database);
   const accounts = new XBrowserAccountService(database);
   const alerts = new XSessionAlertService(database);
   const currentSession = new CurrentSessionService(config.currentSessionFile);
+  const env = new EnvService();
   const record = (level: CurrentSessionLevel, type: string, message: string, data: Record<string, unknown> = {}) =>
     currentSession.record(level, type, message, data).catch(() => undefined);
 
   let account: XBrowserAccountRecord | null = null;
   let publicIpv4: string | null = null;
   let report = createInitialReport(args);
+  staleKeywordUserActionDelayControlState = {
+    jobId: args.jobId,
+    report,
+    record,
+    controlPath: controlFilePath(args.jobId),
+    lastControlMtimeMs: -1
+  };
 
   try {
     assertStopNotRequested(args.jobId);
@@ -398,6 +443,25 @@ async function main() {
     report.status = error instanceof StopRequestedError ? "stopped" : "failed";
     report.completedAt = new Date().toISOString();
     report.error = error instanceof Error ? error.message : String(error);
+    let xApiCreditSettingsError: string | null = null;
+    let xApiCreditEnvSync: { synced: boolean; error: string | null } | null = null;
+    if (error instanceof XApiCreditsDepletedError || looksLikeXApiCreditsDepleted(error)) {
+      try {
+        settings.patchXApiConfig({ xApiCreditUsd: 0 });
+      } catch (settingsError) {
+        xApiCreditSettingsError = settingsError instanceof Error ? settingsError.message : String(settingsError);
+      }
+      try {
+        await env.update({ X_API_CREDIT_USD: "0" });
+        xApiCreditEnvSync = { synced: true, error: null };
+      } catch (syncError) {
+        xApiCreditEnvSync = {
+          synced: false,
+          error: syncError instanceof Error ? syncError.message : String(syncError)
+        };
+      }
+      report.error = xApiCreditsDepletedMessage();
+    }
     writeReport(report);
     if (error instanceof StopRequestedError) {
       await record("info", "keyword_user_prune.stopped", "Stale keyword user pruning stopped by request", {
@@ -412,7 +476,27 @@ async function main() {
       console.log(`REDQUEENX_STALE_KEYWORD_USER_PRUNE_REPORT ${JSON.stringify(report)}`);
       return;
     }
-    if (error instanceof ManualVerificationRequiredError && account) {
+    if (error instanceof XApiCreditsDepletedError || looksLikeXApiCreditsDepleted(error)) {
+      await record("prob", "x_api.credits_depleted", xApiCreditsDepletedMessage(), {
+        jobId: args.jobId,
+        mode: args.mode,
+        processedCandidates: report.processedCandidates,
+        totalCandidates: report.totalCandidates,
+        remainingCandidates: Math.max(0, report.totalCandidates - report.processedCandidates),
+        xApiCreditUsd: 0,
+        settingsError: xApiCreditSettingsError,
+        envSynced: xApiCreditEnvSync?.synced ?? null,
+        envError: xApiCreditEnvSync?.error ?? null,
+        sourceError:
+          error instanceof XApiCreditsDepletedError
+            ? error.sourceError instanceof Error
+              ? error.sourceError.message
+              : String(error.sourceError)
+            : error instanceof Error
+              ? error.message
+              : String(error)
+      });
+    } else if (error instanceof ManualVerificationRequiredError && account) {
       const alert = alerts.createOpen({
         accountId: account.id,
         xIdentifier: account.xIdentifier,
@@ -586,10 +670,11 @@ async function checkKeywordUserViaApi(
   }
 
   await randomActionPause("before_latest_tweet_check", candidate, options.record, options.progress);
-  const latestTweet = latestTweetFromUserTimeline(
-    await readLatestTweetsFromApi(xClient, userProfile.userId, candidate, options),
-    candidate.handle
-  );
+  const timelineResult = await readLatestTweetsFromApi(xClient, userProfile.userId, candidate, options);
+  if (timelineResult.status !== "ok") {
+    return timelineResult.result;
+  }
+  const latestTweet = latestTweetFromUserTimeline(timelineResult.tweets, candidate.handle);
   await randomActionPause("after_latest_tweet_check", candidate, options.record, options.progress);
 
   if (!latestTweet?.createdAt) {
@@ -651,32 +736,9 @@ async function lookupKeywordUserViaApi(
     };
   }
 ): Promise<{ status: "ok"; userId: string } | { status: "done"; result: KeywordUserCheckResult }> {
-  try {
-    const user = await xClient.lookupUserByUsername(candidate.handle);
-    if (!user?.id) {
-      const result = keywordUserDeleteResult(candidate, "user_not_found");
-      await options.record("info", "keyword_user_prune.keyword_deleted", "Keyword user removed from Keywords because the X API user no longer exists", {
-        keyword: candidate.keyword,
-        handle: candidate.handle,
-        reason: result.user.reason,
-        source: "x_api",
-        ...options.progress
-      });
-      return { status: "done", result };
-    }
-    if (user.protected) {
-      const result = keywordUserDeleteResult(candidate, "protected_posts");
-      await options.record("info", "keyword_user_prune.protected_keyword", "Keyword user posts are protected; removing keyword without adding to skipped", {
-        keyword: candidate.keyword,
-        handle: candidate.handle,
-        reason: result.user.reason,
-        source: "x_api",
-        ...options.progress
-      });
-      return { status: "done", result };
-    }
-    return { status: "ok", userId: user.id };
-  } catch (error) {
+  const lookup = await xApiUserRequestWithRetries(() => xClient.lookupUserByUsername(candidate.handle), "user_lookup", candidate, options);
+  if (!lookup.ok) {
+    const error = lookup.error;
     if (looksLikeMissingXApiUser(error)) {
       const result = keywordUserDeleteResult(candidate, "user_not_found");
       await options.record("info", "keyword_user_prune.keyword_deleted", "Keyword user removed from Keywords because the X API user lookup returned not found", {
@@ -688,8 +750,43 @@ async function lookupKeywordUserViaApi(
       });
       return { status: "done", result };
     }
-    throw error;
+    const result = keywordUserSkipResult(candidate, `x_api_user_lookup_failed${xApiErrorReasonSuffix(error)}`);
+    await options.record("prob", "keyword_user_prune.api_lookup.skipped_after_retries", "Keyword user lookup failed after X API retries; skipping this user and continuing", {
+      keyword: candidate.keyword,
+      handle: candidate.handle,
+      reason: result.user.reason,
+      attempts: lookup.attempts,
+      error: error instanceof Error ? error.message : String(error),
+      source: "x_api",
+      ...options.progress
+    });
+    return { status: "done", result };
   }
+
+  const user = lookup.value;
+  if (!user?.id) {
+    const result = keywordUserDeleteResult(candidate, "user_not_found");
+    await options.record("info", "keyword_user_prune.keyword_deleted", "Keyword user removed from Keywords because the X API user no longer exists", {
+      keyword: candidate.keyword,
+      handle: candidate.handle,
+      reason: result.user.reason,
+      source: "x_api",
+      ...options.progress
+    });
+    return { status: "done", result };
+  }
+  if (user.protected) {
+    const result = keywordUserDeleteResult(candidate, "protected_posts");
+    await options.record("info", "keyword_user_prune.protected_keyword", "Keyword user posts are protected; removing keyword without adding to skipped", {
+      keyword: candidate.keyword,
+      handle: candidate.handle,
+      reason: result.user.reason,
+      source: "x_api",
+      ...options.progress
+    });
+    return { status: "done", result };
+  }
+  return { status: "ok", userId: user.id };
 }
 
 async function readLatestTweetsFromApi(
@@ -705,20 +802,23 @@ async function readLatestTweetsFromApi(
       remainingUsers: number;
     };
   }
-): Promise<TweetCandidate[]> {
-  try {
-    return await xClient.userTimeline(userId, 10, "minimal");
-  } catch (error) {
-    await options.record("prob", "keyword_user_prune.api_timeline.failed", "X API user timeline lookup failed", {
-      keyword: candidate.keyword,
-      handle: candidate.handle,
-      userId,
-      error: error instanceof Error ? error.message : String(error),
-      source: "x_api",
-      ...options.progress
-    });
-    throw error;
+): Promise<{ status: "ok"; tweets: TweetCandidate[] } | { status: "done"; result: KeywordUserCheckResult }> {
+  const timeline = await xApiUserRequestWithRetries(() => xClient.userTimeline(userId, 10, "minimal"), "user_timeline", candidate, options);
+  if (timeline.ok) {
+    return { status: "ok", tweets: timeline.value };
   }
+  const result = keywordUserSkipResult(candidate, `x_api_timeline_failed${xApiErrorReasonSuffix(timeline.error)}`);
+  await options.record("prob", "keyword_user_prune.api_timeline.skipped_after_retries", "X API user timeline failed after retries; skipping this user and continuing", {
+    keyword: candidate.keyword,
+    handle: candidate.handle,
+    userId,
+    reason: result.user.reason,
+    attempts: timeline.attempts,
+    error: timeline.error instanceof Error ? timeline.error.message : String(timeline.error),
+    source: "x_api",
+    ...options.progress
+  });
+  return { status: "done", result };
 }
 
 function latestTweetFromUserTimeline(tweets: TweetCandidate[], handle: string): TweetCandidate | null {
@@ -751,6 +851,89 @@ function keywordUserDeleteResult(
       reason
     }
   };
+}
+
+function keywordUserSkipResult(
+  candidate: KeywordUserCandidate,
+  reason: string
+): { status: "skip"; user: CheckedKeywordUser } {
+  return {
+    status: "skip",
+    user: {
+      keyword: candidate.keyword,
+      handle: candidate.handle,
+      latestTweetId: null,
+      latestTweetCreatedAt: null,
+      ageDays: null,
+      reason
+    }
+  };
+}
+
+async function xApiUserRequestWithRetries<T>(
+  request: () => Promise<T>,
+  phase: "user_lookup" | "user_timeline",
+  candidate: KeywordUserCandidate,
+  options: {
+    record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>;
+    progress: {
+      position: number;
+      totalCandidates: number;
+      processedUsers: number;
+      remainingUsers: number;
+    };
+  }
+): Promise<{ ok: true; value: T; attempts: number } | { ok: false; error: unknown; attempts: number }> {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= xApiUserRequestMaxAttempts; attempt += 1) {
+    try {
+      return { ok: true, value: await request(), attempts: attempt };
+    } catch (error) {
+      lastError = error;
+      if (looksLikeXApiCreditsDepleted(error)) {
+        await options.record("prob", "keyword_user_prune.x_api_credits_depleted", "X API credits are depleted; stopping cleanup", {
+          keyword: candidate.keyword,
+          handle: candidate.handle,
+          phase,
+          attempt,
+          maxAttempts: xApiUserRequestMaxAttempts,
+          code: xApiErrorCode(error),
+          error: error instanceof Error ? error.message : String(error),
+          source: "x_api",
+          ...options.progress
+        });
+        throw new XApiCreditsDepletedError(error);
+      }
+      if (looksLikeMissingXApiUser(error)) {
+        return { ok: false, error, attempts: attempt };
+      }
+      const retryDelayMs = xApiUserRequestRetryDelaysMs[attempt - 1] ?? 0;
+      if (attempt >= xApiUserRequestMaxAttempts) {
+        break;
+      }
+      await options.record("prob", "keyword_user_prune.x_api_retry", "X API request failed; retrying before skipping this keyword user", {
+        keyword: candidate.keyword,
+        handle: candidate.handle,
+        phase,
+        attempt,
+        maxAttempts: xApiUserRequestMaxAttempts,
+        retryDelayMs,
+        code: xApiErrorCode(error),
+        error: error instanceof Error ? error.message : String(error),
+        source: "x_api",
+        ...options.progress
+      });
+      if (retryDelayMs > 0) {
+        await delay(retryDelayMs);
+      }
+    }
+  }
+  return { ok: false, error: lastError, attempts: xApiUserRequestMaxAttempts };
+}
+
+function xApiErrorReasonSuffix(error: unknown): string {
+  const code = xApiErrorCode(error);
+  return code ? `_${code}` : "";
 }
 
 function looksLikeMissingXApiUser(error: unknown): boolean {
@@ -790,7 +973,7 @@ async function checkKeywordUser(
     searchUrl,
     ...options.progress
   });
-  await openUserSearch(page, candidate, options.startUrl, searchUrl, options.pacing);
+  await openUserSearch(page, candidate, options.startUrl, searchUrl, options.pacing, options.record, options.progress);
   await assertNoManualVerification(page, {
     publicIpv4: options.publicIpv4,
     keyword: candidate.keyword,
@@ -869,9 +1052,34 @@ async function openUserSearch(
   candidate: KeywordUserCandidate,
   startUrl: string,
   searchUrl: string,
-  pacing: HumanPacingConfig
+  pacing: HumanPacingConfig,
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>,
+  progress: {
+    position: number;
+    totalCandidates: number;
+    processedUsers: number;
+    remainingUsers: number;
+  }
 ): Promise<void> {
-  await page.goto(startUrl || "https://x.com/search", { waitUntil: "domcontentloaded", timeout: 45_000 });
+  const gotoSearch = (url: string, phase: string) =>
+    gotoWithTransientRetry(
+      page,
+      url,
+      { waitUntil: "domcontentloaded", timeout: 45_000 },
+      {
+        attempts: 3,
+        retryDelayMs: 2_500,
+        onRetry: (event) =>
+          record("prob", "keyword_user_prune.navigation_retry", "Transient browser navigation error; retrying", {
+            keyword: candidate.keyword,
+            handle: candidate.handle,
+            phase,
+            ...event,
+            ...progress
+          })
+      }
+    );
+  await gotoSearch(startUrl || "https://x.com/search", "open_search_page");
   await page.waitForTimeout(500);
   const searchInput = page.locator('[data-testid="SearchBox_Search_Input"]').first();
   if ((await searchInput.count().catch(() => 0)) > 0 && (await searchInput.isVisible().catch(() => false))) {
@@ -882,10 +1090,10 @@ async function openUserSearch(
     await page.keyboard.press("Enter");
     await page.waitForLoadState("domcontentloaded", { timeout: 20_000 }).catch(() => undefined);
   } else {
-    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await gotoSearch(searchUrl, "direct_search_url");
   }
   if (!isLatestSearchUrl(page.url())) {
-    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await gotoSearch(searchUrl, "force_latest_search");
   }
   await page.waitForTimeout(1_200);
 }
@@ -896,15 +1104,36 @@ async function randomActionPause(
   record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>,
   progress?: { position: number; totalCandidates: number; processedUsers: number; remainingUsers: number }
 ): Promise<void> {
-  const delayMs = randomDelayMs(1_000, 5_000);
+  await refreshActionDelayRangeFromControl(phase, candidate, progress);
+  let targetDelayMs = randomDelayMs(staleKeywordUserActionDelayRangeMs.minMs, staleKeywordUserActionDelayRangeMs.maxMs);
   await record("debug", "keyword_user_prune.random_pause", "Random pause between stale keyword user actions", {
     keyword: candidate.keyword,
     handle: candidate.handle,
     phase,
-    delayMs,
+    delayMs: targetDelayMs,
     ...progress
   });
-  await delay(delayMs);
+  if (targetDelayMs <= 0) {
+    return;
+  }
+
+  const startedAtMs = Date.now();
+  while (true) {
+    const elapsedMs = Date.now() - startedAtMs;
+    const remainingMs = Math.max(0, targetDelayMs - elapsedMs);
+    if (remainingMs <= 0) {
+      return;
+    }
+    const chunkMs = Math.min(remainingMs, 250);
+    await delay(chunkMs);
+    await refreshActionDelayRangeFromControl(phase, candidate, progress);
+    staleKeywordUserAssertStopRequestedDuringPause();
+    targetDelayMs = clampPauseTargetMs(
+      targetDelayMs,
+      staleKeywordUserActionDelayRangeMs.minMs,
+      staleKeywordUserActionDelayRangeMs.maxMs
+    );
+  }
 }
 
 async function protectedPostsVisibleText(page: Page): Promise<string | null> {
@@ -973,41 +1202,78 @@ async function assertNoManualVerification(
     return;
   }
   const retryDelayMs = 10_000;
+  const refreshAttemptsLimit = manualVerificationRefreshAttempts(firstDetection);
   const beforeRefreshUrl = page.url();
-  await options.record("prob", "keyword_user_prune.manual_verification.retry", "X alert candidate detected; refreshing once before stopping stale user pruning", {
+  await options.record("prob", "keyword_user_prune.manual_verification.retry", "X alert candidate detected; refreshing before stopping stale user pruning", {
     keyword: options.keyword,
     phase: options.phase,
     alertType: firstDetection.type,
     reason: firstDetection.reason,
     previousError: options.previousError,
     url: firstDetection.pageState.url,
-    retryDelayMs
+    retryDelayMs,
+    refreshAttemptsLimit
   });
-  await delay(retryDelayMs);
   let refreshError: string | null = null;
-  try {
-    await page.reload({ waitUntil: "domcontentloaded", timeout: 45_000 });
-  } catch (error) {
-    refreshError = error instanceof Error ? error.message : String(error);
-  }
-  await page.waitForTimeout(1_200).catch(() => undefined);
-  const secondDetection = await detectManualVerification(page).catch((error) => {
-    refreshError = [refreshError, error instanceof Error ? error.message : String(error)].filter(Boolean).join(" | ");
-    return firstDetection;
-  });
-  if (!secondDetection) {
-    await options.record("info", "keyword_user_prune.manual_verification.cleared", "X alert candidate cleared after one refresh", {
+  let confirmedDetection = firstDetection;
+  const refreshAttempts: Array<Record<string, unknown>> = [];
+  for (let attempt = 1; attempt <= refreshAttemptsLimit; attempt += 1) {
+    await delay(retryDelayMs);
+    const attemptBeforeUrl = page.url();
+    let retryClicked = false;
+    let attemptError: string | null = null;
+    try {
+      retryClicked = await clickXRetryButton(page);
+      if (retryClicked) {
+        await page.waitForTimeout(2_000).catch(() => undefined);
+      }
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 45_000 });
+    } catch (error) {
+      attemptError = error instanceof Error ? error.message : String(error);
+      refreshError = [refreshError, attemptError].filter(Boolean).join(" | ");
+    }
+    await page.waitForTimeout(1_500).catch(() => undefined);
+    const detectionAfterRefresh = await detectManualVerification(page).catch((error) => {
+      attemptError = [attemptError, error instanceof Error ? error.message : String(error)].filter(Boolean).join(" | ");
+      refreshError = [refreshError, attemptError].filter(Boolean).join(" | ");
+      return confirmedDetection;
+    });
+    refreshAttempts.push({
+      attempt,
+      retryClicked,
+      beforeUrl: attemptBeforeUrl,
+      afterUrl: page.url(),
+      error: attemptError,
+      cleared: !detectionAfterRefresh,
+      alertType: detectionAfterRefresh?.type ?? null,
+      reason: detectionAfterRefresh?.reason ?? null
+    });
+    if (!detectionAfterRefresh) {
+      await options.record("info", "keyword_user_prune.manual_verification.cleared", "X alert candidate cleared after refresh retry", {
+        keyword: options.keyword,
+        phase: options.phase,
+        beforeRefreshUrl,
+        afterRefreshUrl: page.url(),
+        refreshError,
+        previousError: options.previousError,
+        refreshAttempts
+      });
+      return;
+    }
+    confirmedDetection = detectionAfterRefresh;
+    await options.record("prob", "keyword_user_prune.manual_verification.retry_still_present", "X alert candidate still present after refresh retry", {
       keyword: options.keyword,
       phase: options.phase,
-      beforeRefreshUrl,
-      afterRefreshUrl: page.url(),
-      refreshError,
-      previousError: options.previousError
+      attempt,
+      refreshAttemptsLimit,
+      alertType: confirmedDetection.type,
+      reason: confirmedDetection.reason,
+      retryClicked,
+      refreshError: attemptError
     });
-    return;
   }
-  const details = await captureManualVerificationDetails(page, secondDetection);
-  throw new ManualVerificationRequiredError(secondDetection.type, secondDetection.reason, options.publicIpv4, {
+  const details = await captureManualVerificationDetails(page, confirmedDetection);
+  throw new ManualVerificationRequiredError(confirmedDetection.type, confirmedDetection.reason, options.publicIpv4, {
     ...details,
     keyword: options.keyword,
     phase: options.phase,
@@ -1017,26 +1283,42 @@ async function assertNoManualVerification(
     previousError: options.previousError,
     firstAlertType: firstDetection.type,
     firstReason: firstDetection.reason,
-    confirmedAlertType: secondDetection.type,
-    confirmedReason: secondDetection.reason,
-    confirmedSameAlert: sameManualVerificationDetection(firstDetection, secondDetection),
-    detectionSignals: secondDetection.signals,
-    pageState: secondDetection.pageState,
+    confirmedAlertType: confirmedDetection.type,
+    confirmedReason: confirmedDetection.reason,
+    confirmedSameAlert: sameManualVerificationDetection(firstDetection, confirmedDetection),
+    detectionSignals: confirmedDetection.signals,
+    pageState: confirmedDetection.pageState,
     refreshRetry: {
       attempted: true,
       retryDelayMs,
+      refreshAttemptsLimit,
       beforeRefreshUrl,
       afterRefreshUrl: page.url(),
       refreshError,
+      attempts: refreshAttempts,
       firstAlertType: firstDetection.type,
       firstReason: firstDetection.reason,
       firstDetectionSignals: firstDetection.signals,
-      confirmedAlertType: secondDetection.type,
-      confirmedReason: secondDetection.reason,
-      confirmedDetectionSignals: secondDetection.signals,
-      confirmedSameAlert: sameManualVerificationDetection(firstDetection, secondDetection)
+      confirmedAlertType: confirmedDetection.type,
+      confirmedReason: confirmedDetection.reason,
+      confirmedDetectionSignals: confirmedDetection.signals,
+      confirmedSameAlert: sameManualVerificationDetection(firstDetection, confirmedDetection)
     }
   });
+}
+
+function manualVerificationRefreshAttempts(detection: ManualVerificationDetection): number {
+  const reason = detection.reason.toLowerCase();
+  return detection.type === "x_blocked" && /\bsomething went wrong\b|privacy-related/.test(reason) ? 3 : 1;
+}
+
+async function clickXRetryButton(page: Page): Promise<boolean> {
+  const retryButton = page.getByRole("button", { name: /^retry$/i }).first();
+  if (!(await retryButton.isVisible({ timeout: 1_500 }).catch(() => false))) {
+    return false;
+  }
+  await retryButton.click({ timeout: 5_000 });
+  return true;
 }
 
 async function captureManualVerificationDetails(page: Page, detection: ManualVerificationDetection): Promise<Record<string, unknown>> {
@@ -1127,6 +1409,8 @@ function createInitialReport(args: PrunerArgs): StaleKeywordUserPruneReport {
     mode: args.mode,
     status: "running",
     maxAgeDays: args.maxAgeDays,
+    actionDelayMinSeconds: args.actionDelayMinSeconds ?? Math.floor(staleKeywordUserActionDelayRangeMs.minMs / 1000),
+    actionDelayMaxSeconds: args.actionDelayMaxSeconds ?? Math.floor(staleKeywordUserActionDelayRangeMs.maxMs / 1000),
     startedAt: new Date().toISOString(),
     completedAt: null,
     account: null,
@@ -1148,6 +1432,99 @@ function writeReport(report: StaleKeywordUserPruneReport): void {
   const reportPath = reportFilePath(report.jobId);
   fsSync.mkdirSync(path.dirname(reportPath), { recursive: true });
   fsSync.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+}
+
+function controlFilePath(jobId: string): string {
+  return path.join(process.cwd(), "runtime", "stale-keyword-user-prune-controls", `${safePathSegment(jobId)}.json`);
+}
+
+function clampPauseTargetMs(targetMs: number, minMs: number, maxMs: number): number {
+  return Math.min(Math.max(targetMs, minMs), maxMs);
+}
+
+async function refreshActionDelayRangeFromControl(
+  phase?: string,
+  candidate?: KeywordUserCandidate,
+  progress?: { position: number; totalCandidates: number; processedUsers: number; remainingUsers: number }
+): Promise<void> {
+  const state = staleKeywordUserActionDelayControlState;
+  if (!state) {
+    return;
+  }
+
+  let stat: fsSync.Stats;
+  try {
+    stat = fsSync.statSync(state.controlPath);
+  } catch {
+    state.lastControlMtimeMs = -1;
+    return;
+  }
+  if (stat.mtimeMs === state.lastControlMtimeMs) {
+    return;
+  }
+
+  let parsed: { actionDelayMinSeconds?: unknown; actionDelayMaxSeconds?: unknown; updatedAt?: unknown };
+  try {
+    parsed = JSON.parse(fsSync.readFileSync(state.controlPath, "utf8")) as {
+      actionDelayMinSeconds?: unknown;
+      actionDelayMaxSeconds?: unknown;
+      updatedAt?: unknown;
+    };
+  } catch {
+    state.lastControlMtimeMs = stat.mtimeMs;
+    return;
+  }
+
+  state.lastControlMtimeMs = stat.mtimeMs;
+  const nextMinSeconds = Math.max(
+    0,
+    Math.floor(
+      Number.isFinite(Number(parsed.actionDelayMinSeconds))
+        ? Number(parsed.actionDelayMinSeconds)
+        : Math.floor(staleKeywordUserActionDelayRangeMs.minMs / 1000)
+    )
+  );
+  const nextMaxSeconds = Math.max(
+    nextMinSeconds,
+    Math.floor(
+      Number.isFinite(Number(parsed.actionDelayMaxSeconds))
+        ? Number(parsed.actionDelayMaxSeconds)
+        : Math.floor(staleKeywordUserActionDelayRangeMs.maxMs / 1000)
+    )
+  );
+  const previousMinSeconds = Math.floor(staleKeywordUserActionDelayRangeMs.minMs / 1000);
+  const previousMaxSeconds = Math.floor(staleKeywordUserActionDelayRangeMs.maxMs / 1000);
+  if (previousMinSeconds === nextMinSeconds && previousMaxSeconds === nextMaxSeconds) {
+    return;
+  }
+
+  staleKeywordUserActionDelayRangeMs = {
+    minMs: nextMinSeconds * 1000,
+    maxMs: nextMaxSeconds * 1000
+  };
+  state.report.actionDelayMinSeconds = nextMinSeconds;
+  state.report.actionDelayMaxSeconds = nextMaxSeconds;
+  writeReport(state.report);
+  await state.record("info", "keyword_user_prune.speed_updated", "Stale keyword user pruning execution speed updated", {
+    jobId: state.jobId,
+    updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
+    previousActionDelayMinSeconds: previousMinSeconds,
+    previousActionDelayMaxSeconds: previousMaxSeconds,
+    actionDelayMinSeconds: nextMinSeconds,
+    actionDelayMaxSeconds: nextMaxSeconds,
+    phase: phase ?? null,
+    keyword: candidate?.keyword ?? null,
+    handle: candidate?.handle ?? null,
+    ...progress
+  });
+}
+
+function staleKeywordUserAssertStopRequestedDuringPause(): void {
+  const state = staleKeywordUserActionDelayControlState;
+  if (!state) {
+    return;
+  }
+  assertStopNotRequested(state.jobId);
 }
 
 function assertStopNotRequested(jobId: string): void {
@@ -1365,6 +1742,8 @@ function parseArgs(args: string[]): PrunerArgs {
   let resumeStatePath: string | null = null;
   let startIndex = 1;
   let mode: KeywordUserPruneMode = "without_api";
+  let actionDelayMinSeconds: number | undefined;
+  let actionDelayMaxSeconds: number | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     const next = args[index + 1];
@@ -1413,6 +1792,24 @@ function parseArgs(args: string[]): PrunerArgs {
       mode = parsePruneMode(arg.slice("--mode=".length));
       continue;
     }
+    if (arg === "--action-delay-min-seconds" && next) {
+      actionDelayMinSeconds = Number(next);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--action-delay-min-seconds=")) {
+      actionDelayMinSeconds = Number(arg.slice("--action-delay-min-seconds=".length));
+      continue;
+    }
+    if (arg === "--action-delay-max-seconds" && next) {
+      actionDelayMaxSeconds = Number(next);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--action-delay-max-seconds=")) {
+      actionDelayMaxSeconds = Number(arg.slice("--action-delay-max-seconds=".length));
+      continue;
+    }
   }
   if (!Number.isFinite(maxAgeDays) || maxAgeDays <= 0) {
     throw new Error("--max-age-days must be a positive number.");
@@ -1420,7 +1817,21 @@ function parseArgs(args: string[]): PrunerArgs {
   if (!Number.isFinite(startIndex) || startIndex < 1) {
     throw new Error("--start-index must be a positive number.");
   }
-  return { maxAgeDays, jobId, resumeStatePath, startIndex: Math.floor(startIndex), mode };
+  if (actionDelayMinSeconds !== undefined && (!Number.isFinite(actionDelayMinSeconds) || actionDelayMinSeconds < 0)) {
+    throw new Error("--action-delay-min-seconds must be a positive or zero number.");
+  }
+  if (actionDelayMaxSeconds !== undefined && (!Number.isFinite(actionDelayMaxSeconds) || actionDelayMaxSeconds < 0)) {
+    throw new Error("--action-delay-max-seconds must be a positive or zero number.");
+  }
+  return {
+    maxAgeDays,
+    jobId,
+    resumeStatePath,
+    startIndex: Math.floor(startIndex),
+    mode,
+    actionDelayMinSeconds: actionDelayMinSeconds === undefined ? undefined : Math.floor(actionDelayMinSeconds),
+    actionDelayMaxSeconds: actionDelayMaxSeconds === undefined ? undefined : Math.floor(actionDelayMaxSeconds)
+  };
 }
 
 function parsePruneMode(value: string): KeywordUserPruneMode {

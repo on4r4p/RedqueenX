@@ -23,6 +23,8 @@ type RunChainState = {
 type StaleKeywordUserPruneRequest = {
   jobId: string;
   maxAgeDays: number;
+  actionDelayMinSeconds?: number;
+  actionDelayMaxSeconds?: number;
   maxRetries?: number;
   startIndex?: number;
   requestedAt?: string;
@@ -120,6 +122,8 @@ async function processOneStaleKeywordUserPruneRequest(
   await record("info", "docker_vpn.keyword_user_prune.started", "Docker VPN worker picked up stale keyword user pruning", {
     jobId: request.jobId,
     maxAgeDays: request.maxAgeDays,
+    actionDelayMinSeconds: request.actionDelayMinSeconds,
+    actionDelayMaxSeconds: request.actionDelayMaxSeconds,
     maxRetries: request.maxRetries,
     startIndex: request.startIndex,
     requestedAt: request.requestedAt,
@@ -129,6 +133,12 @@ async function processOneStaleKeywordUserPruneRequest(
   const args = ["--max-age-days", String(request.maxAgeDays), "--job-id", request.jobId];
   if (request.startIndex && request.startIndex > 1) {
     args.push("--start-index", String(request.startIndex));
+  }
+  if (Number.isFinite(request.actionDelayMinSeconds) && Number(request.actionDelayMinSeconds) >= 0) {
+    args.push("--action-delay-min-seconds", String(request.actionDelayMinSeconds));
+  }
+  if (Number.isFinite(request.actionDelayMaxSeconds) && Number(request.actionDelayMaxSeconds) >= 0) {
+    args.push("--action-delay-max-seconds", String(request.actionDelayMaxSeconds));
   }
   if (request.resumeStatePath) {
     args.push("--resume-state-path", request.resumeStatePath);
@@ -386,6 +396,8 @@ function claimStaleKeywordUserPruneRequest(): StaleKeywordUserPruneRequest | nul
       const parsed = JSON.parse(fsSync.readFileSync(runningPath, "utf8")) as {
         jobId?: string;
         maxAgeDays?: number;
+        actionDelayMinSeconds?: number;
+        actionDelayMaxSeconds?: number;
         maxRetries?: number;
         startIndex?: number;
         requestedAt?: string;
@@ -399,6 +411,14 @@ function claimStaleKeywordUserPruneRequest(): StaleKeywordUserPruneRequest | nul
       return {
         jobId: parsed.jobId,
         maxAgeDays: Number(parsed.maxAgeDays),
+        actionDelayMinSeconds:
+          Number.isFinite(Number(parsed.actionDelayMinSeconds)) && Number(parsed.actionDelayMinSeconds) >= 0
+            ? Number(parsed.actionDelayMinSeconds)
+            : undefined,
+        actionDelayMaxSeconds:
+          Number.isFinite(Number(parsed.actionDelayMaxSeconds)) && Number(parsed.actionDelayMaxSeconds) >= 0
+            ? Number(parsed.actionDelayMaxSeconds)
+            : undefined,
         maxRetries: Number.isFinite(Number(parsed.maxRetries)) && Number(parsed.maxRetries) >= 0 ? Number(parsed.maxRetries) : undefined,
         startIndex: Number.isFinite(Number(parsed.startIndex)) && Number(parsed.startIndex) > 0 ? Number(parsed.startIndex) : undefined,
         requestedAt: parsed.requestedAt,

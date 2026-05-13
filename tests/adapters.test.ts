@@ -324,6 +324,7 @@ describe("rss and crawler adapters", () => {
     lists.add("banned_word", "see @");
     lists.add("banned_word", "<3");
     lists.add("banned_word", "premium");
+    lists.add("banned_word", "rt si");
 
     const xClient: XSearchClient = {
       countRecent: vi.fn().mockResolvedValue(1),
@@ -362,6 +363,18 @@ describe("rss and crawler adapters", () => {
     });
 
     expect(ignoredContextDecision.reasons).not.toContain("banned_word:premium");
+
+    const mentionBridgeDecision = crawler.explainTweetForHydration("@secviz", {
+      id: "candidate-mention-bridge",
+      text: "RT @julierobert: Si this advisory confirms the security impact",
+      lang: "en",
+      createdAt: new Date(),
+      user: {
+        screenName: "@alice"
+      }
+    });
+
+    expect(mentionBridgeDecision.reasons).not.toContain("banned_word:rt si");
     database.close();
   });
 

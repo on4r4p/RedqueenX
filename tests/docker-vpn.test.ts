@@ -16,6 +16,16 @@ describe("docker_vpn isolation", () => {
     expect(loadConfig({}).searchWithoutApiIsolation).toBe("host_netns");
   });
 
+  it("parses admin IPv4 whitelist and blacklist from env lists", () => {
+    const config = loadConfig({
+      ADMIN_IPV4_WHITELIST: "192.168.0.1/24,127.0.0.1 37.67.185.138/32",
+      ADMIN_IPV4_BLACKLIST: "203.0.113.10;198.51.100.0/24"
+    });
+
+    expect(config.adminIpv4Whitelist).toEqual(["192.168.0.1/24", "127.0.0.1", "37.67.185.138/32"]);
+    expect(config.adminIpv4Blacklist).toEqual(["203.0.113.10", "198.51.100.0/24"]);
+  });
+
   it("queues admin media cache reloads instead of launching host netns scripts", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-docker-vpn-"));
     const currentSessionFile = path.join(tmp, "current-session.log");
@@ -160,13 +170,36 @@ describe("docker_vpn isolation", () => {
         method: "POST",
         url: "/admin/keyword-users/prune-stale",
         headers: authHeaders,
-        payload: { maxAgeDays: 90, autoIgnoreAlert: true, maxRetries: 3 }
+        payload: { maxAgeDays: 90, autoIgnoreAlert: true, maxRetries: 3, autoRestartDelaySeconds: 12 }
       });
       expect(start.statusCode).toBe(202);
       initialJob = start.json().job.job;
       if (!initialJob) {
         throw new Error("Expected stale keyword cleanup job to be queued.");
       }
+      const resumedAt = new Date().toISOString();
+      fs.mkdirSync(path.dirname(initialJob.resumeStatePath), { recursive: true });
+      fs.writeFileSync(
+        initialJob.resumeStatePath,
+        `${JSON.stringify(
+          {
+            schemaVersion: 1,
+            updatedAt: resumedAt,
+            checkedUsers: [
+              {
+                keyword: "@already_checked",
+                handle: "already_checked",
+                status: "keep",
+                jobId: initialJob.id,
+                checkedAt: resumedAt
+              }
+            ]
+          },
+          null,
+          2
+        )}\n`,
+        "utf8"
+      );
 
       const alert = alerts.createOpen({
         accountId: account.id,
@@ -196,6 +229,7 @@ describe("docker_vpn isolation", () => {
             removedUsers: [],
             keptUsers: [],
             skippedUsers: [],
+            blockedKeyword: "@stuck_user",
             error: "X returned a blocking error page: Something went wrong."
           },
           null,
@@ -219,11 +253,73 @@ describe("docker_vpn isolation", () => {
         status: "running",
         restartCount: 1,
         autoIgnoreAlert: true,
-        maxRetries: 3
+        maxRetries: 3,
+        autoRestartDelaySeconds: 12,
+        startIndex: 43
+      });
+      expect(restartedJob.resumeStatePath).not.toBe(initialJob.resumeStatePath);
+      expect(JSON.parse(fs.readFileSync(initialJob.reportPath, "utf8"))).toMatchObject({
+        status: "stopped",
+        processedCandidates: 42,
+        skippedUsers: [],
+        error: `Restarting after X session alert ${alert.id} was auto_ignored.`
       });
       expect(alerts.find(alert.id)).toMatchObject({
         id: alert.id,
         status: "ignored"
+      });
+
+      const restartedProgressAt = new Date().toISOString();
+      fs.writeFileSync(
+        restartedJob.reportPath,
+        `${JSON.stringify(
+          {
+            jobId: restartedJob.id,
+            mode: "without_api",
+            status: "running",
+            maxAgeDays: 90,
+            startedAt: restartedProgressAt,
+            completedAt: null,
+            account: account.xIdentifier,
+            vpnProfilePath: account.vpnProfilePath,
+            publicIpv4: "203.0.113.10",
+            totalCandidates: 4001,
+            processedCandidates: 2,
+            startIndex: 43,
+            skippedBeforeStartIndex: 42,
+            removedUsers: [],
+            keptUsers: [
+              {
+                keyword: "@continued",
+                handle: "continued",
+                latestTweetId: "1",
+                latestTweetCreatedAt: restartedProgressAt,
+                ageDays: 0,
+                reason: "latest_tweet_within_max_age"
+              }
+            ],
+            skippedUsers: [],
+            error: null
+          },
+          null,
+          2
+        )}\n`,
+        "utf8"
+      );
+      const progressed = await app.inject({
+        method: "GET",
+        url: "/admin/keyword-users/prune-stale/current",
+        headers: authHeaders
+      });
+      expect(progressed.statusCode).toBe(200);
+      expect(progressed.json().job).toMatchObject({
+        id: restartedJob.id,
+        status: "running",
+        restartCount: 0
+      });
+      expect(JSON.parse(fs.readFileSync(path.join(process.cwd(), "runtime", "stale-keyword-user-prune-requests", `${restartedJob.id}.json`), "utf8"))).toMatchObject({
+        jobId: restartedJob.id,
+        restartCount: 0
       });
     } finally {
       await app.close();
@@ -336,6 +432,105 @@ describe("docker_vpn isolation", () => {
         fs.rmSync(path.join(process.cwd(), "runtime", "stale-keyword-user-prune-requests", `${job.id}.json`), { force: true });
         fs.rmSync(path.join(process.cwd(), "runtime", "stale-keyword-user-prune-requests", `${job.id}.running`), { force: true });
         fs.rmSync(path.join(process.cwd(), "runtime", "stale-keyword-user-prune-stops", `${job.id}.stop`), { force: true });
+      }
+      fs.rmSync(path.resolve(account.storageStatePath), { force: true });
+    }
+  });
+
+  it("updates the execution speed of a running Docker stale keyword cleanup immediately", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-docker-stale-users-speed-"));
+    const currentSessionFile = path.join(tmp, "current-session.log");
+    const envPath = path.join(tmp, ".env");
+    const vpnProfilePath = `./runtime/test-vpn-${process.pid}-${Date.now()}.ovpn`;
+    fs.writeFileSync(envPath, "", "utf8");
+
+    const config = loadConfig({
+      ADMIN_PASSWORD: "secret",
+      SESSION_SECRET: "test-session-secret",
+      CURRENT_SESSION_FILE: currentSessionFile,
+      DATABASE_URL: path.join(tmp, "redqueenx.sqlite"),
+      VPN_CONFIG: vpnProfilePath,
+      X_API_ENABLED: "false",
+      SEARCH_WITHOUT_API_ENABLED: "true",
+      SEARCH_WITHOUT_API_ISOLATION: "docker_vpn"
+    });
+    const database = openMemoryDatabase();
+    const accounts = new XBrowserAccountService(database);
+    const account = accounts.upsert({
+      vpnProfilePath: config.vpnConfig,
+      xIdentifier: "@docker_stale_cleanup"
+    });
+    fs.mkdirSync(path.dirname(path.resolve(account.storageStatePath)), { recursive: true });
+    fs.writeFileSync(path.resolve(account.storageStatePath), JSON.stringify({ cookies: [], origins: [] }), "utf8");
+    accounts.markLogin(account.id, "203.0.113.10");
+
+    const app = createAdminApi({
+      database,
+      config,
+      envPath,
+      currentSessionFilePath: currentSessionFile,
+      restartDelayMs: 0
+    });
+
+    let job: { id: string; reportPath: string; resumeStatePath: string } | null = null;
+    try {
+      const login = await app.inject({ method: "POST", url: "/admin/login", payload: { password: "secret" } });
+      expect(login.statusCode).toBe(200);
+      const cookie = login.headers["set-cookie"];
+      const authHeaders = { cookie: Array.isArray(cookie) ? cookie[0] : String(cookie) };
+
+      const start = await app.inject({
+        method: "POST",
+        url: "/admin/keyword-users/prune-stale",
+        headers: authHeaders,
+        payload: { maxAgeDays: 90, actionDelayMinSeconds: 5, actionDelayMaxSeconds: 10 }
+      });
+      expect(start.statusCode).toBe(202);
+      job = start.json().job.job;
+      if (!job) {
+        throw new Error("Expected stale keyword cleanup job to be queued.");
+      }
+
+      const speed = await app.inject({
+        method: "POST",
+        url: "/admin/keyword-users/prune-stale/speed",
+        headers: authHeaders,
+        payload: { actionDelayMinSeconds: 0, actionDelayMaxSeconds: 0 }
+      });
+      expect(speed.statusCode).toBe(200);
+      expect(speed.json()).toMatchObject({
+        appliedImmediately: true,
+        job: {
+          running: true,
+          job: {
+            id: job.id,
+            actionDelayMinSeconds: 0,
+            actionDelayMaxSeconds: 0
+          }
+        }
+      });
+
+      const requestPath = path.join(process.cwd(), "runtime", "stale-keyword-user-prune-requests", `${job.id}.json`);
+      expect(JSON.parse(fs.readFileSync(requestPath, "utf8"))).toMatchObject({
+        jobId: job.id,
+        actionDelayMinSeconds: 0,
+        actionDelayMaxSeconds: 0
+      });
+
+      const controlPath = path.join(process.cwd(), "runtime", "stale-keyword-user-prune-controls", `${job.id}.json`);
+      expect(JSON.parse(fs.readFileSync(controlPath, "utf8"))).toMatchObject({
+        jobId: job.id,
+        actionDelayMinSeconds: 0,
+        actionDelayMaxSeconds: 0
+      });
+    } finally {
+      await app.close();
+      if (job) {
+        fs.rmSync(job.reportPath, { force: true });
+        fs.rmSync(job.resumeStatePath, { force: true });
+        fs.rmSync(path.join(process.cwd(), "runtime", "stale-keyword-user-prune-requests", `${job.id}.json`), { force: true });
+        fs.rmSync(path.join(process.cwd(), "runtime", "stale-keyword-user-prune-requests", `${job.id}.running`), { force: true });
+        fs.rmSync(path.join(process.cwd(), "runtime", "stale-keyword-user-prune-controls", `${job.id}.json`), { force: true });
       }
       fs.rmSync(path.resolve(account.storageStatePath), { force: true });
     }

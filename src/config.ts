@@ -1,5 +1,6 @@
 import path from "node:path";
 import { z } from "zod";
+import { parseAccessListInput } from "./admin/serverAccess";
 
 const envSchema = z.object({
   ADMIN_HOST: z.string().default("0.0.0.0"),
@@ -12,6 +13,8 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((value) => (value && value.trim().length > 0 ? value : "./runtime/current-session.log")),
+  ADMIN_IPV4_WHITELIST: z.string().default(""),
+  ADMIN_IPV4_BLACKLIST: z.string().default(""),
   X_API_KEY: z.string().optional(),
   X_API_SECRET: z.string().optional(),
   X_ACCESS_TOKEN: z.string().optional(),
@@ -82,11 +85,14 @@ const envSchema = z.object({
   RUN_CHAIN_COUNT: z.coerce.number().int().min(1).default(1),
   STALE_KEYWORD_USER_MAX_AGE_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
   STALE_KEYWORD_USER_START_INDEX: z.coerce.number().int().min(1).default(1),
+  STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS: z.coerce.number().int().min(0).default(1),
+  STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS: z.coerce.number().int().min(0).default(5),
   STALE_KEYWORD_USER_AUTO_IGNORE_ALERT: z
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
   STALE_KEYWORD_USER_MAX_RETRIES: z.coerce.number().int().min(0).max(20).default(3),
+  STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS: z.coerce.number().int().min(0).max(3600).default(10),
   RAW_TIMELINE_ENABLED: z
     .enum(["true", "false"])
     .default("true")
@@ -162,6 +168,11 @@ export type AppConfig = ReturnType<typeof loadConfig>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const parsed = envSchema.parse(env);
+  const staleKeywordUserActionDelayMinSeconds = Math.max(0, Math.floor(parsed.STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS));
+  const staleKeywordUserActionDelayMaxSeconds = Math.max(
+    staleKeywordUserActionDelayMinSeconds,
+    Math.floor(parsed.STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS)
+  );
 
   return {
     adminHost: parsed.ADMIN_HOST,
@@ -171,6 +182,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     sessionSecret: parsed.SESSION_SECRET,
     databaseUrl: path.resolve(parsed.DATABASE_URL),
     currentSessionFile: path.resolve(parsed.CURRENT_SESSION_FILE),
+    adminIpv4Whitelist: parseAccessListInput(parsed.ADMIN_IPV4_WHITELIST),
+    adminIpv4Blacklist: parseAccessListInput(parsed.ADMIN_IPV4_BLACKLIST),
     legacyDataDir: path.resolve("./oldpython/Data"),
     xSearchApiCallLimit: parsed.X_SEARCH_API_CALL_LIMIT,
     xApiEnabled: parsed.X_API_ENABLED,
@@ -212,8 +225,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     runChainCount: parsed.RUN_CHAIN_COUNT,
     staleKeywordUserMaxAgeDays: parsed.STALE_KEYWORD_USER_MAX_AGE_DAYS,
     staleKeywordUserStartIndex: parsed.STALE_KEYWORD_USER_START_INDEX,
+    staleKeywordUserActionDelayMinSeconds,
+    staleKeywordUserActionDelayMaxSeconds,
     staleKeywordUserAutoIgnoreAlert: parsed.STALE_KEYWORD_USER_AUTO_IGNORE_ALERT,
     staleKeywordUserMaxRetries: parsed.STALE_KEYWORD_USER_MAX_RETRIES,
+    staleKeywordUserAutoRestartDelaySeconds: parsed.STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS,
     rawTimelineEnabled: parsed.RAW_TIMELINE_ENABLED,
     dockerX11ForwardEnabled: parsed.DOCKER_X11_FORWARD_ENABLED,
     dockerX11Host: parsed.DOCKER_X11_HOST,

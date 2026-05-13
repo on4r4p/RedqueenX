@@ -121,6 +121,20 @@ type RawTimelineTweetRow = {
 export class RawTimelineTweetService {
   constructor(private readonly database: Database) { }
 
+  find(runId: string, tweetId: string): RawTimelineTweetItem | null {
+    const row = this.database
+      .prepare(
+        `
+          SELECT *
+          FROM raw_timeline_tweets
+          WHERE run_id = ? AND tweet_id = ?
+        `
+      )
+      .get(runId, tweetId) as RawTimelineTweetRow | undefined;
+
+    return row ? mapRawTweetRow(row) : null;
+  }
+
   saveVisible(runId: string, keyword: string, tweets: TweetCandidate[]): number {
     if (tweets.length === 0) return 0;
     const capturedAt = new Date().toISOString();
@@ -297,6 +311,22 @@ export class RawTimelineTweetService {
 
   clearRejected(): number {
     const result = this.database.prepare("DELETE FROM raw_timeline_tweets WHERE decision_status = 'rejected'").run();
+    return result.changes;
+  }
+
+  markAccepted(runId: string, tweetId: string): number {
+    const result = this.database
+      .prepare(
+        `
+          UPDATE raw_timeline_tweets
+          SET
+            decision_status = 'accepted',
+            rejection_stage = 'accepted',
+            decision_at = ?
+          WHERE run_id = ? AND tweet_id = ?
+        `
+      )
+      .run(new Date().toISOString(), runId, tweetId);
     return result.changes;
   }
 }

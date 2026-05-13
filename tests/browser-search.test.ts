@@ -6,6 +6,7 @@ import {
   detectManualVerificationFromState,
   extractHashtags,
   extractMentions,
+  isTransientBrowserNavigationError,
   sameManualVerificationDetection,
   snapshotToTweetCandidate,
   visibleTweetExtractorSource
@@ -29,6 +30,15 @@ describe("browser search helpers", () => {
     expect(url.searchParams.get("q")).toBe("cloudflare");
     expect(url.searchParams.get("q")).not.toContain("-filter:retweets");
     expect(url.searchParams.get("f")).toBe("live");
+  });
+
+  it("treats Chromium cert verifier resets as transient navigation errors", () => {
+    expect(
+      isTransientBrowserNavigationError(
+        new Error('page.goto: net::ERR_CERT_VERIFIER_CHANGED at https://x.com/search Call log: - navigating to "https://x.com/search"')
+      )
+    ).toBe(true);
+    expect(isTransientBrowserNavigationError(new Error("page.goto: net::ERR_CERT_AUTHORITY_INVALID at https://x.com/search"))).toBe(false);
   });
 
   it("maps visible DOM snapshots into TweetCandidate scoring input", () => {
@@ -160,6 +170,21 @@ describe("browser search helpers", () => {
     ).toBeNull();
   });
 
+  it("does not treat sidebar news mentioning two-factor authentication as an X prompt", () => {
+    const text =
+      "To view keyboard shortcuts, press question mark View keyboard shortcuts Home Explore Notifications Follow Chat Grok Bookmarks Creator Studio Premium Profile More Post Blue king Latest People Media Lists See new posts Search filters People from anyone People you follow Location Anywhere Near you Advanced search Today’s News Zero Day Initiative Rejects Dozens of Zero-Day RCE Submissions for Pwn2Own Berlin 2026 Due to Capacity Limits 2 hours ago · News · 194 posts Google Threat Intelligence Group reports first known AI-generated zero-day exploit bypassing two-factor authentication in popular open-source web administration tool 6 hours ago · News · 1,428 posts";
+
+    expect(
+      detectManualVerificationFromState({
+        url: "https://x.com/search?q=from%3Amy_name_is_fer&src=typed_query&f=live",
+        visibleText: text,
+        nonTweetVisibleText: text,
+        articleCount: 0,
+        tweetTextCount: 0
+      })
+    ).toBeNull();
+  });
+
   it("does not trigger manual verification from technical detector substrings", () => {
     expect(
       detectManualVerificationFromState({
@@ -242,6 +267,54 @@ describe("browser search helpers", () => {
         articleCount: 0,
         tweetTextCount: 0
       });
+
+    expect(detected).toBeNull();
+  });
+
+  it("does not treat the compact X search-shell retry page as a session alert", () => {
+    const searchShellText =
+      "To view keyboard shortcuts, press question markView keyboard shortcutsHome Explore Notifications Follow Chat Grok Bookmarks Premium Profile More PostBlue king@Blueking561857TopLatestPeopleMediaListsSee new postsSomething went wrong. Try reloading.RetrySearch filtersPeopleFrom anyonePeople you followLocationAnywhereNear youAdvanced searchSomething went wrong. Try reloading.RetryWho to followMichael Skelton@codingo_FollowClick to Follow codingo_Intigriti@intigritiFollowClick to Follow intigritiDarkShadow@darkshadow2bdFollowClick to Follow darkshadow2bdShow moreTerms of Service |Privacy Policy |Cookie Policy |Accessibility |Ads info |More© 2026 X Corp.";
+
+    const detected = detectManualVerificationFromState({
+      url: "https://x.com/search?q=from%3Ablueking561857&src=typed_query&f=live",
+      visibleText: searchShellText,
+      nonTweetVisibleText: searchShellText,
+      articleCount: 0,
+      tweetTextCount: 0
+    });
+
+    expect(detected).toBeNull();
+  });
+
+  it("does not treat a right-column home retry widget as a session alert", () => {
+    const homeShellText = [
+      "Home",
+      "Explore",
+      "Notifications",
+      "Follow",
+      "Chat",
+      "Grok",
+      "Bookmarks",
+      "Premium",
+      "Profile",
+      "More",
+      "For you",
+      "Following",
+      "Subscribe to Premium",
+      "Something went wrong. Try reloading.",
+      "Retry",
+      "What's happening",
+      "Trending in France",
+      "Who to follow"
+    ].join("\n");
+
+    const detected = detectManualVerificationFromState({
+      url: "https://x.com/home",
+      visibleText: homeShellText,
+      nonTweetVisibleText: homeShellText,
+      articleCount: 2,
+      tweetTextCount: 2
+    });
 
     expect(detected).toBeNull();
   });

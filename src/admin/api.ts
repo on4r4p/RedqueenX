@@ -14,7 +14,7 @@ import type { Database } from "better-sqlite3";
 import type { AppConfig } from "../config";
 import { isListKind, ListService } from "./listService";
 import { parseRunStats, RunService } from "./runService";
-import { LegacyImporter } from "../legacy/importer";
+import { LEGACY_FILE_MAPPINGS, LegacyImporter } from "../legacy/importer";
 import { executeAdminCommand } from "./commandParser";
 import { verifyAdminPassword } from "./auth";
 import { LegacyTimelineService } from "./legacyTimeline";
@@ -29,18 +29,25 @@ import {
 import { EnvService, envUpdateSchema } from "./envService";
 import { CurrentSessionService, currentSessionLevels, type CurrentSessionLevel } from "./currentSessionService";
 import { DatabaseAdminService } from "./databaseAdminService";
-import { isServerAccessAllowed, parseAccessListInput } from "./serverAccess";
+import {
+  DEFAULT_SERVER_ACCESS_CONFIG,
+  isServerAccessAllowed,
+  mergeServerAccessConfig,
+  parseAccessListInput,
+  type ServerAccessConfig
+} from "./serverAccess";
 import { normalizeHandle, normalizeValue } from "../text";
 import type { RunRecord, RunStats, TweetCandidate } from "../types";
 import { Crawler } from "../crawler";
 import { XApiClient } from "../x-client";
 import { XActionClient } from "../x-actions";
 import { RssClient } from "../rss-client";
-import { TimelineTweetService } from "./timelineTweetService";
+import { TimelineTweetService, type TimelineTweetExportRecord } from "./timelineTweetService";
 import { normalizeRawTimelineReasonGroupIds, RawTimelineTweetService } from "./rawTimelineTweetService";
 import { MediaCacheService, type MediaCacheConfig } from "./mediaCacheService";
 import { MediaCacheJobService } from "./mediaCacheJobService";
 import { XBudgetExceededError, XBudgetService } from "../x-budget";
+import { looksLikeXApiCreditsDepleted, xApiCreditsDepletedMessage } from "../xApiErrors";
 import { XBrowserAccountService, type XBrowserAccountRecord } from "./xBrowserAccountService";
 import { XSessionAlertService, type XSessionAlertRecord } from "./xSessionAlertService";
 import type { KeywordUserPruneMode, StaleKeywordUserPruneReport } from "../worker/staleKeywordUserPruner";
@@ -70,16 +77,25 @@ const importSchema = z.object({
   dataDir: z.string().max(maxPathLength).optional(),
   filename: z.string().max(255).optional()
 });
+const adminImportKinds = [...LIST_KINDS, "timeline_tweets"] as const;
 const importContentSchema = z.object({
   filename: z.string().min(1).max(255),
-  kind: z.enum(LIST_KINDS),
+  kind: z.enum(adminImportKinds),
   content: z.string().max(maxImportContentLength)
 });
+const legacyFilenameByKind = new Map(LEGACY_FILE_MAPPINGS.map((mapping) => [mapping.kind, mapping.filename] as const));
 const staleKeywordUserPruneSchema = z.object({
   maxAgeDays: z.coerce.number().positive().max(3650).default(90),
+  actionDelayMinSeconds: z.coerce.number().int().min(0).optional(),
+  actionDelayMaxSeconds: z.coerce.number().int().min(0).optional(),
   autoIgnoreAlert: z.boolean().optional(),
   startIndex: z.coerce.number().int().positive().optional(),
-  maxRetries: z.coerce.number().int().min(0).max(20).optional()
+  maxRetries: z.coerce.number().int().min(0).max(20).optional(),
+  autoRestartDelaySeconds: z.coerce.number().int().min(0).max(3600).optional()
+});
+const staleKeywordUserPruneSpeedSchema = z.object({
+  actionDelayMinSeconds: z.coerce.number().int().min(0),
+  actionDelayMaxSeconds: z.coerce.number().int().min(0)
 });
 const databaseTableParamSchema = z.object({ tableName: z.string().min(1).max(128) });
 const databaseTableQuerySchema = z.object({
@@ -106,6 +122,10 @@ const rawTimelineQuerySchema = z.object({
       const values = value === undefined ? [] : Array.isArray(value) ? value : [value];
       return normalizeRawTimelineReasonGroupIds(values).slice(0, 50);
     })
+});
+const rawTimelineAcceptSchema = z.object({
+  runId: z.string().min(1).max(255),
+  tweetId: z.string().min(1).max(255)
 });
 const databaseExportQuerySchema = z.object({
   format: z.enum(["json", "csv"]).default("json")
@@ -217,8 +237,11 @@ const xApiUpdateSchema = z.object({
       "RUN_CHAIN_COUNT",
       "STALE_KEYWORD_USER_MAX_AGE_DAYS",
       "STALE_KEYWORD_USER_START_INDEX",
+      "STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS",
+      "STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS",
       "STALE_KEYWORD_USER_AUTO_IGNORE_ALERT",
       "STALE_KEYWORD_USER_MAX_RETRIES",
+      "STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS",
       "RAW_TIMELINE_ENABLED",
       "DOCKER_X11_FORWARD_ENABLED",
       "DOCKER_X11_HOST",
@@ -272,6 +295,8 @@ export interface AdminApiOptions {
     | "adminPassword"
     | "adminPasswordHash"
     | "sessionSecret"
+    | "adminIpv4Whitelist"
+    | "adminIpv4Blacklist"
     | "legacyDataDir"
     | "currentSessionFile"
     | "xApiEnabled"
@@ -313,8 +338,11 @@ export interface AdminApiOptions {
     | "runChainCount"
     | "staleKeywordUserMaxAgeDays"
     | "staleKeywordUserStartIndex"
+    | "staleKeywordUserActionDelayMinSeconds"
+    | "staleKeywordUserActionDelayMaxSeconds"
     | "staleKeywordUserAutoIgnoreAlert"
     | "staleKeywordUserMaxRetries"
+    | "staleKeywordUserAutoRestartDelaySeconds"
     | "rawTimelineEnabled"
     | "dockerX11ForwardEnabled"
     | "dockerX11Host"
@@ -367,17 +395,37 @@ type WithoutApiRunStartCheck =
   | { ok: true; account: XBrowserAccountRecord }
   | { ok: false; code: number; payload: { error: string; alert?: XSessionAlertRecord }; reason: string };
 
+type StartStaleKeywordUserPruneResult =
+  | {
+      ok: true;
+      job: StaleKeywordUserPruneJob;
+      startCheck: WithoutApiRunStartCheck | null;
+      resumedPreviousFailedJob: boolean;
+    }
+  | {
+      ok: false;
+      code: number;
+      payload: { error: string; alert?: XSessionAlertRecord; job?: unknown };
+      reason: string;
+    };
+
 interface StaleKeywordUserPruneJob {
   id: string;
   status: "running" | "completed" | "failed" | "stopped";
   mode: KeywordUserPruneMode;
   maxAgeDays: number;
+  actionDelayMinSeconds: number;
+  actionDelayMaxSeconds: number;
   autoIgnoreAlert: boolean;
   maxRetries: number;
+  autoRestartDelaySeconds: number;
   startIndex: number;
   restartCount: number;
   blockedByAlertId: number | null;
   restartedAfterAlertId: number | null;
+  autoRestartScheduledAt: string | null;
+  autoRestartAt: string | null;
+  autoRestartSource: "resolved" | "ignored" | "auto_ignored" | null;
   startedAt: string;
   completedAt: string | null;
   reportPath: string;
@@ -416,11 +464,22 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   let mediaCacheFetchQueue: Promise<void> = Promise.resolve();
   let staleKeywordUserPruneJob: StaleKeywordUserPruneJob | null = null;
   let staleKeywordUserPruneStartInProgress = false;
+  let staleKeywordUserPruneRestartTimer: NodeJS.Timeout | null = null;
   const activeXAlertLoginProcesses = new Map<number, ChildProcess>();
   const apiResumeTimers = new Map<string, NodeJS.Timeout>();
+  const serverAccessEnvConfig: ServerAccessConfig = {
+    whitelist: options.config.adminIpv4Whitelist,
+    blacklist: options.config.adminIpv4Blacklist
+  };
   const frontendRoot = findFrontendRoot();
   const pageRoot = path.join(frontendRoot, "pages");
   const assetRoot = path.join(frontendRoot, "assets");
+
+  const getEffectiveServerAccessConfig = (storedConfig?: ServerAccessConfig): ServerAccessConfig =>
+    mergeServerAccessConfig(
+      storedConfig ?? settings.getServerAccessConfig(DEFAULT_SERVER_ACCESS_CONFIG),
+      serverAccessEnvConfig
+    );
 
   app.register(cookie, {
     secret: options.config.sessionSecret
@@ -435,7 +494,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   app.addHook("onRequest", async (request, reply) => {
     applySecurityHeaders(reply);
     requestStartTimes.set(request, performance.now());
-    const accessDecision = isServerAccessAllowed(settings.getServerAccessConfig(), request.ip);
+    const accessDecision = isServerAccessAllowed(getEffectiveServerAccessConfig(), request.ip);
     if (!accessDecision.allowed) {
       await recordSession("prob", "server_access.denied", "HTTP request blocked by RedqueenX access policy", {
         ip: accessDecision.ip ?? request.ip,
@@ -560,6 +619,18 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     };
   });
 
+  app.get("/admin/timeline/export", async (_request, reply) => {
+    const exported = exportTimelineTweetsContent();
+    await recordSession("info", "timeline.export", "Timeline tweets downloaded from admin", {
+      filename: exported.filename,
+      lines: exported.lineCount
+    });
+    reply
+      .header("content-disposition", `attachment; filename="${exported.filename}"`)
+      .type(exported.contentType)
+      .send(exported.body);
+  });
+
   app.get("/raw-timeline/data", async (request) => rejectedTimelineDataResponse(request.query));
 
   app.get("/rejected-timeline/data", async (request) => rejectedTimelineDataResponse(request.query));
@@ -568,6 +639,49 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const deleted = rawTimelineTweets.clearRejected();
     await recordSession("info", "rejected_timeline.clear", "Rejected timeline entries deleted", { deleted });
     return { deleted };
+  });
+
+  app.post("/admin/rejected-timeline/accept", async (request, reply) => {
+    const body = rawTimelineAcceptSchema.parse(request.body ?? {});
+    const rawTweet = rawTimelineTweets.find(body.runId, body.tweetId);
+    if (!rawTweet) {
+      reply.code(404).send({ error: "Rejected timeline tweet not found." });
+      return;
+    }
+    if (rawTweet.decisionStatus !== "rejected") {
+      reply.code(409).send({ error: "Only rejected timeline tweets can be accepted manually." });
+      return;
+    }
+
+    options.database.transaction(() => {
+      timelineTweets.saveAcceptedManual({
+        keyword: rawTweet.keyword,
+        text: rawTweet.text,
+        tweetId: rawTweet.tweetId,
+        author: rawTweet.author,
+        authorName: rawTweet.authorName,
+        tweetUrl: rawTweet.tweetUrl,
+        tweetCreatedAt: rawTweet.tweetCreatedAt,
+        retweetCount: rawTweet.retweetCount,
+        favoriteCount: rawTweet.favoriteCount,
+        score: rawTweet.score,
+        reasons: ["manual_accept_from_rejected_timeline"]
+      });
+      rawTimelineTweets.markAccepted(body.runId, body.tweetId);
+    })();
+
+    await recordSession("info", "rejected_timeline.accepted", "Rejected timeline tweet accepted manually", {
+      runId: body.runId,
+      tweetId: body.tweetId,
+      keyword: rawTweet.keyword,
+      previousReasons: rawTweet.rejectionReasons,
+      score: rawTweet.score ?? 0
+    });
+    return {
+      ok: true,
+      tweetId: rawTweet.tweetId,
+      runId: rawTweet.runId
+    };
   });
 
   function rejectedTimelineDataResponse(rawQuery: unknown) {
@@ -747,9 +861,12 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return { ok: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to like tweet";
+      const creditsDepleted = await handleXApiCreditsDepleted(error, { action: "like", tweetId });
       timelineTweets.markActionError(tweetId, "like", message);
       await recordSession("prob", "tweet.like.failed", message, { tweetId });
-      reply.code(error instanceof XBudgetExceededError ? 429 : 502).send({ error: message });
+      reply.code(creditsDepleted ? 402 : error instanceof XBudgetExceededError ? 429 : 502).send({
+        error: creditsDepleted ? xApiCreditsDepletedMessage() : message
+      });
     }
   });
 
@@ -773,9 +890,12 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return { ok: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to retweet";
+      const creditsDepleted = await handleXApiCreditsDepleted(error, { action: "retweet", tweetId });
       timelineTweets.markActionError(tweetId, "retweet", message);
       await recordSession("prob", "tweet.retweet.failed", message, { tweetId });
-      reply.code(error instanceof XBudgetExceededError ? 429 : 502).send({ error: message });
+      reply.code(creditsDepleted ? 402 : error instanceof XBudgetExceededError ? 429 : 502).send({
+        error: creditsDepleted ? xApiCreditsDepletedMessage() : message
+      });
     }
   });
 
@@ -1360,20 +1480,26 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   }));
 
   app.get("/admin/settings/server-access", async (request) => {
-    const config = settings.getServerAccessConfig();
+    const storedConfig = settings.getServerAccessConfig(DEFAULT_SERVER_ACCESS_CONFIG);
+    const config = getEffectiveServerAccessConfig(storedConfig);
     const currentIp = isServerAccessAllowed(config, request.ip).ip ?? request.ip;
-    return { config, currentIp };
+    return { config, storedConfig, envConfig: serverAccessEnvConfig, currentIp };
   });
 
   app.patch("/admin/settings/server-access", async (request, reply) => {
     const body = serverAccessUpdateSchema.parse(request.body ?? {});
-    const nextConfig = serverAccessConfigSchema.parse({
+    let nextStoredConfig = serverAccessConfigSchema.parse({
       whitelist: parseAccessListInput(body.whitelist),
       blacklist: parseAccessListInput(body.blacklist)
     });
+    let nextConfig = getEffectiveServerAccessConfig(nextStoredConfig);
     let currentDecision = isServerAccessAllowed(nextConfig, request.ip);
     if (currentDecision.reason === "not_whitelisted" && currentDecision.ip) {
-      nextConfig.whitelist = Array.from(new Set([...nextConfig.whitelist, currentDecision.ip]));
+      nextStoredConfig = {
+        ...nextStoredConfig,
+        whitelist: Array.from(new Set([...nextStoredConfig.whitelist, currentDecision.ip]))
+      };
+      nextConfig = getEffectiveServerAccessConfig(nextStoredConfig);
       currentDecision = isServerAccessAllowed(nextConfig, request.ip);
     }
     if (!currentDecision.allowed) {
@@ -1386,13 +1512,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return;
     }
 
-    const config = settings.updateServerAccessConfig(nextConfig);
+    const storedConfig = settings.updateServerAccessConfig(nextStoredConfig, DEFAULT_SERVER_ACCESS_CONFIG);
+    const config = getEffectiveServerAccessConfig(storedConfig);
     await recordSession("info", "settings.server_access.updated", "RedqueenX access settings updated", {
       whitelist: config.whitelist.length,
       blacklist: config.blacklist.length,
       appliedImmediately: true
     });
-    return { config, currentIp: currentDecision.ip ?? request.ip };
+    return { config, storedConfig, envConfig: serverAccessEnvConfig, currentIp: currentDecision.ip ?? request.ip };
   });
 
   app.patch("/admin/settings/scoring", async (request) => {
@@ -1419,8 +1546,12 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     if (!config.xApiEnabled) {
       stopActiveRunBecauseXDisabled(config);
     }
+    const xApiModeShutdown = await shutdownWithoutApiNetworkingForXApiMode(previousConfig, config);
     const changedVpnKeys = changedOpenVpnConfigKeys(previousConfig, config);
-    const openVpnStop = await requestOpenVpnStopForConfigChange(changedVpnKeys);
+    const openVpnStop =
+      xApiModeShutdown.openVpn.stop.requested || xApiModeShutdown.openVpn.stop.reason !== "x_api_mode_not_entered"
+        ? xApiModeShutdown.openVpn.stop
+        : await requestOpenVpnStopForConfigChange(changedVpnKeys);
     if (changedVpnKeys.length > 0) {
       await recordSession("info", "vpn.openvpn.config_changed", "OpenVPN settings changed from admin", {
         changedKeys: changedVpnKeys,
@@ -1434,12 +1565,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     await recordSession("info", "settings.x_api.updated", "X API settings updated", {
       appliedImmediately: true,
       envSynced: true,
-      openVpnSettingsChanged: changedVpnKeys.length > 0
+      openVpnSettingsChanged: changedVpnKeys.length > 0,
+      xApiModeShutdownRequested: xApiModeShutdown.requested
     });
     return {
       config,
       values,
       restartRequired: false,
+      xApiModeShutdown,
       openVpn: {
         settingsChanged: changedVpnKeys.length > 0,
         changedKeys: changedVpnKeys,
@@ -1456,7 +1589,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   app.get("/admin/keyword-users/prune-stale/current", async () => staleKeywordUserPruneStatusFresh());
 
-  app.post("/admin/keyword-users/prune-stale/stop", async (_request, reply) => {
+  app.post("/admin/keyword-users/prune-stale/speed", async (request, reply) => {
+    const body = staleKeywordUserPruneSpeedSchema.parse(request.body ?? {});
     await refreshStaleKeywordUserPruneJobFromReport();
     recoverStaleKeywordUserPruneJobFromRuntime();
     const status = staleKeywordUserPruneStatus();
@@ -1464,6 +1598,52 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     if (!job || !status.running) {
       reply.code(404).send({ error: "No running stale keyword user pruning job.", job: status });
       return;
+    }
+    const actionDelayMinSeconds = Math.max(0, Math.floor(body.actionDelayMinSeconds));
+    const actionDelayMaxSeconds = Math.max(actionDelayMinSeconds, Math.floor(body.actionDelayMaxSeconds));
+    const previousActionDelayMinSeconds = job.actionDelayMinSeconds;
+    const previousActionDelayMaxSeconds = job.actionDelayMaxSeconds;
+    const speedUpdate = updateStaleKeywordUserPruneSpeed(job, actionDelayMinSeconds, actionDelayMaxSeconds);
+    await recordSession("info", "keyword_user_prune.speed_changed", "Stale keyword user pruning execution speed updated from admin", {
+      jobId: job.id,
+      mode: job.mode,
+      previousActionDelayMinSeconds,
+      previousActionDelayMaxSeconds,
+      actionDelayMinSeconds,
+      actionDelayMaxSeconds,
+      controlPath: speedUpdate.controlPath,
+      updatedRequestPaths: speedUpdate.updatedRequestPaths,
+      reportUpdated: speedUpdate.reportUpdated
+    });
+    return {
+      appliedImmediately: true,
+      job: staleKeywordUserPruneStatus()
+    };
+  });
+
+  app.post("/admin/keyword-users/prune-stale/stop", async (_request, reply) => {
+    await refreshStaleKeywordUserPruneJobFromReport();
+    recoverStaleKeywordUserPruneJobFromRuntime();
+    const status = staleKeywordUserPruneStatus();
+    const job = staleKeywordUserPruneJob;
+    if (!job || (!status.running && !job.autoRestartAt)) {
+      reply.code(404).send({ error: "No running stale keyword user pruning job.", job: status });
+      return;
+    }
+    if (!status.running && job.autoRestartAt) {
+      clearStaleKeywordUserPruneAutoRestart(job);
+      const stoppedAt = new Date().toISOString();
+      const existingReport = readStaleKeywordUserPruneReport(job.id);
+      const stoppedReport = stoppedStaleKeywordUserPruneReport(job, existingReport, stoppedAt, "admin_stop_auto_restart");
+      writeStaleKeywordUserPruneReport(stoppedReport);
+      job.status = "stopped";
+      job.completedAt = stoppedAt;
+      job.error = stoppedReport.error;
+      job.blockedByAlertId = null;
+      await recordSession("prob", "keyword_user_prune.auto_restart_cancelled", "Stale keyword user pruning auto-restart cancelled from admin", {
+        jobId: job.id
+      });
+      return { stop: { autoRestartCancelled: true, childPid: null, removedQueuedRequest: false }, job: staleKeywordUserPruneStatus() };
     }
     const stop = stopStaleKeywordUserPruneJob(job, "admin_stop");
     await recordSession("prob", "keyword_user_prune.stop_requested", "Stale keyword user pruning stop requested from admin", {
@@ -1475,6 +1655,47 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return { stop, job: staleKeywordUserPruneStatus() };
   });
 
+  app.post("/admin/keyword-users/prune-stale/progress/reset", async (_request, reply) => {
+    await refreshStaleKeywordUserPruneJobFromReport();
+    recoverStaleKeywordUserPruneJobFromRuntime();
+    const status = staleKeywordUserPruneStatus();
+    if (staleKeywordUserPruneStartInProgress || status.running) {
+      reply.code(409).send({
+        error: "Stop the inactive users check before resetting progress.",
+        job: status
+      });
+      return;
+    }
+
+    const previousStartIndex = getXApiConfig().staleKeywordUserStartIndex;
+    const reset = resetStaleKeywordUserPruneProgress();
+    settings.patchXApiConfig({ staleKeywordUserStartIndex: 1 });
+    let envSynced = true;
+    let envError: string | null = null;
+    try {
+      await env.update({ STALE_KEYWORD_USER_START_INDEX: "1" });
+    } catch (error) {
+      envSynced = false;
+      envError = error instanceof Error ? error.message : String(error);
+    }
+    await recordSession("prob", "keyword_user_prune.progress_reset", "Stale keyword user pruning progress reset from admin", {
+      previousStartIndex,
+      nextStartIndex: 1,
+      clearedJobId: reset.clearedJobId,
+      autoRestartCancelled: reset.autoRestartCancelled,
+      deletedFiles: reset.deletedFiles.length,
+      envSynced,
+      envError
+    });
+    return {
+      reset,
+      envSynced,
+      envError,
+      values: xApiConfigToEnvValues(getXApiConfig()),
+      status: staleKeywordUserPruneStatus()
+    };
+  });
+
   app.post("/admin/keyword-users/prune-stale", async (request, reply) => {
     const body = staleKeywordUserPruneSchema.parse(request.body ?? {});
     await refreshStaleKeywordUserPruneJobFromReport();
@@ -1484,52 +1705,35 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       reply.code(409).send({ error: "A stale keyword user pruning job is already running.", job: currentStatus });
       return;
     }
-
     staleKeywordUserPruneStartInProgress = true;
     try {
-      const runtimeConfig = getXApiConfig();
-      const mode: KeywordUserPruneMode = runtimeConfig.searchWithoutApiEnabled ? "without_api" : "x_api";
-      let startCheck: WithoutApiRunStartCheck | null = null;
-      if (mode === "without_api") {
-        startCheck = await checkWithoutApiRunStart();
-        if (!startCheck.ok) {
-          reply.code(startCheck.code).send(startCheck.payload);
-          return;
-        }
-      } else if (!runtimeConfig.xApiEnabled) {
-        reply.code(400).send({ error: "X API search is disabled." });
-        return;
-      } else if (!options.config.x.bearerToken) {
-        reply.code(400).send({ error: "X_BEARER_TOKEN is required to run inactive users check in X API mode." });
+      const started = await startStaleKeywordUserPruneFromAdmin({
+        maxAgeDays: body.maxAgeDays,
+        actionDelayMinSeconds: body.actionDelayMinSeconds,
+        actionDelayMaxSeconds: body.actionDelayMaxSeconds,
+        autoIgnoreAlert: body.autoIgnoreAlert,
+        maxRetries: body.maxRetries,
+        autoRestartDelaySeconds: body.autoRestartDelaySeconds,
+        startIndex: body.startIndex,
+        skipStartInProgressCheck: true
+      });
+      if (!started.ok) {
+        reply.code(started.code).send(started.payload);
         return;
       }
-
-      await refreshStaleKeywordUserPruneJobFromReport();
-      recoverStaleKeywordUserPruneJobFromRuntime();
-      const statusAfterStartCheck = staleKeywordUserPruneStatus();
-      if (statusAfterStartCheck.running) {
-        reply.code(409).send({ error: "A stale keyword user pruning job is already running.", job: statusAfterStartCheck });
-        return;
-      }
-
-      const stoppedRun = await stopActiveRunForKeywordUserPrune();
-      const autoIgnoreAlert = body.autoIgnoreAlert ?? runtimeConfig.staleKeywordUserAutoIgnoreAlert;
-      const maxRetries = body.maxRetries ?? runtimeConfig.staleKeywordUserMaxRetries;
-      const startIndex = body.startIndex ?? runtimeConfig.staleKeywordUserStartIndex;
-      const resumeStatePath = startIndex === 1 ? staleKeywordUserPruneResumeStatePathForStart(body.maxAgeDays) : undefined;
-      const job =
-        mode === "without_api" && usesDockerVpnIsolation(runtimeConfig)
-          ? queueDockerStaleKeywordUserPruneJob(mode, body.maxAgeDays, stoppedRun, autoIgnoreAlert, maxRetries, startIndex, 0, resumeStatePath)
-          : startStaleKeywordUserPruneJob(mode, body.maxAgeDays, runtimeConfig, stoppedRun, autoIgnoreAlert, maxRetries, startIndex, 0, resumeStatePath);
+      const { job, startCheck, resumedPreviousFailedJob } = started;
       await recordSession("info", "keyword_user_prune.job_started", "Stale keyword user pruning job started from admin", {
         jobId: job.id,
         mode: job.mode,
         maxAgeDays: job.maxAgeDays,
+        actionDelayMinSeconds: job.actionDelayMinSeconds,
+        actionDelayMaxSeconds: job.actionDelayMaxSeconds,
         autoIgnoreAlert: job.autoIgnoreAlert,
         maxRetries: job.maxRetries,
+        autoRestartDelaySeconds: job.autoRestartDelaySeconds,
         startIndex: job.startIndex,
         resumeStatePath: job.resumeStatePath,
-        resumedPreviousFailedJob: Boolean(resumeStatePath),
+        resumedPreviousFailedJob,
         stoppedRun: job.stoppedRun,
         accountId: startCheck?.ok ? startCheck.account.id : null,
         xIdentifier: startCheck?.ok ? startCheck.account.xIdentifier : null
@@ -1602,8 +1806,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   app.post("/admin/import/content", async (request) => {
     const body = importContentSchema.parse(request.body ?? {});
-    const result = importer.importContent(body.filename, body.kind, body.content);
-    await recordSession("info", "import.content", "Local file imported into SQLite", {
+    const result =
+      body.kind === "timeline_tweets"
+        ? importTimelineTweetContent(body.filename, body.content)
+        : importer.importContent(body.filename, body.kind, body.content);
+    await recordSession("info", body.kind === "timeline_tweets" ? "import.timeline" : "import.content", body.kind === "timeline_tweets" ? "Timeline tweets imported into SQLite" : "Local file imported into SQLite", {
       filename: body.filename,
       kind: body.kind,
       importedLines: result.files.reduce((sum, file) => sum + file.importedLines, 0)
@@ -1640,6 +1847,24 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         hasMore: page.hasMore
       }
     };
+  });
+
+  app.get("/admin/lists/:kind/export", async (request, reply) => {
+    const kind = getKindParam(request.params);
+    if (!kind) {
+      reply.code(404).send({ error: "Unknown list kind" });
+      return;
+    }
+    const exported = exportListContent(kind);
+    await recordSession("info", "list.export", "List downloaded from admin", {
+      kind,
+      filename: exported.filename,
+      lines: exported.lineCount
+    });
+    reply
+      .header("content-disposition", `attachment; filename="${exported.filename}"`)
+      .type(`${exported.contentType}; charset=utf-8`)
+      .send(exported.body);
   });
 
   app.post("/admin/lists/stale_keyword_user/:id/restore-keyword", async (request, reply) => {
@@ -1966,6 +2191,130 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     });
   }
 
+  function exportListContent(kind: (typeof LIST_KINDS)[number]): {
+    filename: string;
+    contentType: string;
+    body: string;
+    lineCount: number;
+  } {
+    const values = lists.activeValues(kind);
+    const body = values.length > 0 ? `${values.join("\n")}\n` : "";
+    return {
+      filename: listExportFilename(kind),
+      contentType: "text/plain",
+      body,
+      lineCount: values.length
+    };
+  }
+
+  function exportTimelineTweetsContent(): {
+    filename: string;
+    contentType: string;
+    body: string;
+    lineCount: number;
+  } {
+    const records = timelineTweets.exportAll();
+    const body = records.length > 0 ? `${records.map((record) => JSON.stringify(record)).join("\n")}\n` : "";
+    return {
+      filename: "Timeline.Tweets.jsonl",
+      contentType: "application/x-ndjson; charset=utf-8",
+      body,
+      lineCount: records.length
+    };
+  }
+
+  function importTimelineTweetContent(filename: string, content: string) {
+    const importedAt = new Date().toISOString();
+    const records = parseTimelineTweetImportContent(content);
+    const sha256 = crypto.createHash("sha256").update(content, "utf8").digest("hex");
+    const importedLines = timelineTweets.importExportRecords(records);
+    return {
+      dataDir: "uploaded",
+      importedAt,
+      files: [
+        {
+          filename,
+          sourceFile: `uploaded:${filename}`,
+          kind: "timeline_tweets",
+          optional: false,
+          status: "imported",
+          sha256,
+          totalLines: records.length,
+          importedLines
+        }
+      ]
+    };
+  }
+
+  function parseTimelineTweetImportContent(content: string): TimelineTweetExportRecord[] {
+    const trimmed = content.trim();
+    if (!trimmed) {
+      return [];
+    }
+
+    const rawItems = trimmed.startsWith("[")
+      ? (JSON.parse(trimmed) as unknown[])
+      : trimmed
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as unknown);
+
+    if (!Array.isArray(rawItems)) {
+      throw new Error("Timeline import file must contain a JSON array or JSON Lines objects.");
+    }
+
+    return rawItems.map((item, index) => parseTimelineTweetImportRecord(item, index));
+  }
+
+  function parseTimelineTweetImportRecord(value: unknown, index: number): TimelineTweetExportRecord {
+    const record = z
+      .object({
+        schemaVersion: z.literal(1).optional(),
+        source: z.enum(["tweet", "from test"]).default("tweet"),
+        keyword: z.string().trim().min(1).optional().nullable(),
+        text: z.string(),
+        tweetId: z.string().min(1),
+        author: z.string().optional().nullable(),
+        authorName: z.string().optional().nullable(),
+        avatarUrl: z.string().optional().nullable(),
+        tweetUrl: z.string().optional(),
+        tweetCreatedAt: z.string().optional().nullable(),
+        retweetCount: z.coerce.number().default(0),
+        favoriteCount: z.coerce.number().default(0),
+        score: z.coerce.number().default(0),
+        reasons: z.array(z.string()).default([]),
+        media: z.array(z.any()).default([]),
+        urls: z.array(z.string()).default([]),
+        likedAt: z.string().optional().nullable(),
+        retweetedAt: z.string().optional().nullable(),
+        acceptedAt: z.string().optional().nullable()
+      })
+      .parse(value);
+
+    return {
+      schemaVersion: 1,
+      source: record.source,
+      keyword: record.keyword ?? null,
+      text: record.text,
+      tweetId: record.tweetId,
+      author: record.author ?? null,
+      authorName: record.authorName ?? null,
+      avatarUrl: record.avatarUrl ?? null,
+      tweetUrl: record.tweetUrl || `https://twitter.com/i/web/status/${record.tweetId}`,
+      tweetCreatedAt: record.tweetCreatedAt ?? null,
+      retweetCount: Number.isFinite(record.retweetCount) ? record.retweetCount : 0,
+      favoriteCount: Number.isFinite(record.favoriteCount) ? record.favoriteCount : 0,
+      score: Number.isFinite(record.score) ? record.score : 0,
+      reasons: record.reasons,
+      media: record.media,
+      urls: record.urls,
+      likedAt: record.likedAt ?? null,
+      retweetedAt: record.retweetedAt ?? null,
+      acceptedAt: record.acceptedAt ?? new Date(Date.now() + index).toISOString()
+    };
+  }
+
   function getDefaultXApiConfig(): XApiRuntimeConfig {
     return xApiConfigSchema.parse({
       xSearchApiCallLimit: options.config.xSearchApiCallLimit,
@@ -2008,8 +2357,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       runChainCount: options.config.runChainCount,
       staleKeywordUserMaxAgeDays: options.config.staleKeywordUserMaxAgeDays,
       staleKeywordUserStartIndex: options.config.staleKeywordUserStartIndex,
+      staleKeywordUserActionDelayMinSeconds: options.config.staleKeywordUserActionDelayMinSeconds,
+      staleKeywordUserActionDelayMaxSeconds: options.config.staleKeywordUserActionDelayMaxSeconds,
       staleKeywordUserAutoIgnoreAlert: options.config.staleKeywordUserAutoIgnoreAlert,
       staleKeywordUserMaxRetries: options.config.staleKeywordUserMaxRetries,
+      staleKeywordUserAutoRestartDelaySeconds: options.config.staleKeywordUserAutoRestartDelaySeconds,
       rawTimelineEnabled: options.config.rawTimelineEnabled,
       dockerX11ForwardEnabled: options.config.dockerX11ForwardEnabled,
       dockerX11Host: options.config.dockerX11Host,
@@ -2051,6 +2403,37 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   function getXApiConfig(): XApiRuntimeConfig {
     return settings.getXApiConfig(getDefaultXApiConfig());
+  }
+
+  async function handleXApiCreditsDepleted(error: unknown, context: Record<string, unknown> = {}): Promise<boolean> {
+    if (!looksLikeXApiCreditsDepleted(error)) {
+      return false;
+    }
+    const previousCreditUsd = getXApiConfig().xApiCreditUsd;
+    let settingsError: string | null = null;
+    try {
+      settings.patchXApiConfig({ xApiCreditUsd: 0 });
+    } catch (syncError) {
+      settingsError = syncError instanceof Error ? syncError.message : String(syncError);
+    }
+    let envSynced = true;
+    let envError: string | null = null;
+    try {
+      await env.update({ X_API_CREDIT_USD: "0" });
+    } catch (syncError) {
+      envSynced = false;
+      envError = syncError instanceof Error ? syncError.message : String(syncError);
+    }
+    await recordSession("prob", "x_api.credits_depleted", xApiCreditsDepletedMessage(), {
+      ...context,
+      previousCreditUsd,
+      xApiCreditUsd: 0,
+      settingsError,
+      envSynced,
+      envError,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return true;
   }
 
   function usesDockerVpnIsolation(config = getXApiConfig()): boolean {
@@ -2265,6 +2648,100 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return stopped;
   }
 
+  async function stopActiveWithoutApiRunForXApiMode(): Promise<RunRecord | null> {
+    const currentRun = runs.current();
+    if (!currentRun || !isWithoutApiRun(currentRun)) {
+      return null;
+    }
+
+    clearApiResumeTimer(currentRun.id);
+    runs.updateStats(currentRun.id, { currentKeyword: null });
+    const stopped = runs.stop(currentRun.id);
+    await stopWithoutApiWorkerAndWait("x_api_mode_enabled");
+    await recordSession("prob", "x_api_mode.without_api_run_stopped", "Search without API run stopped because X API mode was enabled", {
+      runId: stopped.id,
+      status: stopped.status
+    });
+    return stopped;
+  }
+
+  function stopWithoutApiStaleKeywordUserPruneForXApiMode(): { stopped: boolean; jobId: string | null; reason: string } {
+    const job = staleKeywordUserPruneJob;
+    if (!job || job.mode !== "without_api") {
+      return { stopped: false, jobId: null, reason: "no_without_api_cleanup" };
+    }
+    const report = readStaleKeywordUserPruneReport(job.id);
+    const status = report?.status ?? job.status;
+    if (status !== "running" && !job.autoRestartAt && !job.blockedByAlertId && !report?.blockedByAlertId) {
+      return { stopped: false, jobId: job.id, reason: "cleanup_not_active" };
+    }
+    stopStaleKeywordUserPruneJob(job, "x_api_mode_enabled");
+    void recordSession("prob", "x_api_mode.keyword_user_prune_stopped", "Browser-session Keyword users cleanup stopped because X API mode was enabled", {
+      jobId: job.id,
+      previousStatus: status,
+      autoRestartPending: Boolean(job.autoRestartAt),
+      blockedByAlertId: report?.blockedByAlertId ?? job.blockedByAlertId
+    });
+    return { stopped: true, jobId: job.id, reason: "x_api_mode_enabled" };
+  }
+
+  async function shutdownWithoutApiNetworkingForXApiMode(
+    previousConfig: XApiRuntimeConfig,
+    config: XApiRuntimeConfig
+  ): Promise<{
+    requested: boolean;
+    reason: string;
+    stoppedRun: boolean;
+    stoppedRunId: string | null;
+    staleKeywordUserPrune: { stopped: boolean; jobId: string | null; reason: string };
+    netnsCommands: { stop: OpenVpnStopResult };
+    openVpn: { stop: OpenVpnStopResult };
+    namespace: { teardown: NetnsTeardownResult };
+  }> {
+    const enteredXApiMode = config.xApiEnabled && !config.searchWithoutApiEnabled && (previousConfig.searchWithoutApiEnabled || !previousConfig.xApiEnabled);
+    const skippedStop = { requested: false, reason: "x_api_mode_not_entered", pids: [], processGroups: [], stillRunning: [], errors: [] };
+    const skippedTeardown = { requested: false, reason: "x_api_mode_not_entered", namespace: config.vpnNetnsName };
+    if (!enteredXApiMode) {
+      return {
+        requested: false,
+        reason: "x_api_mode_not_entered",
+        stoppedRun: false,
+        stoppedRunId: null,
+        staleKeywordUserPrune: { stopped: false, jobId: null, reason: "x_api_mode_not_entered" },
+        netnsCommands: { stop: skippedStop },
+        openVpn: { stop: skippedStop },
+        namespace: { teardown: skippedTeardown }
+      };
+    }
+
+    const stoppedRun = await stopActiveWithoutApiRunForXApiMode();
+    const staleKeywordUserPrune = stopWithoutApiStaleKeywordUserPruneForXApiMode();
+    const netnsCommandStop = await requestNetnsCommandStop();
+    const openVpnStop = await requestOpenVpnStop("x_api_mode_enabled");
+    const netnsTeardown = await requestNamespaceTeardownIfPresent(config.vpnNetnsName, openVpnStop);
+    await recordSession("prob", "x_api_mode.vpn_shutdown", "X API mode enabled; without-API VPN runtime shutdown requested", {
+      stoppedRun: Boolean(stoppedRun),
+      stoppedRunId: stoppedRun?.id ?? null,
+      staleKeywordUserPrune,
+      netnsCommandsStopRequested: netnsCommandStop.requested,
+      netnsCommandsStopReason: netnsCommandStop.reason,
+      openVpnStopRequested: openVpnStop.requested,
+      openVpnStopReason: openVpnStop.reason,
+      namespaceTeardownRequested: netnsTeardown.requested,
+      namespaceTeardownReason: netnsTeardown.reason
+    });
+    return {
+      requested: true,
+      reason: "x_api_mode_enabled",
+      stoppedRun: Boolean(stoppedRun),
+      stoppedRunId: stoppedRun?.id ?? null,
+      staleKeywordUserPrune,
+      netnsCommands: { stop: netnsCommandStop },
+      openVpn: { stop: openVpnStop },
+      namespace: { teardown: netnsTeardown }
+    };
+  }
+
   async function stopActiveRunForKeywordUserPrune(): Promise<RunRecord | null> {
     const currentRun = runs.current();
     if (!currentRun) {
@@ -2284,25 +2761,180 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return stopped;
   }
 
+  async function startStaleKeywordUserPruneFromAdmin(params: {
+    maxAgeDays: number;
+    actionDelayMinSeconds?: number;
+    actionDelayMaxSeconds?: number;
+    autoIgnoreAlert?: boolean;
+    maxRetries?: number;
+    autoRestartDelaySeconds?: number;
+    startIndex?: number;
+    modeOverride?: KeywordUserPruneMode;
+    restartCount?: number;
+    forceResumeStatePath?: string;
+    skipStartInProgressCheck?: boolean;
+  }): Promise<StartStaleKeywordUserPruneResult> {
+    await refreshStaleKeywordUserPruneJobFromReport();
+    recoverStaleKeywordUserPruneJobFromRuntime();
+    const currentStatus = staleKeywordUserPruneStatus();
+    if ((!params.skipStartInProgressCheck && staleKeywordUserPruneStartInProgress) || currentStatus.running) {
+      return {
+        ok: false,
+        code: 409,
+        reason: "job_running",
+        payload: {
+          error: "A stale keyword user pruning job is already running.",
+          job: currentStatus
+        }
+      };
+    }
+
+    const runtimeConfig = getXApiConfig();
+    const mode: KeywordUserPruneMode = params.modeOverride ?? (runtimeConfig.searchWithoutApiEnabled ? "without_api" : "x_api");
+    let startCheck: WithoutApiRunStartCheck | null = null;
+    if (mode === "without_api") {
+      startCheck = await checkWithoutApiRunStart();
+      if (!startCheck.ok) {
+        return {
+          ok: false,
+          code: startCheck.code,
+          reason: startCheck.reason,
+          payload: startCheck.payload
+        };
+      }
+    } else if (!runtimeConfig.xApiEnabled) {
+      return {
+        ok: false,
+        code: 400,
+        reason: "x_api_disabled",
+        payload: { error: "X API search is disabled." }
+      };
+    } else if (!options.config.x.bearerToken) {
+      return {
+        ok: false,
+        code: 400,
+        reason: "missing_bearer_token",
+        payload: { error: "X_BEARER_TOKEN is required to run inactive users check in X API mode." }
+      };
+    }
+    if (mode === "x_api") {
+      stopWithoutApiStaleKeywordUserPruneForXApiMode();
+    }
+
+    await refreshStaleKeywordUserPruneJobFromReport();
+    recoverStaleKeywordUserPruneJobFromRuntime();
+    const statusAfterStartCheck = staleKeywordUserPruneStatus();
+    if (statusAfterStartCheck.running) {
+      return {
+        ok: false,
+        code: 409,
+        reason: "job_running",
+        payload: {
+          error: "A stale keyword user pruning job is already running.",
+          job: statusAfterStartCheck
+        }
+      };
+    }
+
+    const stoppedRun = await stopActiveRunForKeywordUserPrune();
+    const actionDelayMinSeconds = Math.max(
+      0,
+      Math.floor(params.actionDelayMinSeconds ?? runtimeConfig.staleKeywordUserActionDelayMinSeconds)
+    );
+    const actionDelayMaxSeconds = Math.max(
+      actionDelayMinSeconds,
+      Math.floor(params.actionDelayMaxSeconds ?? runtimeConfig.staleKeywordUserActionDelayMaxSeconds)
+    );
+    const autoIgnoreAlert = params.autoIgnoreAlert ?? runtimeConfig.staleKeywordUserAutoIgnoreAlert;
+    const maxRetries = params.maxRetries ?? runtimeConfig.staleKeywordUserMaxRetries;
+    const autoRestartDelaySeconds = Math.max(
+      0,
+      Math.floor(params.autoRestartDelaySeconds ?? runtimeConfig.staleKeywordUserAutoRestartDelaySeconds)
+    );
+    const startIndex = params.startIndex ?? runtimeConfig.staleKeywordUserStartIndex;
+    const resumeStatePath =
+      params.forceResumeStatePath !== undefined
+        ? params.forceResumeStatePath
+        : startIndex === 1
+          ? staleKeywordUserPruneResumeStatePathForStart(params.maxAgeDays)
+          : undefined;
+    const restartCount = params.restartCount ?? 0;
+    const job =
+      mode === "without_api" && usesDockerVpnIsolation(runtimeConfig)
+        ? queueDockerStaleKeywordUserPruneJob(
+            mode,
+            params.maxAgeDays,
+            actionDelayMinSeconds,
+            actionDelayMaxSeconds,
+            stoppedRun,
+            autoIgnoreAlert,
+            maxRetries,
+            autoRestartDelaySeconds,
+            startIndex,
+            restartCount,
+            resumeStatePath
+          )
+        : startStaleKeywordUserPruneJob(
+            mode,
+            params.maxAgeDays,
+            actionDelayMinSeconds,
+            actionDelayMaxSeconds,
+            runtimeConfig,
+            stoppedRun,
+            autoIgnoreAlert,
+            maxRetries,
+            autoRestartDelaySeconds,
+            startIndex,
+            restartCount,
+            resumeStatePath
+          );
+    return {
+      ok: true,
+      job,
+      startCheck,
+      resumedPreviousFailedJob: Boolean(resumeStatePath)
+    };
+  }
+
   function startStaleKeywordUserPruneJob(
     mode: KeywordUserPruneMode,
     maxAgeDays: number,
+    actionDelayMinSeconds: number,
+    actionDelayMaxSeconds: number,
     runtimeConfig: XApiRuntimeConfig,
     stoppedRun: RunRecord | null,
     autoIgnoreAlert: boolean,
     maxRetries: number,
+    autoRestartDelaySeconds: number,
     startIndex: number,
     restartCount = 0,
     resumeStatePath?: string
   ): StaleKeywordUserPruneJob {
-    const job = createStaleKeywordUserPruneJob(mode, maxAgeDays, stoppedRun, autoIgnoreAlert, maxRetries, startIndex, restartCount, resumeStatePath);
+    const job = createStaleKeywordUserPruneJob(
+      mode,
+      maxAgeDays,
+      actionDelayMinSeconds,
+      actionDelayMaxSeconds,
+      stoppedRun,
+      autoIgnoreAlert,
+      maxRetries,
+      autoRestartDelaySeconds,
+      startIndex,
+      restartCount,
+      resumeStatePath
+    );
     const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
       ...xApiConfigToEnvValues(runtimeConfig),
-      CURRENT_SESSION_FILE: options.currentSessionFilePath ?? options.config.currentSessionFile,
-      VPN_NETNS_AUTOSTART: "true",
-      VPN_NETNS_AUTOSTART_DEFAULT: "yes"
+      CURRENT_SESSION_FILE: options.currentSessionFilePath ?? options.config.currentSessionFile
     };
+    if (mode === "without_api") {
+      childEnv.VPN_NETNS_AUTOSTART = "true";
+      childEnv.VPN_NETNS_AUTOSTART_DEFAULT = "yes";
+    } else {
+      delete childEnv.VPN_NETNS_AUTOSTART;
+      delete childEnv.VPN_NETNS_AUTOSTART_DEFAULT;
+    }
     const databasePath = databasePathForChild(options.database);
     if (databasePath) {
       childEnv.DATABASE_URL = databasePath;
@@ -2321,6 +2953,10 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
             job.id,
             "--start-index",
             String(job.startIndex),
+            "--action-delay-min-seconds",
+            String(job.actionDelayMinSeconds),
+            "--action-delay-max-seconds",
+            String(job.actionDelayMaxSeconds),
             "--resume-state-path",
             job.resumeStatePath,
             "--mode",
@@ -2336,6 +2972,10 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
             job.id,
             "--start-index",
             String(job.startIndex),
+            "--action-delay-min-seconds",
+            String(job.actionDelayMinSeconds),
+            "--action-delay-max-seconds",
+            String(job.actionDelayMaxSeconds),
             "--resume-state-path",
             job.resumeStatePath,
             "--mode",
@@ -2385,6 +3025,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       } else if (code !== 0) {
         job.error = `Worker exited with code ${code ?? "null"}${signal ? ` and signal ${signal}` : ""}.`;
       }
+      resetStaleKeywordUserRetryCountAfterProgress(job, report, "job_close");
       void recordSession(
         job.status === "failed" ? "prob" : "info",
         job.status === "stopped" ? "keyword_user_prune.job_stopped" : code === 0 ? "keyword_user_prune.job_completed" : "keyword_user_prune.job_failed",
@@ -2416,6 +3057,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     job: StaleKeywordUserPruneJob,
     reason: string
   ): { stopPath: string; removedQueuedRequest: boolean; childPid: number | null } {
+    clearStaleKeywordUserPruneAutoRestart(job);
     const stoppedAt = new Date().toISOString();
     const stopPath = staleKeywordUserPruneStopPath(job.id);
     fsSync.mkdirSync(path.dirname(stopPath), { recursive: true });
@@ -2444,17 +3086,159 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return { stopPath, removedQueuedRequest, childPid };
   }
 
+  function resetStaleKeywordUserPruneProgress(): {
+    clearedJobId: string | null;
+    autoRestartCancelled: boolean;
+    deletedFiles: string[];
+  } {
+    const job = staleKeywordUserPruneJob;
+    let autoRestartCancelled = false;
+    if (job?.autoRestartAt) {
+      clearStaleKeywordUserPruneAutoRestart(job);
+      autoRestartCancelled = true;
+    }
+
+    const deletedFiles: string[] = [];
+    const deleteFile = (filePath: string | null | undefined) => {
+      if (!filePath) {
+        return;
+      }
+      try {
+        const stat = fsSync.statSync(filePath);
+        if (!stat.isFile()) {
+          return;
+        }
+        fsSync.unlinkSync(filePath);
+        deletedFiles.push(filePath);
+      } catch {
+        return;
+      }
+    };
+    const deleteMatchingFiles = (dir: string, matcher: RegExp) => {
+      let filenames: string[];
+      try {
+        filenames = fsSync.readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const filename of filenames) {
+        if (matcher.test(filename)) {
+          deleteFile(path.join(dir, filename));
+        }
+      }
+    };
+
+    deleteFile(job?.reportPath);
+    deleteFile(job?.resumeStatePath);
+    if (job) {
+      deleteFile(staleKeywordUserPruneRequestPath(job.id));
+      deleteFile(staleKeywordUserPruneRunningRequestPath(job.id));
+      deleteFile(staleKeywordUserPruneControlPath(job.id));
+      deleteFile(staleKeywordUserPruneStopPath(job.id));
+    }
+
+    const runtimeDir = path.join(process.cwd(), "runtime");
+    deleteMatchingFiles(runtimeDir, /^stale-keyword-user-prune-(?:resume-)?stale-users-.+\.json$/);
+    deleteMatchingFiles(staleKeywordUserPruneRequestDir(), /^stale-users-.+\.(?:json|running)$/);
+    deleteMatchingFiles(path.join(runtimeDir, "stale-keyword-user-prune-controls"), /^stale-users-.+\.json$/);
+    deleteMatchingFiles(path.join(runtimeDir, "stale-keyword-user-prune-stops"), /^stale-users-.+\.stop$/);
+
+    const clearedJobId = job?.id ?? null;
+    staleKeywordUserPruneJob = null;
+    staleKeywordUserPruneStartInProgress = false;
+    return { clearedJobId, autoRestartCancelled, deletedFiles };
+  }
+
+  function updateStaleKeywordUserPruneSpeed(
+    job: StaleKeywordUserPruneJob,
+    actionDelayMinSeconds: number,
+    actionDelayMaxSeconds: number
+  ): { controlPath: string; updatedRequestPaths: string[]; reportUpdated: boolean } {
+    job.actionDelayMinSeconds = actionDelayMinSeconds;
+    job.actionDelayMaxSeconds = actionDelayMaxSeconds;
+
+    let reportUpdated = false;
+    const report = readStaleKeywordUserPruneReport(job.id);
+    if (report) {
+      report.actionDelayMinSeconds = actionDelayMinSeconds;
+      report.actionDelayMaxSeconds = actionDelayMaxSeconds;
+      writeStaleKeywordUserPruneReport(report);
+      reportUpdated = true;
+    }
+
+    const updatedRequestPaths = patchStaleKeywordUserPruneRequestSpeed(job.id, actionDelayMinSeconds, actionDelayMaxSeconds);
+    const controlPath = writeStaleKeywordUserPruneControl(job.id, actionDelayMinSeconds, actionDelayMaxSeconds);
+    return { controlPath, updatedRequestPaths, reportUpdated };
+  }
+
+  function patchStaleKeywordUserPruneRequestSpeed(
+    jobId: string,
+    actionDelayMinSeconds: number,
+    actionDelayMaxSeconds: number
+  ): string[] {
+    const candidatePaths = [staleKeywordUserPruneRequestPath(jobId), staleKeywordUserPruneRunningRequestPath(jobId)];
+    const updatedPaths: string[] = [];
+    for (const requestPath of candidatePaths) {
+      try {
+        const parsed = JSON.parse(fsSync.readFileSync(requestPath, "utf8")) as Record<string, unknown>;
+        parsed.actionDelayMinSeconds = actionDelayMinSeconds;
+        parsed.actionDelayMaxSeconds = actionDelayMaxSeconds;
+        parsed.updatedAt = new Date().toISOString();
+        fsSync.writeFileSync(requestPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+        updatedPaths.push(requestPath);
+      } catch {
+        // Ignore missing queue markers; local runs do not use them.
+      }
+    }
+    return updatedPaths;
+  }
+
+  function writeStaleKeywordUserPruneControl(jobId: string, actionDelayMinSeconds: number, actionDelayMaxSeconds: number): string {
+    const controlPath = staleKeywordUserPruneControlPath(jobId);
+    fsSync.mkdirSync(path.dirname(controlPath), { recursive: true });
+    fsSync.writeFileSync(
+      controlPath,
+      `${JSON.stringify(
+        {
+          jobId,
+          actionDelayMinSeconds,
+          actionDelayMaxSeconds,
+          updatedAt: new Date().toISOString()
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+    return controlPath;
+  }
+
   function queueDockerStaleKeywordUserPruneJob(
     mode: KeywordUserPruneMode,
     maxAgeDays: number,
+    actionDelayMinSeconds: number,
+    actionDelayMaxSeconds: number,
     stoppedRun: RunRecord | null,
     autoIgnoreAlert: boolean,
     maxRetries: number,
+    autoRestartDelaySeconds: number,
     startIndex: number,
     restartCount = 0,
     resumeStatePath?: string
   ): StaleKeywordUserPruneJob {
-    const job = createStaleKeywordUserPruneJob(mode, maxAgeDays, stoppedRun, autoIgnoreAlert, maxRetries, startIndex, restartCount, resumeStatePath);
+    const job = createStaleKeywordUserPruneJob(
+      mode,
+      maxAgeDays,
+      actionDelayMinSeconds,
+      actionDelayMaxSeconds,
+      stoppedRun,
+      autoIgnoreAlert,
+      maxRetries,
+      autoRestartDelaySeconds,
+      startIndex,
+      restartCount,
+      resumeStatePath
+    );
     fsSync.mkdirSync(staleKeywordUserPruneRequestDir(), { recursive: true });
     fsSync.writeFileSync(
       staleKeywordUserPruneRequestPath(job.id),
@@ -2463,8 +3247,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
           mode,
           jobId: job.id,
           maxAgeDays,
+          actionDelayMinSeconds,
+          actionDelayMaxSeconds,
           autoIgnoreAlert,
           maxRetries,
+          autoRestartDelaySeconds,
           startIndex,
           restartCount,
           requestedAt: job.startedAt,
@@ -2481,8 +3268,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       jobId: job.id,
       mode: job.mode,
       maxAgeDays,
+      actionDelayMinSeconds,
+      actionDelayMaxSeconds,
       autoIgnoreAlert,
       maxRetries,
+      autoRestartDelaySeconds,
       startIndex,
       restartCount,
       requestPath: staleKeywordUserPruneRequestPath(job.id),
@@ -2495,9 +3285,12 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   function createStaleKeywordUserPruneJob(
     mode: KeywordUserPruneMode,
     maxAgeDays: number,
+    actionDelayMinSeconds: number,
+    actionDelayMaxSeconds: number,
     stoppedRun: RunRecord | null,
     autoIgnoreAlert: boolean,
     maxRetries: number,
+    autoRestartDelaySeconds: number,
     startIndex: number,
     restartCount = 0,
     resumeStatePath?: string
@@ -2508,12 +3301,18 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       status: "running",
       mode,
       maxAgeDays,
+      actionDelayMinSeconds,
+      actionDelayMaxSeconds,
       autoIgnoreAlert,
       maxRetries,
+      autoRestartDelaySeconds,
       startIndex,
       restartCount,
       blockedByAlertId: null,
       restartedAfterAlertId: null,
+      autoRestartScheduledAt: null,
+      autoRestartAt: null,
+      autoRestartSource: null,
       startedAt: new Date().toISOString(),
       completedAt: null,
       reportPath: staleKeywordUserPruneReportPath(id),
@@ -2535,6 +3334,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return { running: false, job: null, staleUsers, estimates: staleKeywordUserPruneFallbackEstimates() };
     }
     const report = readStaleKeywordUserPruneReport(job.id);
+    resetStaleKeywordUserRetryCountAfterProgress(job, report, "status");
     const status = report?.status ?? job.status;
     const estimates = staleKeywordUserPruneEstimates(job, report);
     return {
@@ -2546,8 +3346,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         status,
         mode: report?.mode ?? job.mode,
         maxAgeDays: job.maxAgeDays,
+        actionDelayMinSeconds: report?.actionDelayMinSeconds ?? job.actionDelayMinSeconds,
+        actionDelayMaxSeconds: report?.actionDelayMaxSeconds ?? job.actionDelayMaxSeconds,
         autoIgnoreAlert: job.autoIgnoreAlert,
         maxRetries: job.maxRetries,
+        autoRestartDelaySeconds: job.autoRestartDelaySeconds,
         startIndex: report?.startIndex ?? job.startIndex,
         skippedBeforeStartIndex: report?.skippedBeforeStartIndex ?? Math.max(0, job.startIndex - 1),
         estimatedCheckedUsers: estimates.checkedUsers,
@@ -2555,6 +3358,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         restartCount: job.restartCount,
         blockedByAlertId: report?.blockedByAlertId ?? job.blockedByAlertId,
         restartedAfterAlertId: job.restartedAfterAlertId,
+        autoRestartScheduledAt: job.autoRestartScheduledAt,
+        autoRestartAt: job.autoRestartAt,
+        autoRestartSource: job.autoRestartSource,
         startedAt: job.startedAt,
         completedAt: report?.completedAt ?? job.completedAt,
         reportPath: job.reportPath,
@@ -2645,8 +3451,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         mode?: unknown;
         jobId?: unknown;
         maxAgeDays?: unknown;
+        actionDelayMinSeconds?: unknown;
+        actionDelayMaxSeconds?: unknown;
         autoIgnoreAlert?: unknown;
         maxRetries?: unknown;
+        autoRestartDelaySeconds?: unknown;
         startIndex?: unknown;
         restartCount?: unknown;
         requestedAt?: unknown;
@@ -2665,15 +3474,34 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         status: "running",
         mode: parsed.mode === "x_api" ? "x_api" : "without_api",
         maxAgeDays,
+        actionDelayMinSeconds:
+          Number.isFinite(Number(parsed.actionDelayMinSeconds)) && Number(parsed.actionDelayMinSeconds) >= 0
+            ? Number(parsed.actionDelayMinSeconds)
+            : runtimeConfig.staleKeywordUserActionDelayMinSeconds,
+        actionDelayMaxSeconds: Math.max(
+          Number.isFinite(Number(parsed.actionDelayMinSeconds)) && Number(parsed.actionDelayMinSeconds) >= 0
+            ? Number(parsed.actionDelayMinSeconds)
+            : runtimeConfig.staleKeywordUserActionDelayMinSeconds,
+          Number.isFinite(Number(parsed.actionDelayMaxSeconds)) && Number(parsed.actionDelayMaxSeconds) >= 0
+            ? Number(parsed.actionDelayMaxSeconds)
+            : runtimeConfig.staleKeywordUserActionDelayMaxSeconds
+        ),
         autoIgnoreAlert: typeof parsed.autoIgnoreAlert === "boolean" ? parsed.autoIgnoreAlert : runtimeConfig.staleKeywordUserAutoIgnoreAlert,
         maxRetries:
           Number.isFinite(Number(parsed.maxRetries)) && Number(parsed.maxRetries) >= 0
             ? Number(parsed.maxRetries)
             : runtimeConfig.staleKeywordUserMaxRetries,
+        autoRestartDelaySeconds:
+          Number.isFinite(Number(parsed.autoRestartDelaySeconds)) && Number(parsed.autoRestartDelaySeconds) >= 0
+            ? Number(parsed.autoRestartDelaySeconds)
+            : runtimeConfig.staleKeywordUserAutoRestartDelaySeconds,
         startIndex: Number.isFinite(Number(parsed.startIndex)) && Number(parsed.startIndex) > 0 ? Number(parsed.startIndex) : 1,
         restartCount: Number.isFinite(Number(parsed.restartCount)) && Number(parsed.restartCount) >= 0 ? Number(parsed.restartCount) : 0,
         blockedByAlertId: null,
         restartedAfterAlertId: null,
+        autoRestartScheduledAt: null,
+        autoRestartAt: null,
+        autoRestartSource: null,
         startedAt: typeof parsed.requestedAt === "string" && parsed.requestedAt ? parsed.requestedAt : stat.mtime.toISOString(),
         completedAt: null,
         reportPath: typeof parsed.reportPath === "string" && parsed.reportPath ? parsed.reportPath : staleKeywordUserPruneReportPath(id),
@@ -2702,12 +3530,21 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       status: "running",
       mode: report.mode === "x_api" ? "x_api" : "without_api",
       maxAgeDays: report.maxAgeDays,
+      actionDelayMinSeconds: Math.max(0, Math.floor(report.actionDelayMinSeconds ?? runtimeConfig.staleKeywordUserActionDelayMinSeconds)),
+      actionDelayMaxSeconds: Math.max(
+        Math.max(0, Math.floor(report.actionDelayMinSeconds ?? runtimeConfig.staleKeywordUserActionDelayMinSeconds)),
+        Math.floor(report.actionDelayMaxSeconds ?? runtimeConfig.staleKeywordUserActionDelayMaxSeconds)
+      ),
       autoIgnoreAlert: runtimeConfig.staleKeywordUserAutoIgnoreAlert,
       maxRetries: runtimeConfig.staleKeywordUserMaxRetries,
+      autoRestartDelaySeconds: runtimeConfig.staleKeywordUserAutoRestartDelaySeconds,
       startIndex: report.startIndex,
       restartCount: 0,
       blockedByAlertId: typeof report.blockedByAlertId === "number" ? report.blockedByAlertId : null,
       restartedAfterAlertId: null,
+      autoRestartScheduledAt: null,
+      autoRestartAt: null,
+      autoRestartSource: null,
       startedAt: report.startedAt,
       completedAt: null,
       reportPath,
@@ -2787,6 +3624,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     if (effectiveBlockedAlertId) {
       job.blockedByAlertId = effectiveBlockedAlertId;
     }
+    resetStaleKeywordUserRetryCountAfterProgress(job, report, "report_refresh");
 
     if (wasRunning) {
       const eventType =
@@ -2847,6 +3685,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       mode: report?.mode ?? job.mode,
       status: "stopped",
       maxAgeDays: report?.maxAgeDays ?? job.maxAgeDays,
+      actionDelayMinSeconds: report?.actionDelayMinSeconds ?? job.actionDelayMinSeconds,
+      actionDelayMaxSeconds: report?.actionDelayMaxSeconds ?? job.actionDelayMaxSeconds,
       startedAt: report?.startedAt ?? job.startedAt,
       completedAt: stoppedAt,
       account: report?.account ?? null,
@@ -2995,6 +3835,62 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
   }
 
+  function resetStaleKeywordUserRetryCountAfterProgress(
+    job: StaleKeywordUserPruneJob,
+    report: StaleKeywordUserPruneReport | null,
+    source: string
+  ): boolean {
+    if (job.mode !== "without_api" || job.restartCount <= 0 || !report || !staleKeywordUserPruneReportHasUserProgress(report)) {
+      return false;
+    }
+    const previousRestartCount = job.restartCount;
+    job.restartCount = 0;
+    patchStaleKeywordUserPruneRequestRestartCount(job.id, 0);
+    void recordSession("info", "keyword_user_prune.retry_count_reset", "Stale keyword user pruning alert retry count reset after progress", {
+      jobId: job.id,
+      previousRestartCount,
+      restartCount: job.restartCount,
+      source,
+      reportStatus: report.status,
+      processedCandidates: report.processedCandidates,
+      removedUsers: report.removedUsers?.length ?? 0,
+      keptUsers: report.keptUsers?.length ?? 0,
+      skippedUsers: report.skippedUsers?.length ?? 0,
+      deletedUsers: report.deletedUsers?.length ?? 0
+    });
+    return true;
+  }
+
+  function staleKeywordUserPruneReportHasUserProgress(report: StaleKeywordUserPruneReport): boolean {
+    const processedCandidates = Math.max(0, Number(report.processedCandidates ?? 0));
+    if (processedCandidates > 0) {
+      return true;
+    }
+    const decisions =
+      (report.removedUsers?.length ?? 0) +
+      (report.deletedUsers?.length ?? 0) +
+      (report.keptUsers?.length ?? 0) +
+      (report.skippedUsers?.filter((user) => user.reason !== "already_in_stale_keyword_user").length ?? 0);
+    return decisions > 0;
+  }
+
+  function patchStaleKeywordUserPruneRequestRestartCount(jobId: string, restartCount: number): string[] {
+    const candidatePaths = [staleKeywordUserPruneRequestPath(jobId), staleKeywordUserPruneRunningRequestPath(jobId)];
+    const updatedPaths: string[] = [];
+    for (const requestPath of candidatePaths) {
+      try {
+        const parsed = JSON.parse(fsSync.readFileSync(requestPath, "utf8")) as Record<string, unknown>;
+        parsed.restartCount = restartCount;
+        parsed.updatedAt = new Date().toISOString();
+        fsSync.writeFileSync(requestPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+        updatedPaths.push(requestPath);
+      } catch {
+        // Ignore missing queue markers; local runs do not use them.
+      }
+    }
+    return updatedPaths;
+  }
+
   function staleKeywordUserPruneBlockedAlertId(
     job: StaleKeywordUserPruneJob,
     report: StaleKeywordUserPruneReport | null
@@ -3053,10 +3949,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       jobId: job.id,
       alertId,
       maxAgeDays: job.maxAgeDays,
+      actionDelayMinSeconds: job.actionDelayMinSeconds,
+      actionDelayMaxSeconds: job.actionDelayMaxSeconds,
       autoIgnoreAlert: job.autoIgnoreAlert,
       maxRetries: job.maxRetries,
+      autoRestartDelaySeconds: job.autoRestartDelaySeconds,
       restartCount: job.restartCount,
-      blockedKeyword: report?.blockedKeyword ?? null
+      blockedKeyword: report?.blockedKeyword ?? null,
+      restartStrategy: "full_restart_same_resume_state"
     });
     if (!job.autoIgnoreAlert) {
       return;
@@ -3088,6 +3988,41 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     await maybeRestartStaleKeywordUserPruneAfterAlert(closedAlert, "auto_ignored");
   }
 
+  function prepareStaleKeywordUserPruneJobForRestart(
+    job: StaleKeywordUserPruneJob,
+    report: StaleKeywordUserPruneReport | null,
+    alert: XSessionAlertRecord,
+    source: "resolved" | "ignored" | "auto_ignored"
+  ): void {
+    const restartedAt = new Date().toISOString();
+    const restartReport = stoppedStaleKeywordUserPruneReport(job, report, restartedAt, `restart_after_alert:${source}:${alert.id}`);
+    restartReport.error = `Restarting after X session alert ${alert.id} was ${source}.`;
+    writeStaleKeywordUserPruneReport(restartReport);
+    job.status = "stopped";
+    job.completedAt = restartedAt;
+    job.error = restartReport.error;
+    job.blockedByAlertId = null;
+    job.exitCode = 0;
+    job.signal = null;
+  }
+
+  function staleKeywordUserPruneAlertRestartDelayMs(job: StaleKeywordUserPruneJob): number {
+    if (process.env.VITEST === "true" || process.env.NODE_ENV === "test") {
+      return 0;
+    }
+    return Math.max(0, Math.floor(job.autoRestartDelaySeconds)) * 1000;
+  }
+
+  function clearStaleKeywordUserPruneAutoRestart(job: StaleKeywordUserPruneJob): void {
+    if (staleKeywordUserPruneRestartTimer) {
+      clearTimeout(staleKeywordUserPruneRestartTimer);
+      staleKeywordUserPruneRestartTimer = null;
+    }
+    job.autoRestartScheduledAt = null;
+    job.autoRestartAt = null;
+    job.autoRestartSource = null;
+  }
+
   async function maybeRestartStaleKeywordUserPruneAfterAlert(
     alert: XSessionAlertRecord,
     source: "resolved" | "ignored" | "auto_ignored"
@@ -3105,6 +4040,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     if (effectiveStatus === "running" || blockedAlertId !== alert.id || job.restartedAfterAlertId === alert.id) {
       return null;
     }
+    if (job.autoRestartAt && job.autoRestartSource) {
+      return null;
+    }
     if (job.restartCount >= job.maxRetries) {
       await recordSession("prob", "keyword_user_prune.auto_restart_limit", "Stale keyword user pruning was not restarted because the retry limit was reached", {
         jobId: job.id,
@@ -3114,44 +4052,130 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       });
       return null;
     }
-    if (runs.current()) {
-      await recordSession("prob", "keyword_user_prune.auto_restart_skipped", "Stale keyword user pruning was not restarted because a run is active", {
+    const restartDelayMs = staleKeywordUserPruneAlertRestartDelayMs(job);
+    const scheduleRestartAt = (delayMs: number) => {
+      const scheduledAtMs = Date.now();
+      job.autoRestartScheduledAt = new Date(scheduledAtMs).toISOString();
+      job.autoRestartAt = new Date(scheduledAtMs + delayMs).toISOString();
+      job.autoRestartSource = source;
+    };
+    if (restartDelayMs > 0) {
+      scheduleRestartAt(restartDelayMs);
+      await recordSession("info", "keyword_user_prune.auto_restart_wait", "Waiting before restarting stale keyword user pruning after X session alert", {
+        jobId: job.id,
+        alertId: alert.id,
+        source,
+        restartDelayMs,
+        autoRestartDelaySeconds: job.autoRestartDelaySeconds
+      });
+      if (staleKeywordUserPruneRestartTimer) {
+        clearTimeout(staleKeywordUserPruneRestartTimer);
+      }
+      staleKeywordUserPruneRestartTimer = setTimeout(() => {
+        staleKeywordUserPruneRestartTimer = null;
+        void performStaleKeywordUserPruneAutoRestart(alert, source, job.id).catch((error) => {
+          void recordSession("prob", "keyword_user_prune.auto_restart_failed", "Stale keyword user pruning auto-restart failed", {
+            jobId: job.id,
+            alertId: alert.id,
+            source,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
+      }, restartDelayMs);
+      return null;
+    }
+    scheduleRestartAt(0);
+    return performStaleKeywordUserPruneAutoRestart(alert, source, job.id);
+  }
+
+  async function performStaleKeywordUserPruneAutoRestart(
+    alert: XSessionAlertRecord,
+    source: "resolved" | "ignored" | "auto_ignored",
+    expectedJobId: string
+  ): Promise<StaleKeywordUserPruneJob | null> {
+    const job = staleKeywordUserPruneJob;
+    if (!job || job.id !== expectedJobId) {
+      await recordSession("prob", "keyword_user_prune.auto_restart_aborted", "Auto-restart was aborted because the stale keyword user pruning job changed before restart", {
+        expectedJobId,
+        currentJobId: job?.id ?? null,
+        alertId: alert.id,
+        source
+      });
+      return null;
+    }
+    const report = readStaleKeywordUserPruneReport(job.id);
+    const effectiveStatus = report?.status ?? job.status;
+    const blockedAlertId = staleKeywordUserPruneBlockedAlertId(job, report);
+    if (staleKeywordUserPruneJob !== job) {
+      await recordSession("prob", "keyword_user_prune.auto_restart_aborted", "Auto-restart was aborted because the stale keyword user pruning job changed during the wait window", {
         jobId: job.id,
         alertId: alert.id,
         source
       });
       return null;
     }
-    const runtimeConfig = getXApiConfig();
-    const startCheck = await checkWithoutApiRunStart();
-    if (!startCheck.ok) {
-      await recordSession("prob", "keyword_user_prune.auto_restart_blocked", "Stale keyword user pruning could not restart after X session alert was closed", {
+    if (effectiveStatus === "running" || blockedAlertId !== alert.id || job.restartedAfterAlertId === alert.id) {
+      clearStaleKeywordUserPruneAutoRestart(job);
+      return null;
+    }
+    if (job.restartCount >= job.maxRetries) {
+      clearStaleKeywordUserPruneAutoRestart(job);
+      await recordSession("prob", "keyword_user_prune.auto_restart_limit", "Stale keyword user pruning was not restarted because the retry limit was reached", {
         jobId: job.id,
         alertId: alert.id,
-        source,
-        reason: startCheck.reason,
-        error: startCheck.payload.error
+        restartCount: job.restartCount,
+        maxRestarts: job.maxRetries
       });
       return null;
     }
-
     job.restartedAfterAlertId = alert.id;
+    const restartEstimate = staleKeywordUserPruneEstimates(job, report);
+    prepareStaleKeywordUserPruneJobForRestart(job, report, alert, source);
     const nextRestartCount = job.restartCount + 1;
-    const restarted = usesDockerVpnIsolation(runtimeConfig)
-      ? queueDockerStaleKeywordUserPruneJob(job.mode, job.maxAgeDays, null, job.autoIgnoreAlert, job.maxRetries, job.startIndex, nextRestartCount, job.resumeStatePath)
-      : startStaleKeywordUserPruneJob(job.mode, job.maxAgeDays, runtimeConfig, null, job.autoIgnoreAlert, job.maxRetries, job.startIndex, nextRestartCount, job.resumeStatePath);
+    const restartStartIndex = Math.max(1, restartEstimate.suggestedStartIndex);
+    const restartedResult = await startStaleKeywordUserPruneFromAdmin({
+      maxAgeDays: job.maxAgeDays,
+      actionDelayMinSeconds: job.actionDelayMinSeconds,
+      actionDelayMaxSeconds: job.actionDelayMaxSeconds,
+      autoIgnoreAlert: job.autoIgnoreAlert,
+      maxRetries: job.maxRetries,
+      autoRestartDelaySeconds: job.autoRestartDelaySeconds,
+      startIndex: restartStartIndex,
+      modeOverride: job.mode,
+      restartCount: nextRestartCount,
+      forceResumeStatePath: restartStartIndex === 1 ? job.resumeStatePath : undefined
+    });
+    if (!restartedResult.ok) {
+      clearStaleKeywordUserPruneAutoRestart(job);
+      await recordSession("prob", "keyword_user_prune.auto_restart_blocked", "Stale keyword user pruning could not be restarted through the same path as Start after X session alert was closed", {
+        jobId: job.id,
+        alertId: alert.id,
+        source,
+        reason: restartedResult.reason,
+        error: restartedResult.payload.error,
+        startIndex: restartStartIndex
+      });
+      return null;
+    }
+    clearStaleKeywordUserPruneAutoRestart(job);
+    const restarted = restartedResult.job;
     await recordSession("info", "keyword_user_prune.auto_restarted", "Stale keyword user pruning restarted after X session alert was closed", {
       previousJobId: job.id,
       jobId: restarted.id,
       alertId: alert.id,
       source,
       maxAgeDays: restarted.maxAgeDays,
+      actionDelayMinSeconds: restarted.actionDelayMinSeconds,
+      actionDelayMaxSeconds: restarted.actionDelayMaxSeconds,
       autoIgnoreAlert: restarted.autoIgnoreAlert,
       maxRetries: restarted.maxRetries,
+      autoRestartDelaySeconds: restarted.autoRestartDelaySeconds,
       restartCount: restarted.restartCount,
+      startIndex: restarted.startIndex,
+      suggestedStartIndex: restartEstimate.suggestedStartIndex,
       resumeStatePath: restarted.resumeStatePath,
-      accountId: startCheck.account.id,
-      xIdentifier: startCheck.account.xIdentifier
+      accountId: restartedResult.startCheck?.ok ? restartedResult.startCheck.account.id : null,
+      xIdentifier: restartedResult.startCheck?.ok ? restartedResult.startCheck.account.xIdentifier : null
     });
     return restarted;
   }
@@ -3187,6 +4211,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   function staleKeywordUserPruneRequestPath(jobId: string): string {
     return path.join(staleKeywordUserPruneRequestDir(), `${safeJobPathSegment(jobId)}.json`);
+  }
+
+  function staleKeywordUserPruneRunningRequestPath(jobId: string): string {
+    return path.join(staleKeywordUserPruneRequestDir(), `${safeJobPathSegment(jobId)}.running`);
+  }
+
+  function staleKeywordUserPruneControlPath(jobId: string): string {
+    return path.join(process.cwd(), "runtime", "stale-keyword-user-prune-controls", `${safeJobPathSegment(jobId)}.json`);
   }
 
   function staleKeywordUserPruneStopPath(jobId: string): string {
@@ -3903,6 +4935,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         }
       } catch (error) {
         runs.updateStats(runId, { currentKeyword: null });
+        if (await handleXApiCreditsDepleted(error, { action: "search", runId, query, keywordGroup })) {
+          runs.pause(runId);
+          await runRssFallback(runId);
+          return;
+        }
         if (error instanceof XBudgetExceededError) {
           runs.pause(runId);
           await recordSession("prob", "x.budget.reached", error.message, {
@@ -5580,8 +6617,11 @@ type XApiEnvKey =
   | "RUN_CHAIN_COUNT"
   | "STALE_KEYWORD_USER_MAX_AGE_DAYS"
   | "STALE_KEYWORD_USER_START_INDEX"
+  | "STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS"
+  | "STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS"
   | "STALE_KEYWORD_USER_AUTO_IGNORE_ALERT"
   | "STALE_KEYWORD_USER_MAX_RETRIES"
+  | "STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS"
   | "RAW_TIMELINE_ENABLED"
   | "DOCKER_X11_FORWARD_ENABLED"
   | "DOCKER_X11_HOST"
@@ -5660,8 +6700,11 @@ const xApiEnvMap: Array<[XApiEnvKey, keyof XApiRuntimeConfig]> = [
   ["RUN_CHAIN_COUNT", "runChainCount"],
   ["STALE_KEYWORD_USER_MAX_AGE_DAYS", "staleKeywordUserMaxAgeDays"],
   ["STALE_KEYWORD_USER_START_INDEX", "staleKeywordUserStartIndex"],
+  ["STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS", "staleKeywordUserActionDelayMinSeconds"],
+  ["STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS", "staleKeywordUserActionDelayMaxSeconds"],
   ["STALE_KEYWORD_USER_AUTO_IGNORE_ALERT", "staleKeywordUserAutoIgnoreAlert"],
   ["STALE_KEYWORD_USER_MAX_RETRIES", "staleKeywordUserMaxRetries"],
+  ["STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS", "staleKeywordUserAutoRestartDelaySeconds"],
   ["RAW_TIMELINE_ENABLED", "rawTimelineEnabled"],
   ["DOCKER_X11_FORWARD_ENABLED", "dockerX11ForwardEnabled"],
   ["DOCKER_X11_HOST", "dockerX11Host"],
@@ -5716,6 +6759,10 @@ function getEntryIdParam(params: unknown): number {
 
 function getTweetIdParam(params: unknown): string {
   return z.object({ tweetId: z.string().regex(/^\d+$/) }).parse(params).tweetId;
+}
+
+function listExportFilename(kind: (typeof LIST_KINDS)[number]): string {
+  return legacyFilenameByKind.get(kind) ?? `${kind}.txt`;
 }
 
 function createXActionClient(config: AppConfig["x"]): XActionClient {

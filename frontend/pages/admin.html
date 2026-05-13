@@ -101,6 +101,9 @@
                   disabled>Delete</button>
                 <button id="clear-selection-button" type="button" class="secondary-button" disabled>Clear
                   selection</button>
+                <button id="download-list-button" type="button" class="secondary-button">Download</button>
+                <button id="download-timeline-tweets-button" type="button" class="secondary-button">Download timeline
+                  tweets</button>
                 <button id="cleanup-lists-button" type="button" class="secondary-button">Clean lists</button>
               </div>
             </form>
@@ -149,6 +152,7 @@
                 <option value="stale_keyword_user">Stale keyword users</option>
                 <option value="skipped_keyword_user">Skipped keyword users</option>
                 <option value="hidden_session">Hidden session</option>
+                <option value="timeline_tweets">Timeline tweets</option>
               </select>
             </label>
             <div class="button-row">
@@ -408,7 +412,6 @@
             <h2>RedqueenX</h2>
             <p class="muted">Whitelist limits HTTPS access when it is not empty. Blacklist always blocks matching IPv4
               addresses.</p>
-            <p id="server-access-current-ip" class="muted"></p>
             <div class="settings-grid server-access-grid">
               <label>
                 <span>IPv4 whitelist</span>
@@ -437,146 +440,146 @@
                   </label>
                 </div>
                 <div class="settings-grid">
-              <div class="scoring-field">
-                <label>
-                  <span>Minimum search results</span>
-                  <input name="minimumSearchResults" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMinimumSearchResults" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Rejection luck factor</span>
-                  <input name="luckFactorDenominator" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableLuckFactor" type="checkbox" />
-                  <span>Use luck factor</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Minimum tweet length</span>
-                  <input name="minimumTweetLength" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMinimumTweetLength" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Minimum retweets</span>
-                  <input name="minimumTweetRetweets" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMinimumTweetRetweets" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Maximum retweets</span>
-                  <input name="maximumTweetRetweets" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMaximumTweetRetweets" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Minimum favorites</span>
-                  <input name="minimumTweetFavorites" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMinimumTweetFavorites" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Maximum favorites</span>
-                  <input name="maximumTweetFavorites" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMaximumTweetFavorites" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Minimum followers</span>
-                  <input name="minimumUserFollowers" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMinimumUserFollowers" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Minimum tweet score</span>
-                  <input name="minimumTweetScore" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMinimumTweetScore" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Maximum tweet age days</span>
-                  <input name="maximumTweetAgeDays" type="number" min="0" step="0.25" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMaximumTweetAgeDays" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Maximum hashtags</span>
-                  <input name="maximumHashtags" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMaximumHashtags" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Maximum mentions</span>
-                  <input name="maximumMentions" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMaximumMentions" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Maximum tweets by user</span>
-                  <input name="maximumTweetsByUser" type="number" min="0" step="1" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableMaximumTweetsByUser" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
-              <div class="scoring-field">
-                <label>
-                  <span>Similar tweet threshold</span>
-                  <input name="similarTweetTextThreshold" type="number" min="0" max="1" step="0.01" />
-                </label>
-                <label class="inline-check scoring-check-toggle">
-                  <input name="enableSimilarTweetText" type="checkbox" />
-                  <span>Check enabled</span>
-                </label>
-              </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Minimum search results</span>
+                      <input name="minimumSearchResults" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMinimumSearchResults" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Rejection luck factor</span>
+                      <input name="luckFactorDenominator" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableLuckFactor" type="checkbox" />
+                      <span>Use luck factor</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Minimum tweet length</span>
+                      <input name="minimumTweetLength" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMinimumTweetLength" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Minimum retweets</span>
+                      <input name="minimumTweetRetweets" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMinimumTweetRetweets" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Maximum retweets</span>
+                      <input name="maximumTweetRetweets" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMaximumTweetRetweets" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Minimum favorites</span>
+                      <input name="minimumTweetFavorites" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMinimumTweetFavorites" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Maximum favorites</span>
+                      <input name="maximumTweetFavorites" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMaximumTweetFavorites" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Minimum followers</span>
+                      <input name="minimumUserFollowers" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMinimumUserFollowers" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Minimum tweet score</span>
+                      <input name="minimumTweetScore" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMinimumTweetScore" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Maximum tweet age days</span>
+                      <input name="maximumTweetAgeDays" type="number" min="0" step="0.25" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMaximumTweetAgeDays" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Maximum hashtags</span>
+                      <input name="maximumHashtags" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMaximumHashtags" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Maximum mentions</span>
+                      <input name="maximumMentions" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMaximumMentions" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Maximum tweets by user</span>
+                      <input name="maximumTweetsByUser" type="number" min="0" step="1" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableMaximumTweetsByUser" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
+                  <div class="scoring-field">
+                    <label>
+                      <span>Similar tweet threshold</span>
+                      <input name="similarTweetTextThreshold" type="number" min="0" max="1" step="0.01" />
+                    </label>
+                    <label class="inline-check scoring-check-toggle">
+                      <input name="enableSimilarTweetText" type="checkbox" />
+                      <span>Check enabled</span>
+                    </label>
+                  </div>
                 </div>
                 <div class="settings-subsection-actions">
                   <button type="submit" data-settings-section>Save scoring</button>
@@ -621,28 +624,59 @@
                 <div class="settings-grid">
                   <label>
                     <span>Inactive after days</span>
-                    <input id="stale-keyword-user-days" name="STALE_KEYWORD_USER_MAX_AGE_DAYS" type="number" min="1" max="3650" step="1" value="90" />
+                    <input id="stale-keyword-user-days" name="STALE_KEYWORD_USER_MAX_AGE_DAYS" type="number" min="1"
+                      max="3650" step="1" value="90" />
                   </label>
                   <label>
                     <span>Start from index</span>
-                    <input id="stale-keyword-user-start-index" name="STALE_KEYWORD_USER_START_INDEX" type="number" min="1" step="1" value="1" />
+                    <input id="stale-keyword-user-start-index" name="STALE_KEYWORD_USER_START_INDEX" type="number"
+                      min="1" step="1" value="1" />
+                  </label>
+                  <label>
+                    <span>Execution speed</span>
+                    <select id="stale-keyword-user-speed-preset">
+                      <option value="very_slow">Very slow</option>
+                      <option value="slow">Slow</option>
+                      <option value="normal">Normal</option>
+                      <option value="fast">Fast</option>
+                      <option value="very_fast">No pause</option>
+                    </select>
                   </label>
                   <label class="inline-check">
-                    <input id="stale-keyword-user-auto-ignore-alert" name="STALE_KEYWORD_USER_AUTO_IGNORE_ALERT" type="checkbox" />
+                    <input id="stale-keyword-user-auto-ignore-alert" name="STALE_KEYWORD_USER_AUTO_IGNORE_ALERT"
+                      type="checkbox" />
                     <span>Ignore alerts</span>
                   </label>
                   <label id="stale-keyword-user-max-retries-label">
                     <span>Max retry</span>
-                    <input id="stale-keyword-user-max-retries" name="STALE_KEYWORD_USER_MAX_RETRIES" type="number" min="0" max="20" step="1" value="3" />
+                    <input id="stale-keyword-user-max-retries" name="STALE_KEYWORD_USER_MAX_RETRIES" type="number"
+                      min="0" max="20" step="1" value="3" />
                   </label>
+                  <label id="stale-keyword-user-auto-restart-delay-label">
+                    <span>Pause before auto restart</span>
+                    <input id="stale-keyword-user-auto-restart-delay-seconds"
+                      name="STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS" type="number" min="0" max="3600" step="1"
+                      value="10" />
+                  </label>
+                  <input id="stale-keyword-user-action-delay-min-seconds"
+                    name="STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS" type="hidden" value="1" />
+                  <input id="stale-keyword-user-action-delay-max-seconds"
+                    name="STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS" type="hidden" value="5" />
                 </div>
                 <div class="settings-subsection-actions">
                   <button type="submit" data-settings-section>Save cleanup settings</button>
-                  <button id="open-stale-keyword-users-button" type="button" class="secondary-button">Open stale users list</button>
-                  <button id="toggle-inline-stale-keyword-users-button" type="button" class="secondary-button" aria-expanded="false">Show stale users</button>
-                  <button id="open-skipped-keyword-users-button" type="button" class="secondary-button">Open skipped users list</button>
-                  <button id="prune-stale-keyword-users-button" type="button" class="secondary-button">Start inactive users check</button>
-                  <button id="stop-stale-keyword-users-button" type="button" class="secondary-button" disabled>Stop inactive users check</button>
+                  <button id="open-stale-keyword-users-button" type="button" class="secondary-button">Open stale users
+                    list</button>
+                  <button id="toggle-inline-stale-keyword-users-button" type="button" class="secondary-button"
+                    aria-expanded="false">Show stale users</button>
+                  <button id="open-skipped-keyword-users-button" type="button" class="secondary-button">Open skipped
+                    users list</button>
+                  <button id="prune-stale-keyword-users-button" type="button" class="secondary-button">Start inactive
+                    users check</button>
+                  <button id="stop-stale-keyword-users-button" type="button" class="secondary-button" disabled>Stop
+                    inactive users check</button>
+                  <button id="reset-stale-keyword-user-progress-button" type="button" class="secondary-button">Reset
+                    progress</button>
                 </div>
                 <div id="stale-keyword-user-prune-result" class="job-result" aria-live="polite"></div>
               </fieldset>
@@ -1168,6 +1202,16 @@
                   <span>CURRENT_SESSION_FILE</span>
                   <input name="CURRENT_SESSION_FILE" type="text" autocomplete="off" data-path-picker="file"
                     data-path-picker-start="./runtime" />
+                </label>
+                <label class="wide-field">
+                  <span>ADMIN_IPV4_WHITELIST</span>
+                  <textarea name="ADMIN_IPV4_WHITELIST" rows="3" spellcheck="false"
+                    placeholder="127.0.0.1,192.168.0.1/24"></textarea>
+                </label>
+                <label class="wide-field">
+                  <span>ADMIN_IPV4_BLACKLIST</span>
+                  <textarea name="ADMIN_IPV4_BLACKLIST" rows="3" spellcheck="false"
+                    placeholder="203.0.113.10,198.51.100.0/24"></textarea>
                 </label>
                 <label>
                   <span>RSS_FALLBACK_FEED_LIMIT</span>

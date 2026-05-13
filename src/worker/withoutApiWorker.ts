@@ -29,6 +29,7 @@ import {
   buildBrowserSearchUrl,
   detectManualVerification,
   extractVisibleTweets,
+  gotoWithTransientRetry,
   sameManualVerificationDetection,
   type ManualVerificationDetection
 } from "./browserSearch";
@@ -853,6 +854,23 @@ async function searchOneKeyword(
   const retweetFilterApplied = Boolean(options.retweetFilterApplied);
   const searchQuery = buildBrowserSearchQuery(keyword, { includeRetweetFilter: retweetFilterApplied });
   const searchUrl = buildBrowserSearchUrl(keyword, config.searchWithoutApiStartUrl, { includeRetweetFilter: retweetFilterApplied });
+  const gotoSearch = (url: string, phase: string) =>
+    gotoWithTransientRetry(
+      page,
+      url,
+      { waitUntil: "domcontentloaded", timeout: 45_000 },
+      {
+        attempts: 3,
+        retryDelayMs: 2_500,
+        onRetry: (event) =>
+          options.record?.("prob", "browser.playwright.navigation_retry", "Transient browser navigation error; retrying", {
+            runId: options.runId,
+            keyword,
+            phase,
+            ...event
+          })
+      }
+    );
   await options.record?.("debug", "browser.playwright.step", "Opening X search page", {
     runId: options.runId,
     keyword,
@@ -867,7 +885,7 @@ async function searchOneKeyword(
     }
   });
   const openStartedAt = Date.now();
-  await page.goto(config.searchWithoutApiStartUrl || "https://x.com/search", { waitUntil: "domcontentloaded", timeout: 45_000 });
+  await gotoSearch(config.searchWithoutApiStartUrl || "https://x.com/search", "open_search_page");
   await page.waitForTimeout(500);
   openSearchMs = Date.now() - openStartedAt;
   const beforeSearch = await capturePageSnapshot(page, "before_search", keyword, options.runId, options.position, Boolean(options.saveSnapshots));
@@ -928,7 +946,7 @@ async function searchOneKeyword(
       step: "direct_search_url",
       url: searchUrl
     });
-    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await gotoSearch(searchUrl, "direct_search_url");
   }
 
   if (!isLatestSearchUrl(page.url())) {
@@ -940,7 +958,7 @@ async function searchOneKeyword(
       url: searchUrl,
       latestModeForced: true
     });
-    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await gotoSearch(searchUrl, "force_latest_search");
   }
 
   await page.waitForTimeout(1_200);

@@ -333,6 +333,32 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.alert-snapshot-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.alert-snapshot-slider {
+  display: inline-grid;
+  grid-template-columns: auto minmax(160px, 220px) auto;
+  align-items: center;
+  gap: 8px;
+  color: #ffc8d2;
+  font-size: 12px;
+}
+
+.alert-snapshot-slider input[type="range"] {
+  width: 100%;
+}
+
+.alert-snapshot-output {
+  overflow: auto;
+  resize: vertical;
+}
+
 .alert-kicker {
   color: #ffc8d2;
   font-size: 11px;
@@ -1859,10 +1885,31 @@ h2 {
   color: #ffd9a3;
 }
 
+.tweet-list-plus-button {
+  min-width: 28px;
+  padding-inline: 0;
+  font-weight: 700;
+}
+
 .tweet-list-command-row .tweet-action-button,
 .tweet-command-row [data-media-cache-reload] {
   min-height: 24px;
   padding: 3px 7px;
+}
+
+.tweet-accept-button {
+  margin-left: auto;
+}
+
+.tweet-right-command-group {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.tweet-right-command-group .tweet-accept-button {
+  margin-left: 0;
 }
 
 .tweet-list-feedback {

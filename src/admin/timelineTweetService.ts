@@ -34,6 +34,28 @@ export interface TimelineTweetPage {
   hasMore: boolean;
 }
 
+export interface TimelineTweetExportRecord {
+  schemaVersion: 1;
+  source: "tweet" | "from test";
+  keyword?: string | null;
+  text: string;
+  tweetId: string;
+  author: string | null;
+  authorName: string | null;
+  avatarUrl: string | null;
+  tweetUrl: string;
+  tweetCreatedAt: string | null;
+  retweetCount: number;
+  favoriteCount: number;
+  score: number;
+  reasons: string[];
+  media: TweetMedia[];
+  urls: string[];
+  likedAt: string | null;
+  retweetedAt: string | null;
+  acceptedAt: string;
+}
+
 type TimelineTweetRow = {
   rowid: number;
   tweet_id: string;
@@ -55,6 +77,20 @@ type TimelineTweetRow = {
   retweeted_at: string | null;
 };
 
+export interface TimelineManualAcceptedInput {
+  keyword: string;
+  text: string;
+  tweetId: string;
+  author: string | null;
+  authorName: string | null;
+  tweetUrl: string | null;
+  tweetCreatedAt: string | null;
+  retweetCount: number;
+  favoriteCount: number;
+  score?: number | null;
+  reasons?: string[];
+}
+
 export class TimelineTweetService {
   constructor(private readonly database: Database) {}
 
@@ -64,6 +100,76 @@ export class TimelineTweetService {
 
   saveAcceptedFromTest(keyword: string, tweet: TweetCandidate, decision: ScoreDecision): void {
     this.saveAcceptedWithSource(keyword, tweet, decision, "test");
+  }
+
+  saveAcceptedManual(input: TimelineManualAcceptedInput): void {
+    const reasons = Array.isArray(input.reasons) && input.reasons.length > 0
+      ? input.reasons
+      : ["manual_accept_from_rejected_timeline"];
+    this.database
+      .prepare(`
+        INSERT INTO timeline_tweets (
+          tweet_id,
+          text,
+          author_handle,
+          author_name,
+          author_avatar_url,
+          tweet_url,
+          lang,
+          tweet_created_at,
+          retweet_count,
+          favorite_count,
+          score,
+          reasons_json,
+          media_json,
+          urls_json,
+          source_keyword,
+          accepted_at
+        )
+        VALUES (
+          @tweetId,
+          @text,
+          @authorHandle,
+          @authorName,
+          NULL,
+          @tweetUrl,
+          NULL,
+          @tweetCreatedAt,
+          @retweetCount,
+          @favoriteCount,
+          @score,
+          @reasonsJson,
+          '[]',
+          '[]',
+          @sourceKeyword,
+          @acceptedAt
+        )
+        ON CONFLICT(tweet_id) DO UPDATE SET
+          text = excluded.text,
+          author_handle = excluded.author_handle,
+          author_name = excluded.author_name,
+          tweet_url = excluded.tweet_url,
+          tweet_created_at = excluded.tweet_created_at,
+          retweet_count = excluded.retweet_count,
+          favorite_count = excluded.favorite_count,
+          score = excluded.score,
+          reasons_json = excluded.reasons_json,
+          source_keyword = excluded.source_keyword
+      `)
+      .run({
+        tweetId: input.tweetId,
+        text: input.text,
+        authorHandle: input.author,
+        authorName: input.authorName,
+        tweetUrl: input.tweetUrl ?? `https://twitter.com/i/web/status/${input.tweetId}`,
+        tweetCreatedAt: input.tweetCreatedAt,
+        retweetCount: input.retweetCount ?? 0,
+        favoriteCount: input.favoriteCount ?? 0,
+        score: Number.isFinite(input.score) ? Math.max(0, Math.round(Number(input.score))) : 0,
+        reasonsJson: JSON.stringify(reasons),
+        sourceKeyword: input.keyword,
+        acceptedAt: new Date().toISOString()
+      });
   }
 
   private saveAcceptedWithSource(keyword: string, tweet: TweetCandidate, decision: ScoreDecision, source: "tweet" | "test"): void {
@@ -179,6 +285,114 @@ export class TimelineTweetService {
     return row.total;
   }
 
+  exportAll(): TimelineTweetExportRecord[] {
+    const rows = this.database
+      .prepare(`
+        SELECT rowid, *
+        FROM timeline_tweets
+        ORDER BY accepted_at DESC, tweet_created_at DESC, rowid DESC
+      `)
+      .all() as TimelineTweetRow[];
+
+    return rows.map(mapTweetExportRow);
+  }
+
+  importExportRecords(records: TimelineTweetExportRecord[]): number {
+    if (records.length === 0) {
+      return 0;
+    }
+
+    const insert = this.database.prepare(`
+      INSERT INTO timeline_tweets (
+        tweet_id,
+        text,
+        author_handle,
+        author_name,
+        author_avatar_url,
+        tweet_url,
+        lang,
+        tweet_created_at,
+        retweet_count,
+        favorite_count,
+        score,
+        reasons_json,
+        media_json,
+        urls_json,
+        source_keyword,
+        accepted_at,
+        liked_at,
+        retweeted_at
+      )
+      VALUES (
+        @tweetId,
+        @text,
+        @authorHandle,
+        @authorName,
+        @authorAvatarUrl,
+        @tweetUrl,
+        NULL,
+        @tweetCreatedAt,
+        @retweetCount,
+        @favoriteCount,
+        @score,
+        @reasonsJson,
+        @mediaJson,
+        @urlsJson,
+        @sourceKeyword,
+        @acceptedAt,
+        @likedAt,
+        @retweetedAt
+      )
+      ON CONFLICT(tweet_id) DO UPDATE SET
+        text = excluded.text,
+        author_handle = excluded.author_handle,
+        author_name = excluded.author_name,
+        author_avatar_url = excluded.author_avatar_url,
+        tweet_url = excluded.tweet_url,
+        tweet_created_at = excluded.tweet_created_at,
+        retweet_count = excluded.retweet_count,
+        favorite_count = excluded.favorite_count,
+        score = excluded.score,
+        reasons_json = excluded.reasons_json,
+        media_json = excluded.media_json,
+        urls_json = excluded.urls_json,
+        source_keyword = excluded.source_keyword,
+        accepted_at = excluded.accepted_at,
+        liked_at = excluded.liked_at,
+        retweeted_at = excluded.retweeted_at
+    `);
+
+    const save = this.database.transaction((items: TimelineTweetExportRecord[]) => {
+      let imported = 0;
+      for (const item of items) {
+        const urls = Array.isArray(item.urls) ? item.urls.filter((value) => typeof value === "string" && value) : [];
+        insert.run({
+          tweetId: item.tweetId,
+          text: item.text,
+          authorHandle: item.author ?? null,
+          authorName: item.authorName ?? null,
+          authorAvatarUrl: item.avatarUrl ?? null,
+          tweetUrl: item.tweetUrl || `https://twitter.com/i/web/status/${item.tweetId}`,
+          tweetCreatedAt: item.tweetCreatedAt ?? null,
+          retweetCount: Number.isFinite(item.retweetCount) ? item.retweetCount : 0,
+          favoriteCount: Number.isFinite(item.favoriteCount) ? item.favoriteCount : 0,
+          score: Number.isFinite(item.score) ? item.score : 0,
+          reasonsJson: JSON.stringify(Array.isArray(item.reasons) ? item.reasons : []),
+          mediaJson: JSON.stringify(Array.isArray(item.media) ? mediaWithoutEmojiImages(item.media) : []),
+          urlsJson: JSON.stringify(urls),
+          sourceKeyword: exportSourceKeyword(item),
+          acceptedAt: item.acceptedAt || new Date().toISOString(),
+          likedAt: item.likedAt ?? null,
+          retweetedAt: item.retweetedAt ?? null
+        });
+        imported += 1;
+      }
+      return imported;
+    });
+
+    return save(records);
+  }
+
   find(tweetId: string): TimelineTweetItem | null {
     const row = this.database
       .prepare(
@@ -238,9 +452,40 @@ function mapTweetRow(row: TimelineTweetRow): TimelineTweetItem {
   };
 }
 
+function mapTweetExportRow(row: TimelineTweetRow): TimelineTweetExportRecord {
+  return {
+    schemaVersion: 1,
+    source: row.source_keyword?.startsWith("test:") ? "from test" : "tweet",
+    keyword: displayKeyword(row.source_keyword),
+    text: row.text,
+    tweetId: row.tweet_id,
+    author: row.author_handle,
+    authorName: row.author_name,
+    avatarUrl: row.author_avatar_url,
+    tweetUrl: row.tweet_url ?? `https://twitter.com/i/web/status/${row.tweet_id}`,
+    tweetCreatedAt: row.tweet_created_at,
+    retweetCount: row.retweet_count,
+    favoriteCount: row.favorite_count,
+    score: row.score,
+    reasons: readJson<string[]>(row.reasons_json, []),
+    media: mediaWithoutEmojiImages(readJson<TweetMedia[]>(row.media_json, [])),
+    urls: readJson<string[]>(row.urls_json, []),
+    likedAt: row.liked_at,
+    retweetedAt: row.retweeted_at,
+    acceptedAt: row.accepted_at
+  };
+}
+
 function displayKeyword(sourceKeyword: string | null): string | null {
   if (!sourceKeyword) return null;
   return sourceKeyword.startsWith("test:") ? sourceKeyword.slice("test:".length) : sourceKeyword;
+}
+
+function exportSourceKeyword(item: TimelineTweetExportRecord): string | null {
+  if (!item.keyword) {
+    return null;
+  }
+  return item.source === "from test" ? `test:${item.keyword}` : item.keyword;
 }
 
 function readJson<T>(value: string, fallback: T): T {

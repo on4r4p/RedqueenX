@@ -143,8 +143,11 @@ export const xApiConfigSchema = z.object({
   runChainCount: z.coerce.number().int().min(1),
   staleKeywordUserMaxAgeDays: z.coerce.number().int().min(1).max(3650),
   staleKeywordUserStartIndex: z.coerce.number().int().min(1),
+  staleKeywordUserActionDelayMinSeconds: z.coerce.number().int().min(0),
+  staleKeywordUserActionDelayMaxSeconds: z.coerce.number().int().min(0),
   staleKeywordUserAutoIgnoreAlert: booleanSettingSchema,
   staleKeywordUserMaxRetries: z.coerce.number().int().min(0).max(20),
+  staleKeywordUserAutoRestartDelaySeconds: z.coerce.number().int().min(0).max(3600),
   rawTimelineEnabled: booleanSettingSchema,
   dockerX11ForwardEnabled: z.preprocess((value) => {
     if (value === "true") return true;
@@ -339,36 +342,78 @@ export class SettingsService {
 
     return config;
   }
+
+  patchXApiConfig(input: Partial<XApiRuntimeConfig>): Partial<XApiRuntimeConfig> {
+    const patch = xApiConfigSchema.partial().parse(input);
+    const row = this.database.prepare("SELECT value_json FROM app_settings WHERE key = ?").get(xApiSettingKey) as
+      | SettingRow
+      | undefined;
+    let current: Record<string, unknown> = {};
+    if (row) {
+      try {
+        const parsed = JSON.parse(row.value_json);
+        current = typeof parsed === "object" && parsed !== null ? parsed : {};
+      } catch {
+        current = {};
+      }
+    }
+    const next = {
+      ...current,
+      ...patch
+    };
+    this.database
+      .prepare(
+        `
+          INSERT INTO app_settings (key, value_json, updated_at)
+          VALUES (?, ?, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+        `
+      )
+      .run(xApiSettingKey, JSON.stringify(next));
+
+    return next as Partial<XApiRuntimeConfig>;
+  }
 }
 
 function normalizeRuntimeModes(config: XApiRuntimeConfig, changed: Partial<XApiRuntimeConfig> = {}): XApiRuntimeConfig {
+  const normalizedConfig: XApiRuntimeConfig = {
+    ...config,
+    staleKeywordUserActionDelayMinSeconds: Math.max(0, Math.floor(config.staleKeywordUserActionDelayMinSeconds)),
+    staleKeywordUserActionDelayMaxSeconds: Math.max(
+      Math.max(0, Math.floor(config.staleKeywordUserActionDelayMinSeconds)),
+      Math.floor(config.staleKeywordUserActionDelayMaxSeconds)
+    ),
+    staleKeywordUserAutoRestartDelaySeconds: Math.max(0, Math.floor(config.staleKeywordUserAutoRestartDelaySeconds))
+  };
   if (changed.searchWithoutApiEnabled === true) {
     return {
-      ...config,
+      ...normalizedConfig,
       xApiEnabled: false
     };
   }
 
   if (changed.xApiEnabled === true) {
     return {
-      ...config,
+      ...normalizedConfig,
       searchWithoutApiEnabled: false
     };
   }
 
-  if (config.searchWithoutApiEnabled) {
+  if (normalizedConfig.searchWithoutApiEnabled) {
     return {
-      ...config,
+      ...normalizedConfig,
       xApiEnabled: false
     };
   }
 
-  if (config.xApiEnabled) {
+  if (normalizedConfig.xApiEnabled) {
     return {
-      ...config,
+      ...normalizedConfig,
       searchWithoutApiEnabled: false
     };
   }
 
-  return config;
+  return normalizedConfig;
 }

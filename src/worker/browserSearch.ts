@@ -1,4 +1,5 @@
-import type { Page } from "playwright-core";
+import { setTimeout as delay } from "node:timers/promises";
+import type { Page, Response } from "playwright-core";
 import type { TweetCandidate, TweetMedia } from "../types";
 import { mediaWithoutEmojiImages } from "../tweetMedia";
 
@@ -40,6 +41,60 @@ export interface VisibleTweetSnapshot {
 
 export interface BrowserSearchUrlOptions {
   includeRetweetFilter?: boolean;
+}
+
+export interface BrowserNavigationRetryEvent {
+  url: string;
+  attempt: number;
+  maxAttempts: number;
+  retryDelayMs: number;
+  error: string;
+}
+
+type BrowserGotoOptions = NonNullable<Parameters<Page["goto"]>[1]>;
+
+export async function gotoWithTransientRetry(
+  page: Page,
+  url: string,
+  gotoOptions: BrowserGotoOptions = {},
+  retryOptions: {
+    attempts?: number;
+    retryDelayMs?: number;
+    onRetry?: (event: BrowserNavigationRetryEvent) => Promise<void> | void;
+  } = {}
+): Promise<Response | null> {
+  const maxAttempts = Math.max(1, Math.floor(retryOptions.attempts ?? 3));
+  const retryDelayMs = Math.max(0, Math.floor(retryOptions.retryDelayMs ?? 2_000));
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await page.goto(url, gotoOptions);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientBrowserNavigationError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+      await retryOptions.onRetry?.({
+        url,
+        attempt,
+        maxAttempts,
+        retryDelayMs,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 10_000 }).catch(() => undefined);
+      if (retryDelayMs > 0) {
+        await delay(retryDelayMs);
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+export function isTransientBrowserNavigationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /net::ERR_(?:CERT_VERIFIER_CHANGED|NETWORK_CHANGED|CONNECTION_RESET|CONNECTION_CLOSED|INTERNET_DISCONNECTED|TUNNEL_CONNECTION_FAILED|PROXY_CONNECTION_FAILED)\b/i.test(
+    message
+  );
 }
 
 export function buildBrowserSearchQuery(keyword: string, options: BrowserSearchUrlOptions = {}): string {
@@ -165,7 +220,8 @@ export async function detectManualVerification(page: Page): Promise<ManualVerifi
 
 export function detectManualVerificationFromState(state: ManualVerificationPageState): ManualVerificationDetection | null {
   const url = state.url;
-  const text = state.nonTweetVisibleText.toLowerCase();
+  const rawText = state.nonTweetVisibleText;
+  const text = rawText.toLowerCase();
   const detected = (type: ManualVerificationType, reason: string, signal: string): ManualVerificationDetection => ({
     type,
     reason,
@@ -181,7 +237,7 @@ export function detectManualVerificationFromState(state: ManualVerificationPageS
   if (hasXPrivacyExtensionBlockText(text)) {
     return detected("x_blocked", "X returned a blocking error page mentioning privacy-related extensions.", "Visible page text matched X privacy-extension blocking wording.");
   }
-  if (hasXBlockedText(text) && !isRecoverableSearchResultError(url, text)) {
+  if (hasXBlockedText(text) && !isRecoverableShellError(state)) {
     return detected("x_blocked", "X returned a blocking error page: Something went wrong.", "Visible page text matched 'Something went wrong' or 'Try again/reloading'.");
   }
   if (hasTwoFactorText(text)) {
@@ -240,7 +296,12 @@ async function readManualVerificationPageState(page: Page): Promise<ManualVerifi
 
 function hasTwoFactorText(text: string): boolean {
   return (
-    /\btwo[-\s]?factor\s+(?:authentication|verification|code|login|security)\b/.test(text) ||
+    /\btwo[-\s]?factor\s+(?:authentication|verification)\b.{0,80}\b(?:required|needed|continue|confirm|verify|enter|input|type|provide|submit|use)\b/.test(
+      text
+    ) ||
+    /\b(?:required|needed|continue|confirm|verify|enter|input|type|provide|submit|use)\b.{0,80}\btwo[-\s]?factor\s+(?:authentication|verification)\b/.test(
+      text
+    ) ||
     /\b(?:enter|input|type|provide|submit|use)\b.{0,80}\b(?:2fa|two[-\s]?factor|verification|authentication|login|security)\s+code\b/.test(text) ||
     /\b(?:verification|authentication|login|security)\s+code\b.{0,80}\b(?:enter|input|type|provide|submit|required|sent|text|email|authenticator|phone)\b/.test(text) ||
     /\b(?:we|x)\s+(?:sent|emailed|texted)\b.{0,80}\bcode\b/.test(text) ||
@@ -285,22 +346,42 @@ function hasXBlockedText(text: string): boolean {
   return /\bsomething\s+went\s+wrong\b|\btry\s+(?:again|reloading)\b/.test(text);
 }
 
-function isRecoverableSearchResultError(url: string, text: string): boolean {
-  if (!url.includes("/search")) {
+function isRecoverableShellError(state: ManualVerificationPageState): boolean {
+  const normalizedText = normalizeDetectorText(state.nonTweetVisibleText).toLowerCase();
+  if (!/\bsomething\s+went\s+wrong\b|\btry\s+reloading\b/.test(normalizedText)) {
     return false;
   }
-  if (!/\bsomething\s+went\s+wrong\b|\btry\s+reloading\b/.test(text)) {
+
+  if (state.url.includes("/search")) {
+    const searchShellSignals = [
+      /\bsearch\s*filters\b/,
+      /\badvanced\s*search\b/,
+      /\bpeople\s*from\s*anyone\b/,
+      /\btop\s*latest\s*people\s*media\s*lists\b/,
+      /\bsee\s*new\s*posts\b/,
+      /\bwho\s*to\s*follow\b/
+    ];
+    if (searchShellSignals.filter((pattern) => pattern.test(normalizedText)).length >= 2) {
+      return true;
+    }
+  }
+
+  if (state.articleCount <= 0 || !isLoadedXAppShell(normalizedText)) {
     return false;
   }
-  const searchShellSignals = [
-    /\bsearch\s+filters\b/,
-    /\badvanced\s+search\b/,
-    /\bpeople\s+from\s+anyone\b/,
-    /\btop\s+latest\s+people\s+media\s+lists\b/,
-    /\bsee\s+new\s+posts\b/,
-    /\bwho\s+to\s+follow\b/
+
+  const sidebarSignals = [
+    /\bsubscribe\s+to\s+premium\b/,
+    /\bwhat(?:'|’)s\s+happening\b/,
+    /\bwho\s+to\s+follow\b/,
+    /\btrending\s+in\b/
   ];
-  return searchShellSignals.filter((pattern) => pattern.test(text)).length >= 2;
+  return sidebarSignals.some((pattern) => pattern.test(normalizedText));
+}
+
+function isLoadedXAppShell(text: string): boolean {
+  const shellSignals = [/\bhome\b/, /\bexplore\b/, /\bnotifications\b/, /\bprofile\b/, /\bfor\s+you\b/, /\bfollowing\b/];
+  return shellSignals.filter((pattern) => pattern.test(text)).length >= 3;
 }
 
 function hasXPrivacyExtensionBlockText(text: string): boolean {
@@ -313,7 +394,10 @@ function hasXPrivacyExtensionBlockText(text: string): boolean {
 }
 
 function normalizeDetectorText(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+  return text
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function extractHashtags(text: string): string[] {

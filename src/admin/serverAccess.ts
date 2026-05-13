@@ -16,6 +16,21 @@ export const DEFAULT_SERVER_ACCESS_CONFIG: ServerAccessConfig = {
   blacklist: []
 };
 
+export function mergeServerAccessConfig(...configs: Array<ServerAccessConfig | null | undefined>): ServerAccessConfig {
+  return configs.reduce<ServerAccessConfig>(
+    (merged, config) => {
+      if (!config) {
+        return merged;
+      }
+      return {
+        whitelist: normalizeAccessList([...merged.whitelist, ...config.whitelist]),
+        blacklist: normalizeAccessList([...merged.blacklist, ...config.blacklist])
+      };
+    },
+    { whitelist: [], blacklist: [] }
+  );
+}
+
 export function parseAccessListInput(input: string | string[] | undefined): string[] {
   const values = Array.isArray(input) ? input : (input ?? "").split(/[\s,;]+/);
   return normalizeAccessList(values);

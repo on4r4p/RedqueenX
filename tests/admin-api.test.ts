@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createAdminApi } from "../src/admin/api";
 import { openMemoryDatabase } from "../src/db/database";
 import { RunService } from "../src/admin/runService";
+import { TimelineTweetService } from "../src/admin/timelineTweetService";
 import { XBrowserAccountService } from "../src/admin/xBrowserAccountService";
 import { XSessionAlertService } from "../src/admin/xSessionAlertService";
 
@@ -25,12 +26,15 @@ describe("admin api", () => {
     fs.utimesSync(restartSignalPath, oldSignalDate, oldSignalDate);
 
     const database = openMemoryDatabase();
+    const timelineService = new TimelineTweetService(database);
     const app = createAdminApi({
       database,
       config: {
         adminPassword: "secret",
         adminPasswordHash: undefined,
         sessionSecret: "test-session-secret",
+        adminIpv4Whitelist: [],
+        adminIpv4Blacklist: [],
         legacyDataDir: tmp,
         currentSessionFile: currentSessionFilePath,
         xApiEnabled: true,
@@ -72,8 +76,11 @@ describe("admin api", () => {
         runChainCount: 1,
         staleKeywordUserMaxAgeDays: 90,
         staleKeywordUserStartIndex: 1,
+        staleKeywordUserActionDelayMinSeconds: 1,
+        staleKeywordUserActionDelayMaxSeconds: 5,
         staleKeywordUserAutoIgnoreAlert: false,
         staleKeywordUserMaxRetries: 3,
+        staleKeywordUserAutoRestartDelaySeconds: 10,
         rawTimelineEnabled: true,
         dockerX11ForwardEnabled: false,
         dockerX11Host: "",
@@ -230,6 +237,81 @@ describe("admin api", () => {
         VALUES (?, ?, ?, ?, ?, ?)`
       )
       .run("run-clear-rejected", "tweet-accepted", "keyword", "accepted tweet", "accepted", "[]");
+    database
+      .prepare(
+        `INSERT INTO raw_timeline_tweets (
+          run_id,
+          tweet_id,
+          source_keyword,
+          text,
+          author_handle,
+          author_name,
+          tweet_url,
+          tweet_created_at,
+          retweet_count,
+          favorite_count,
+          decision_status,
+          score,
+          rejection_reasons_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        "run-clear-rejected",
+        "tweet-manual-accept",
+        "manual-keyword",
+        "manual rejected tweet",
+        "@manual",
+        "Manual User",
+        "https://twitter.com/i/web/status/tweet-manual-accept",
+        "2026-05-07T10:30:00.000Z",
+        12,
+        34,
+        "rejected",
+        19,
+        JSON.stringify(["score_too_low"])
+      );
+    const acceptRejectedTweet = await app.inject({
+      method: "POST",
+      url: "/admin/rejected-timeline/accept",
+      headers: authHeaders,
+      payload: {
+        runId: "run-clear-rejected",
+        tweetId: "tweet-manual-accept"
+      }
+    });
+    expect(acceptRejectedTweet.statusCode).toBe(200);
+    expect(acceptRejectedTweet.json()).toEqual({
+      ok: true,
+      tweetId: "tweet-manual-accept",
+      runId: "run-clear-rejected"
+    });
+    expect(
+      database
+        .prepare(
+          "SELECT decision_status, rejection_stage, score FROM raw_timeline_tweets WHERE run_id = ? AND tweet_id = ?"
+        )
+        .get("run-clear-rejected", "tweet-manual-accept")
+    ).toEqual({
+      decision_status: "accepted",
+      rejection_stage: "accepted",
+      score: 19
+    });
+    expect(
+      database
+        .prepare(
+          "SELECT tweet_id, text, author_handle, author_name, score, reasons_json, source_keyword FROM timeline_tweets WHERE tweet_id = ?"
+        )
+        .get("tweet-manual-accept")
+    ).toEqual({
+      tweet_id: "tweet-manual-accept",
+      text: "manual rejected tweet",
+      author_handle: "@manual",
+      author_name: "Manual User",
+      score: 19,
+      reasons_json: JSON.stringify(["manual_accept_from_rejected_timeline"]),
+      source_keyword: "manual-keyword"
+    });
     const clearRejectedTimeline = await app.inject({
       method: "DELETE",
       url: "/admin/rejected-timeline",
@@ -241,7 +323,7 @@ describe("admin api", () => {
       total: 0
     });
     expect(database.prepare("SELECT COUNT(*) AS total FROM raw_timeline_tweets WHERE decision_status = 'accepted'").get()).toEqual({
-      total: 1
+      total: 2
     });
 
     const adminPage = await app.inject({
@@ -266,11 +348,14 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="load-file-button"');
     expect(adminPage.body).toContain('id="save-import-button"');
     expect(adminPage.body).toContain('id="save-all-import-button"');
+    expect(adminPage.body).toContain('id="download-timeline-tweets-button"');
     expect(adminPage.body).toContain('id="list-search"');
+    expect(adminPage.body).toContain('id="download-list-button"');
     expect(adminPage.body).toContain('id="cleanup-lists-button"');
     expect(adminPage.body).toContain('<option value="no_result">No.Result</option>');
     expect(adminPage.body).toContain('<option value="stale_keyword_user">Stale keyword users</option>');
     expect(adminPage.body).toContain('<option value="skipped_keyword_user">Skipped keyword users</option>');
+    expect(adminPage.body).toContain('<option value="timeline_tweets">Timeline tweets</option>');
     expect(adminPage.body).not.toContain('data-admin-section-target="import"');
     expect(adminPage.body).not.toContain('id="admin-section-import"');
     expect(adminPage.body).not.toContain("Import & Compteurs");
@@ -309,11 +394,16 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('name="RUN_CHAIN_COUNT"');
     expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_MAX_AGE_DAYS"');
     expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_START_INDEX"');
+    expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS"');
+    expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS"');
     expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_AUTO_IGNORE_ALERT"');
     expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_MAX_RETRIES"');
+    expect(adminPage.body).toContain('name="STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS"');
     expect(adminPage.body).toContain('name="RAW_TIMELINE_ENABLED"');
     expect(adminPage.body).toContain('id="stale-keyword-user-days"');
     expect(adminPage.body).toContain('id="stale-keyword-user-start-index"');
+    expect(adminPage.body).toContain('id="stale-keyword-user-action-delay-min-seconds"');
+    expect(adminPage.body).toContain('id="stale-keyword-user-action-delay-max-seconds"');
     expect(adminPage.body).toContain('id="stale-keyword-user-max-retries"');
     expect(adminPage.body).toContain('id="open-stale-keyword-users-button"');
     expect(adminPage.body).toContain('id="open-skipped-keyword-users-button"');
@@ -912,8 +1002,11 @@ describe("admin api", () => {
       RUN_CHAIN_COUNT: "1",
       STALE_KEYWORD_USER_MAX_AGE_DAYS: "90",
       STALE_KEYWORD_USER_START_INDEX: "1",
+      STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS: "1",
+      STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS: "5",
       STALE_KEYWORD_USER_AUTO_IGNORE_ALERT: "false",
       STALE_KEYWORD_USER_MAX_RETRIES: "3",
+      STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS: "10",
       RAW_TIMELINE_ENABLED: "true",
       DOCKER_X11_FORWARD_ENABLED: "false",
       DOCKER_X11_HOST: "",
@@ -955,8 +1048,11 @@ describe("admin api", () => {
           RUN_CHAIN_COUNT: "3",
           STALE_KEYWORD_USER_MAX_AGE_DAYS: "120",
           STALE_KEYWORD_USER_START_INDEX: "2332",
+          STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS: "0",
+          STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS: "2",
           STALE_KEYWORD_USER_AUTO_IGNORE_ALERT: "true",
           STALE_KEYWORD_USER_MAX_RETRIES: "5",
+          STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS: "12",
           SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_MB: "0"
         }
       }
@@ -965,8 +1061,11 @@ describe("admin api", () => {
     expect(generalRuntimeUpdate.json().values.RUN_CHAIN_COUNT).toBe("3");
     expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_MAX_AGE_DAYS).toBe("120");
     expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_START_INDEX).toBe("2332");
+    expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS).toBe("0");
+    expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS).toBe("2");
     expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_AUTO_IGNORE_ALERT).toBe("true");
     expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_MAX_RETRIES).toBe("5");
+    expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS).toBe("12");
     expect(generalRuntimeUpdate.json().values.SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_MB).toBe("0");
 
     const timelinePageSizeUpdate = await app.inject({
@@ -1026,8 +1125,11 @@ describe("admin api", () => {
           TIMELINE_DEFAULT_PAGE_SIZE: "50",
           RUN_CHAIN_COUNT: "1",
           STALE_KEYWORD_USER_MAX_AGE_DAYS: "90",
+          STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS: "1",
+          STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS: "5",
           STALE_KEYWORD_USER_AUTO_IGNORE_ALERT: "false",
           STALE_KEYWORD_USER_MAX_RETRIES: "3",
+          STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS: "10",
           RAW_TIMELINE_ENABLED: "true"
         }
       }
@@ -1213,6 +1315,14 @@ describe("admin api", () => {
       headers: authHeaders
     });
     expect(stopKeptWithoutApiRun.statusCode).toBe(200);
+    const withoutApiRunBeforeXApiMode = new RunService(database).start({
+      sessionKeywordLimit: 12,
+      totalKeywords: 12,
+      remainingKeywords: 12,
+      availableKeywords: 12,
+      apiCallLimit: 6,
+      apiWindowMinutes: 120
+    });
 
     const xApiEnableAfterSearchWithoutApi = await app.inject({
       method: "PATCH",
@@ -1229,9 +1339,32 @@ describe("admin api", () => {
       X_API_ENABLED: "true",
       SEARCH_WITHOUT_API_ENABLED: "false"
     });
+    expect(xApiEnableAfterSearchWithoutApi.json().xApiModeShutdown).toMatchObject({
+      requested: true,
+      reason: "x_api_mode_enabled",
+      stoppedRun: true,
+      stoppedRunId: withoutApiRunBeforeXApiMode.id,
+      openVpn: {
+        stop: {
+          reason: "skipped_in_test"
+        }
+      },
+      namespace: {
+        teardown: {
+          reason: "skipped_in_test"
+        }
+      }
+    });
     const envAfterXApiEnable = fs.readFileSync(envPath, "utf8");
     expect(envAfterXApiEnable).toContain("X_API_ENABLED=true");
     expect(envAfterXApiEnable).toContain("SEARCH_WITHOUT_API_ENABLED=false");
+    const stoppedAfterXApiMode = await app.inject({
+      method: "GET",
+      url: "/admin/runs/current",
+      headers: authHeaders
+    });
+    expect(stoppedAfterXApiMode.statusCode).toBe(200);
+    expect(stoppedAfterXApiMode.json().run).toBeNull();
 
     const searchWithoutApiDisable = await app.inject({
       method: "PATCH",
@@ -1478,6 +1611,8 @@ describe("admin api", () => {
     expect(envDefaults.json().values).toMatchObject({
       ADMIN_HOST: "127.0.0.1",
       ADMIN_PORT: "3005",
+      ADMIN_IPV4_WHITELIST: "",
+      ADMIN_IPV4_BLACKLIST: "",
       ENABLE_X_WRITE: "false"
     });
 
@@ -1492,6 +1627,8 @@ describe("admin api", () => {
           ADMIN_PASSWORD: "secret",
           SESSION_SECRET: "test-session-secret",
           DATABASE_URL: "./redqueenx.sqlite",
+          ADMIN_IPV4_WHITELIST: "127.0.0.1,192.0.2.0/24",
+          ADMIN_IPV4_BLACKLIST: "203.0.113.10/32;198.51.100.9",
           X_BEARER_TOKEN: "bearer",
           X_API_KEY: "api-key",
           X_API_SECRET: "api-secret",
@@ -1509,6 +1646,7 @@ describe("admin api", () => {
       restartScheduled: true,
       values: {
         ADMIN_HOST: "0.0.0.0",
+        ADMIN_IPV4_WHITELIST: "127.0.0.1,192.0.2.0/24",
         ENABLE_X_WRITE: "true",
         X_CLIENT_ID: "client-id"
       }
@@ -1877,6 +2015,17 @@ describe("admin api", () => {
     expect(filteredListPage.json().entries.map((entry: { rawValue: string }) => entry.rawValue)).toEqual(["two"]);
     expect(filteredListPage.json().pagination.total).toBe(1);
 
+    const exportedKeywordList = await app.inject({
+      method: "GET",
+      url: "/admin/lists/keyword/export",
+      headers: authHeaders
+    });
+    expect(exportedKeywordList.statusCode).toBe(200);
+    expect(exportedKeywordList.headers["content-type"]).toContain("text/plain");
+    expect(exportedKeywordList.headers["content-disposition"]).toContain('filename="Rq.Keywords"');
+    expect(exportedKeywordList.body).toContain("one\n");
+    expect(exportedKeywordList.body).toContain("two\n");
+
     const editedId = listPage.json().entries[0].id;
     const edited = await app.inject({
       method: "PATCH",
@@ -1895,6 +2044,49 @@ describe("admin api", () => {
     expect(deleted.statusCode).toBe(200);
     expect(deleted.json().deleted).toBe(1);
 
+    database.prepare("DELETE FROM timeline_tweets").run();
+    timelineService.saveAcceptedManual({
+      keyword: "timeline-import",
+      text: "timeline export me",
+      tweetId: "999001",
+      author: "@timeline",
+      authorName: "Timeline User",
+      tweetUrl: "https://twitter.com/i/web/status/999001",
+      tweetCreatedAt: "2026-05-11T10:00:00.000Z",
+      retweetCount: 7,
+      favoriteCount: 11,
+      score: 22,
+      reasons: ["manual_seed"]
+    });
+    const exportedTimeline = await app.inject({
+      method: "GET",
+      url: "/admin/timeline/export",
+      headers: authHeaders
+    });
+    expect(exportedTimeline.statusCode).toBe(200);
+    expect(exportedTimeline.headers["content-type"]).toContain("application/x-ndjson");
+    expect(exportedTimeline.headers["content-disposition"]).toContain('filename="Timeline.Tweets.jsonl"');
+    expect(exportedTimeline.body).toContain('"tweetId":"999001"');
+
+    database.prepare("DELETE FROM timeline_tweets").run();
+    const importedTimeline = await app.inject({
+      method: "POST",
+      url: "/admin/import/content",
+      headers: authHeaders,
+      payload: {
+        filename: "Timeline.Tweets.jsonl",
+        kind: "timeline_tweets",
+        content: exportedTimeline.body
+      }
+    });
+    expect(importedTimeline.statusCode).toBe(200);
+    expect(importedTimeline.json().files[0]).toMatchObject({
+      filename: "Timeline.Tweets.jsonl",
+      kind: "timeline_tweets",
+      totalLines: 1,
+      importedLines: 1
+    });
+
     const timelineAfterImport = await app.inject({ method: "GET", url: "/timeline/data", headers: authHeaders });
     expect(timelineAfterImport.statusCode).toBe(200);
     expect(timelineAfterImport.json().pagination).toMatchObject({
@@ -1902,6 +2094,11 @@ describe("admin api", () => {
       limit: 50,
       offset: 0,
       hasMore: expect.any(Boolean)
+    });
+    expect(timelineAfterImport.json().items[0]).toMatchObject({
+      tweetId: "999001",
+      keyword: "timeline-import",
+      score: 22
     });
 
     const stats = await app.inject({ method: "GET", url: "/admin/stats", headers: authHeaders });

@@ -27,6 +27,7 @@ const selectedEntryLine = document.getElementById("selected-entry-line");
 const saveSelectedButton = document.getElementById("save-selected-button");
 const deleteSelectedButton = document.getElementById("delete-selected-button");
 const clearSelectionButton = document.getElementById("clear-selection-button");
+const downloadListButton = document.getElementById("download-list-button");
 const cleanupListsButton = document.getElementById("cleanup-lists-button");
 const activeListLabel = document.getElementById("active-list-label");
 const listSearch = document.getElementById("list-search");
@@ -36,6 +37,7 @@ const importKind = document.getElementById("import-kind");
 const loadFileButton = document.getElementById("load-file-button");
 const saveImportButton = document.getElementById("save-import-button");
 const saveAllImportButton = document.getElementById("save-all-import-button");
+const downloadTimelineTweetsButton = document.getElementById("download-timeline-tweets-button");
 const importFileDetail = document.getElementById("import-file-detail");
 const serverAccessForm = document.getElementById("server-access-form");
 const serverAccessCurrentIp = document.getElementById("server-access-current-ip");
@@ -43,13 +45,18 @@ const scoringForm = document.getElementById("scoring-form");
 const generalSettingsForm = document.getElementById("general-settings-form");
 const staleKeywordUserDays = document.getElementById("stale-keyword-user-days");
 const staleKeywordUserStartIndex = document.getElementById("stale-keyword-user-start-index");
+const staleKeywordUserSpeedPreset = document.getElementById("stale-keyword-user-speed-preset");
+const staleKeywordUserActionDelayMinSeconds = document.getElementById("stale-keyword-user-action-delay-min-seconds");
+const staleKeywordUserActionDelayMaxSeconds = document.getElementById("stale-keyword-user-action-delay-max-seconds");
 const staleKeywordUserAutoIgnoreAlert = document.getElementById("stale-keyword-user-auto-ignore-alert");
 const staleKeywordUserMaxRetries = document.getElementById("stale-keyword-user-max-retries");
+const staleKeywordUserAutoRestartDelaySeconds = document.getElementById("stale-keyword-user-auto-restart-delay-seconds");
 const openStaleKeywordUsersButton = document.getElementById("open-stale-keyword-users-button");
 const openSkippedKeywordUsersButton = document.getElementById("open-skipped-keyword-users-button");
 const toggleInlineStaleKeywordUsersButton = document.getElementById("toggle-inline-stale-keyword-users-button");
 const pruneStaleKeywordUsersButton = document.getElementById("prune-stale-keyword-users-button");
 const stopStaleKeywordUsersButton = document.getElementById("stop-stale-keyword-users-button");
+const resetStaleKeywordUserProgressButton = document.getElementById("reset-stale-keyword-user-progress-button");
 const staleKeywordUserPruneResult = document.getElementById("stale-keyword-user-prune-result");
 const searchWithoutApiForm = document.getElementById("search-without-api-form");
 const searchWithoutApiControls = document.getElementById("search-without-api-controls");
@@ -175,10 +182,12 @@ let sessionNextResetAt = null;
 let sessionNextResetTimer = null;
 let statusLineTimer = null;
 let staleKeywordUserPrunePollTimer = null;
+let staleKeywordUserPruneCountdownTimer = null;
+let currentStaleKeywordUserPruneStatus = null;
 let staleKeywordUserStartIndexTouched = false;
 let staleKeywordUserInlineListVisible = false;
 let staleKeywordUserInlineListTouched = false;
-let staleKeywordUserRemovedListVisible = false;
+let alertSnapshotHeightPx = 360;
 const buttonFeedbackTimers = new WeakMap();
 const manualLoginPollTimers = new Map();
 const moreNavSectionIds = new Set(["tests", "database", "env"]);
@@ -213,6 +222,10 @@ const legacyKindByFilename = new Map([
   ["SearchTerms.Used", "search_terms_used"],
   ["Stale.Keyword.Users", "stale_keyword_user"],
   ["Skipped.Keyword.Users", "skipped_keyword_user"],
+  ["stale_keyword_user.txt", "stale_keyword_user"],
+  ["skipped_keyword_user.txt", "skipped_keyword_user"],
+  ["Timeline.Tweets.jsonl", "timeline_tweets"],
+  ["timeline_tweets.jsonl", "timeline_tweets"],
   [".Session", "hidden_session"]
 ]);
 
@@ -297,8 +310,11 @@ const generalSettingsFields = [
   "RUN_CHAIN_COUNT",
   "STALE_KEYWORD_USER_MAX_AGE_DAYS",
   "STALE_KEYWORD_USER_START_INDEX",
+  "STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS",
+  "STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS",
   "STALE_KEYWORD_USER_AUTO_IGNORE_ALERT",
   "STALE_KEYWORD_USER_MAX_RETRIES",
+  "STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS",
   "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT",
   "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM",
   "SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER",
@@ -383,6 +399,8 @@ const envFields = [
   "SESSION_SECRET",
   "DATABASE_URL",
   "CURRENT_SESSION_FILE",
+  "ADMIN_IPV4_WHITELIST",
+  "ADMIN_IPV4_BLACKLIST",
   "RSS_FALLBACK_FEED_LIMIT",
   "X_BEARER_TOKEN",
   "X_API_KEY",
@@ -410,9 +428,21 @@ const eyeOffIcon = `
   </svg>
 `;
 
+const staleKeywordUserSpeedPresets = {
+  very_slow: { min: 5, max: 10, label: "Very slow" },
+  slow: { min: 3, max: 6, label: "Slow" },
+  normal: { min: 1, max: 5, label: "Normal" },
+  fast: { min: 1, max: 2, label: "Fast" },
+  very_fast: { min: 0, max: 0, label: "No pause" }
+};
+
 const adminTooltipByName = {
   kind: "Choose which admin list you want to edit.",
   value: "Type the raw value to add or update in the selected list.",
+  ADMIN_IPV4_WHITELIST:
+    "Extra IPv4 addresses or CIDR ranges always allowed by the HTTP access policy after the server restarts. Comma, space, semicolon, or newline separators are accepted.",
+  ADMIN_IPV4_BLACKLIST:
+    "Extra IPv4 addresses or CIDR ranges always blocked by the HTTP access policy after the server restarts. Blacklist entries win over whitelist entries.",
   allowedLanguages: "Comma-separated language codes accepted by the tweet scoring rules.",
   enableAllowedLanguages: "Enable or disable the allowed-language rejection check.",
   minimumSearchResults: "Minimum number of search results required before the keyword is considered useful.",
@@ -499,10 +529,16 @@ const adminTooltipByName = {
     "Saved default threshold for Keyword users cleanup. @keywords are removed when the latest visible tweet is older than this many days.",
   STALE_KEYWORD_USER_START_INDEX:
     "Saved 1-based active keyword user index used when starting Keyword users cleanup.",
+  STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS:
+    "Minimum random pause in seconds between the actions of Keyword users cleanup.",
+  STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS:
+    "Maximum random pause in seconds between the actions of Keyword users cleanup.",
   STALE_KEYWORD_USER_AUTO_IGNORE_ALERT:
     "When Keyword users cleanup is stopped by an X session alert, mark that alert ignored automatically and retry the cleanup once.",
   STALE_KEYWORD_USER_MAX_RETRIES:
     "Maximum number of times Keyword users cleanup can restart after an X session alert. The control is active only when Ignore alerts is enabled.",
+  STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS:
+    "Seconds to wait after an X session alert is auto-ignored before restarting Keyword users cleanup.",
   RAW_TIMELINE_ENABLED: "Enable rejected timeline capture and the Rejected Timeline page. Disable it to stop saving every DOM-visible tweet.",
   VPN_NETNS_NAME: "Linux network namespace name used by the browser crawler.",
   VPN_HOST_IFACE: "Host network interface used before OpenVPN connects. Leave empty for auto-detection.",
@@ -562,19 +598,29 @@ const adminTooltipById = {
   "load-file-button": "Load selected local files into the import preview without saving them yet.",
   "save-import-button": "Save the currently loaded import preview into SQLite.",
   "save-all-import-button": "Import selected files and save them into SQLite in one action.",
+  "download-timeline-tweets-button": "Download every accepted timeline tweet as a JSON Lines file that can be imported back later.",
   "save-selected-button": "Save changes to the selected list entry.",
+  "download-list-button": "Download the currently selected list as a local file.",
   "delete-selected-button": "Delete the selected list entry from active use.",
   "clear-selection-button": "Clear the selected row and return to add mode.",
   "cleanup-lists-button":
     "Clean editable lists: remove duplicates, empty rows, keywords blocked by bans, and stale/skipped user conflicts.",
   "stale-keyword-user-days": "Remove @keywords when the latest visible tweet from that user is older than this many days.",
   "stale-keyword-user-start-index": "Start checking @keywords at this 1-based position in the planned user list. Use the estimated value after an interrupted cleanup.",
+  "stale-keyword-user-speed-preset":
+    "Choose a predefined execution speed profile for Keyword users cleanup. It controls the random pause between actions and updates a running cleanup immediately.",
+  "stale-keyword-user-action-delay-min-seconds": "Minimum random pause in seconds between user-search actions during Keyword users cleanup.",
+  "stale-keyword-user-action-delay-max-seconds": "Maximum random pause in seconds between user-search actions during Keyword users cleanup.",
   "stale-keyword-user-max-retries": "Maximum restart attempts after X session alerts during Keyword users cleanup. Used only in browser-session mode.",
+  "stale-keyword-user-auto-restart-delay-seconds":
+    "Seconds to wait after auto-ignoring an X session alert before restarting Keyword users cleanup.",
   "open-stale-keyword-users-button": "Open the list of @keywords removed by stale user cleanup.",
   "toggle-inline-stale-keyword-users-button": "Show or hide the stale keyword users preview in this section.",
   "open-skipped-keyword-users-button": "Open the list of @keywords skipped by stale user cleanup, with the recorded reason.",
   "prune-stale-keyword-users-button": "Start inactive users check: stop the active run, check @keywords through the active search mode, and move inactive users to Stale keyword users.",
   "stop-stale-keyword-users-button": "Stop the active inactive users check and keep the progress already written to the report.",
+  "reset-stale-keyword-user-progress-button":
+    "Clear saved inactive users check progress and reset Start from index to 1. Stale and skipped user lists are not deleted.",
   "reset-x-counters-button": "Reset local X request counters without clearing estimated spend.",
   "reset-x-budget-button": "Reset today's local X budget usage.",
   "openvpn-profile-select": "Select one imported OpenVPN profile. The config path, remote host, port, and protocol are filled from that profile.",
@@ -2423,8 +2469,15 @@ function formatXSessionAlertEvidence(alert) {
       </details>
       ${
         details.snapshotPath
-          ? `<button class="secondary-button" type="button" data-alert-snapshot-id="${escapeAttribute(alertId)}">Open captured snapshot file</button>
-             <pre class="alert-command-block" data-alert-snapshot-output="${escapeAttribute(alertId)}">Snapshot file content will appear here.</pre>`
+          ? `<div class="alert-snapshot-controls">
+               <button class="secondary-button" type="button" data-alert-snapshot-id="${escapeAttribute(alertId)}">Open captured snapshot file</button>
+               <label class="alert-snapshot-slider">
+                 <span>Snapshot height</span>
+                 <input type="range" min="220" max="960" step="20" value="${escapeAttribute(alertSnapshotHeightPx)}" data-alert-snapshot-height="${escapeAttribute(alertId)}">
+                 <strong data-alert-snapshot-height-value="${escapeAttribute(alertId)}">${escapeHtml(alertSnapshotHeightPx)}px</strong>
+               </label>
+             </div>
+             <pre class="alert-command-block alert-snapshot-output" style="height:${escapeAttribute(alertSnapshotHeightPx)}px" data-alert-snapshot-output="${escapeAttribute(alertId)}">Snapshot file content will appear here.</pre>`
           : ""
       }
     </div>
@@ -2444,6 +2497,7 @@ async function loadXSessionAlertSnapshot(alertId, button) {
     if (output) {
       output.textContent = result?.raw || JSON.stringify(result?.snapshot || {}, null, 2);
       output.scrollTop = 0;
+      output.style.height = `${alertSnapshotHeightPx}px`;
     }
     setStatus(`Loaded X session alert snapshot: ${result?.path || "snapshot"}`);
   } finally {
@@ -2451,6 +2505,19 @@ async function loadXSessionAlertSnapshot(alertId, button) {
       button.disabled = false;
       button.textContent = originalText || "Open captured snapshot file";
     }
+  }
+}
+
+function updateAlertSnapshotHeight(alertId, height) {
+  const numericHeight = Math.max(220, Math.min(960, Number(height) || 360));
+  alertSnapshotHeightPx = numericHeight;
+  const output = sessionAlertDetail?.querySelector(`[data-alert-snapshot-output="${CSS.escape(String(alertId))}"]`);
+  const value = sessionAlertDetail?.querySelector(`[data-alert-snapshot-height-value="${CSS.escape(String(alertId))}"]`);
+  if (output) {
+    output.style.height = `${numericHeight}px`;
+  }
+  if (value) {
+    value.textContent = `${numericHeight}px`;
   }
 }
 
@@ -2508,7 +2575,8 @@ async function refreshCurrentSession() {
 
 function renderSessionStaleKeywordUserPrune(status) {
   const running = Boolean(status?.running);
-  if (pruneStaleKeywordUsersButton) pruneStaleKeywordUsersButton.disabled = running;
+  const restartPending = staleKeywordUserAutoRestartPending(status?.job);
+  if (pruneStaleKeywordUsersButton) pruneStaleKeywordUsersButton.disabled = running || restartPending;
   if (stopStaleKeywordUsersButton) stopStaleKeywordUsersButton.disabled = false;
   if (!sessionStalePruneStatus) return;
   const job = status?.job;
@@ -2518,28 +2586,37 @@ function renderSessionStaleKeywordUserPrune(status) {
     return;
   }
   const report = job.report;
-  const total = Number(report?.totalCandidates ?? 0);
-  const processed = Number(report?.processedCandidates ?? 0);
-  const remaining = Math.max(0, total - processed);
-  const removed = report?.removedUsers?.length ?? 0;
+  const estimate = staleKeywordUserPruneEstimate(status, job);
+  const progressSnapshot = staleKeywordUserProgressSnapshot(report, job, estimate);
+  const total = progressSnapshot.total;
+  const processed = progressSnapshot.processed;
+  const remaining = progressSnapshot.remaining;
   const kept = report?.keptUsers?.length ?? 0;
   const skipped = report?.skippedUsers?.length ?? 0;
-  const deleted = report?.deletedUsers?.length ?? 0;
   const state = report?.status ?? job.status ?? "running";
   const age = Number(job.maxAgeDays ?? report?.maxAgeDays ?? 0);
   const ageLabel = Number.isFinite(age) && age > 0 ? `>${age}d` : "";
   const mode = report?.mode ?? job.mode ?? (currentRuntimeModes.searchWithoutApiEnabled ? "without_api" : "x_api");
   const modeLabel = mode === "x_api" ? " x_api" : " browser";
   const retryLabel = mode === "without_api" && job.autoIgnoreAlert ? " auto-ignore" : "";
+  const autoRestartDelaySeconds = Number(job.autoRestartDelaySeconds ?? 0);
   const startIndex = Number(job.startIndex ?? report?.startIndex ?? 1);
   const estimatedChecked = Number(job.estimatedCheckedUsers ?? 0);
   const suggestedStartIndex = Number(job.suggestedStartIndex ?? 1);
+  const actionDelayMinSeconds = Math.max(0, Math.floor(Number(job.actionDelayMinSeconds ?? report?.actionDelayMinSeconds ?? 0)));
+  const actionDelayMaxSeconds = Math.max(
+    actionDelayMinSeconds,
+    Math.floor(Number(job.actionDelayMaxSeconds ?? report?.actionDelayMaxSeconds ?? actionDelayMinSeconds))
+  );
+  const speedLabel = staleKeywordUserSpeedSummary(actionDelayMinSeconds, actionDelayMaxSeconds);
   const startLabel = Number.isFinite(startIndex) && startIndex > 1 ? `, start index ${startIndex}` : "";
   const estimateLabel =
     Number.isFinite(estimatedChecked) && estimatedChecked > 0
       ? `, estimated checked ${estimatedChecked}, next index ${suggestedStartIndex}`
       : "";
   const nextLabel = Number.isFinite(suggestedStartIndex) && suggestedStartIndex > 1 ? `next ${suggestedStartIndex}` : "";
+  const restartCountdown = staleKeywordUserAutoRestartCountdownText(job);
+  const restartCountdownLabel = restartCountdown ? `restart in ${restartCountdown}` : "";
   const shortParts = [
     state,
     ageLabel,
@@ -2547,12 +2624,16 @@ function renderSessionStaleKeywordUserPrune(status) {
     retryLabel,
     total > 0 ? `${processed}/${total} checked` : "waiting",
     remaining > 0 ? `${remaining} left` : "",
-    nextLabel
+    nextLabel,
+    restartCountdownLabel
   ].filter(Boolean);
-  const fullStatus = `${state} ${ageLabel}${modeLabel}${retryLabel ? ` ${retryLabel}` : ""}${startLabel}${estimateLabel} - ${processed}/${total} checked, ${remaining} left, ${removed} removed this run, ${deleted} keyword removed, ${kept} kept, ${skipped} skipped`;
+  const autoRestartDelayLabel =
+    mode === "without_api" && job.autoIgnoreAlert ? `, auto-restart pause ${autoRestartDelaySeconds}s` : "";
+  const restartCountdownFullLabel = restartCountdown ? `, auto-restart in ${restartCountdown}` : "";
+  const fullStatus = `${state} ${ageLabel}${modeLabel}${retryLabel ? ` ${retryLabel}` : ""}${autoRestartDelayLabel}${restartCountdownFullLabel}${startLabel}${estimateLabel} - speed ${speedLabel} - ${processed}/${total} checked, ${remaining} left, ${kept} kept, ${skipped} skipped`;
   if (!report && state === "running") {
     sessionStalePruneStatus.textContent = shortParts.join(" - ");
-    sessionStalePruneStatus.title = `running ${ageLabel}${modeLabel}${retryLabel ? ` ${retryLabel}` : ""}${startLabel}${estimateLabel} - waiting for first update`;
+    sessionStalePruneStatus.title = `running ${ageLabel}${modeLabel}${retryLabel ? ` ${retryLabel}` : ""}${autoRestartDelayLabel}${startLabel}${estimateLabel} - speed ${speedLabel} - waiting for first update`;
     return;
   }
   sessionStalePruneStatus.textContent = shortParts.join(" - ");
@@ -2888,6 +2969,16 @@ function currentEditKindLabel() {
   return editKind.options[editKind.selectedIndex]?.textContent || editKind.value;
 }
 
+function downloadActiveList() {
+  const kind = editKind.value;
+  if (!kind) return;
+  window.location.href = `/admin/lists/${encodeURIComponent(kind)}/export`;
+}
+
+function downloadTimelineTweets() {
+  window.location.href = "/admin/timeline/export";
+}
+
 function inferKindFromFilename(filename) {
   const baseName = filename.split(/[\\/]/).pop() || filename;
   return legacyKindByFilename.get(baseName) || legacyKindByFilename.get(baseName.replace(/\.txt$/i, "")) || null;
@@ -3095,6 +3186,7 @@ function writeGeneralSettingsForm(values) {
   }
   applyRawTimelineUi(values);
   syncStaleKeywordUserRetryControls();
+  syncStaleKeywordUserSpeedPresetFromValues();
 }
 
 function applyRawTimelineUi(values) {
@@ -3109,7 +3201,101 @@ function syncStaleKeywordUserRetryControls() {
   if (staleKeywordUserMaxRetries) {
     staleKeywordUserMaxRetries.disabled = !enabled;
   }
+  if (staleKeywordUserAutoRestartDelaySeconds) {
+    staleKeywordUserAutoRestartDelaySeconds.disabled = !enabled;
+  }
   document.getElementById("stale-keyword-user-max-retries-label")?.classList.toggle("is-check-disabled", !enabled);
+  document.getElementById("stale-keyword-user-auto-restart-delay-label")?.classList.toggle("is-check-disabled", !enabled);
+}
+
+function inferStaleKeywordUserSpeedPreset(minSeconds, maxSeconds) {
+  const presetEntries = Object.entries(staleKeywordUserSpeedPresets);
+  for (const [key, preset] of presetEntries) {
+    if (preset.min === minSeconds && preset.max === maxSeconds) {
+      return key;
+    }
+  }
+  return (
+    presetEntries
+      .map(([key, preset]) => ({
+        key,
+        distance: Math.abs(preset.min - minSeconds) + Math.abs(preset.max - maxSeconds)
+      }))
+      .sort((left, right) => left.distance - right.distance)[0]?.key || "normal"
+  );
+}
+
+function syncStaleKeywordUserSpeedPresetFromValues() {
+  if (!staleKeywordUserSpeedPreset || !staleKeywordUserActionDelayMinSeconds || !staleKeywordUserActionDelayMaxSeconds) {
+    return;
+  }
+  const minSeconds = Math.max(0, Math.floor(Number(staleKeywordUserActionDelayMinSeconds.value || 0)));
+  const maxSeconds = Math.max(minSeconds, Math.floor(Number(staleKeywordUserActionDelayMaxSeconds.value || 0)));
+  staleKeywordUserActionDelayMinSeconds.value = String(minSeconds);
+  staleKeywordUserActionDelayMaxSeconds.value = String(maxSeconds);
+  staleKeywordUserSpeedPreset.value = inferStaleKeywordUserSpeedPreset(minSeconds, maxSeconds);
+}
+
+function applyStaleKeywordUserSpeedPreset(presetKey) {
+  const preset = staleKeywordUserSpeedPresets[presetKey] || staleKeywordUserSpeedPresets.normal;
+  if (staleKeywordUserSpeedPreset) {
+    staleKeywordUserSpeedPreset.value = presetKey in staleKeywordUserSpeedPresets ? presetKey : "normal";
+  }
+  if (staleKeywordUserActionDelayMinSeconds) {
+    staleKeywordUserActionDelayMinSeconds.value = String(preset.min);
+  }
+  if (staleKeywordUserActionDelayMaxSeconds) {
+    staleKeywordUserActionDelayMaxSeconds.value = String(preset.max);
+  }
+}
+
+function describeStaleKeywordUserSpeedPreset(minSeconds, maxSeconds) {
+  const presetKey = inferStaleKeywordUserSpeedPreset(minSeconds, maxSeconds);
+  const preset = staleKeywordUserSpeedPresets[presetKey] || staleKeywordUserSpeedPresets.normal;
+  if (minSeconds === 0 && maxSeconds === 0) {
+    return `${preset.label}: no pause between actions.`;
+  }
+  if (minSeconds === maxSeconds) {
+    return `${preset.label}: ${minSeconds} second pause between actions.`;
+  }
+  return `${preset.label}: random ${minSeconds}-${maxSeconds} second pauses between actions.`;
+}
+
+function staleKeywordUserSpeedSummary(minSeconds, maxSeconds) {
+  const normalizedMinSeconds = Math.max(0, Math.floor(Number(minSeconds) || 0));
+  const normalizedMaxSeconds = Math.max(normalizedMinSeconds, Math.floor(Number(maxSeconds) || 0));
+  const presetKey = inferStaleKeywordUserSpeedPreset(normalizedMinSeconds, normalizedMaxSeconds);
+  const preset = staleKeywordUserSpeedPresets[presetKey] || staleKeywordUserSpeedPresets.normal;
+  if (normalizedMinSeconds === 0 && normalizedMaxSeconds === 0) {
+    return `${preset.label} (no pause)`;
+  }
+  if (normalizedMinSeconds === normalizedMaxSeconds) {
+    return `${preset.label} (${normalizedMinSeconds}s)`;
+  }
+  return `${preset.label} (${normalizedMinSeconds}-${normalizedMaxSeconds}s)`;
+}
+
+async function applyRunningStaleKeywordUserSpeed() {
+  if (!currentStaleKeywordUserPruneStatus?.running) {
+    return false;
+  }
+  const actionDelayMinSeconds = Math.max(0, Math.floor(Number(staleKeywordUserActionDelayMinSeconds?.value || 0)));
+  const actionDelayMaxSeconds = Math.max(
+    actionDelayMinSeconds,
+    Math.floor(Number(staleKeywordUserActionDelayMaxSeconds?.value || 0))
+  );
+  const result = await jsonFetch("/admin/keyword-users/prune-stale/speed", {
+    method: "POST",
+    body: JSON.stringify({
+      actionDelayMinSeconds,
+      actionDelayMaxSeconds
+    })
+  });
+  const status = result?.job ?? result;
+  renderStaleKeywordUserPruneStatus(status);
+  renderSessionStaleKeywordUserPrune(status);
+  setStatus(`Inactive users check execution speed updated: ${staleKeywordUserSpeedSummary(actionDelayMinSeconds, actionDelayMaxSeconds)}.`);
+  return true;
 }
 
 function writeServerAccessForm(config, currentIp) {
@@ -3280,6 +3466,18 @@ async function saveOpenVpnSettings() {
 }
 
 function runtimeSettingsFeedback(result, fallback) {
+  const xApiModeShutdown = result?.xApiModeShutdown;
+  if (xApiModeShutdown?.requested) {
+    const vpnStop = xApiModeShutdown.openVpn?.stop || {};
+    const namespaceTeardown = xApiModeShutdown.namespace?.teardown || {};
+    if (vpnStop.requested || namespaceTeardown.requested) {
+      return "X API mode enabled. VPN shutdown requested.";
+    }
+    if (vpnStop.reason === "no_running_openvpn_script" || vpnStop.reason === "skipped_in_test") {
+      return "X API mode enabled. No active OpenVPN tunnel found.";
+    }
+    return "X API mode enabled. VPN runtime checked.";
+  }
   const openVpn = result?.openVpn;
   if (!openVpn?.settingsChanged) {
     return fallback;
@@ -3372,9 +3570,24 @@ async function startStaleKeywordUserPrune() {
     setStatus("Enter a positive start index before checking @keywords.");
     return;
   }
+  const actionDelayMinSeconds = Number(staleKeywordUserActionDelayMinSeconds?.value || 0);
+  const actionDelayMaxSeconds = Number(staleKeywordUserActionDelayMaxSeconds?.value || 0);
+  if (!Number.isFinite(actionDelayMinSeconds) || actionDelayMinSeconds < 0) {
+    setStatus("Enter a positive or zero minimum pause before checking @keywords.");
+    return;
+  }
+  if (!Number.isFinite(actionDelayMaxSeconds) || actionDelayMaxSeconds < 0) {
+    setStatus("Enter a positive or zero maximum pause before checking @keywords.");
+    return;
+  }
   const maxRetries = Number(staleKeywordUserMaxRetries?.value || 0);
   if (!Number.isFinite(maxRetries) || maxRetries < 0) {
     setStatus("Enter a positive max retry value before checking @keywords.");
+    return;
+  }
+  const autoRestartDelaySeconds = Number(staleKeywordUserAutoRestartDelaySeconds?.value || 0);
+  if (!Number.isFinite(autoRestartDelaySeconds) || autoRestartDelaySeconds < 0) {
+    setStatus("Enter a positive or zero auto-restart pause before checking @keywords.");
     return;
   }
   const autoIgnoreAlert = Boolean(staleKeywordUserAutoIgnoreAlert?.checked);
@@ -3385,12 +3598,15 @@ async function startStaleKeywordUserPrune() {
       `This cleanup checks every keyword that starts with @ through ${cleanupModeLabel}.`,
       `It will start from user index ${Math.floor(startIndex)}.`,
       "If a run is currently active, it will be stopped before the cleanup starts.",
-      "Each user check uses random 1-5 second pauses between actions.",
+      describeStaleKeywordUserSpeedPreset(
+        Math.floor(Math.min(actionDelayMinSeconds, actionDelayMaxSeconds)),
+        Math.floor(Math.max(actionDelayMinSeconds, actionDelayMaxSeconds))
+      ),
       usesBrowserMode
         ? autoIgnoreAlert
           ? `Ignore alerts is enabled: X session alerts raised by this cleanup will be marked ignored automatically and the cleanup can retry up to ${Math.floor(
               maxRetries
-            )} time(s).`
+            )} time(s), waiting ${Math.floor(autoRestartDelaySeconds)} second(s) before each auto-restart.`
           : "If X raises a session alert, resolve it manually to continue this cleanup."
         : "In X API mode this cleanup does not depend on an X browser session, so alert retries are not used.",
       "",
@@ -3407,14 +3623,16 @@ async function startStaleKeywordUserPrune() {
     body: JSON.stringify({
       maxAgeDays,
       startIndex: Math.floor(startIndex),
+      actionDelayMinSeconds: Math.floor(actionDelayMinSeconds),
+      actionDelayMaxSeconds: Math.floor(actionDelayMaxSeconds),
       autoIgnoreAlert,
-      maxRetries: Math.floor(maxRetries)
+      maxRetries: Math.floor(maxRetries),
+      autoRestartDelaySeconds: Math.floor(autoRestartDelaySeconds)
     })
   });
   if (stopStaleKeywordUsersButton) stopStaleKeywordUsersButton.disabled = false;
-  staleKeywordUserInlineListVisible = true;
+  staleKeywordUserInlineListVisible = false;
   staleKeywordUserInlineListTouched = false;
-  staleKeywordUserRemovedListVisible = false;
   syncInlineStaleKeywordUsersToggle();
   renderStaleKeywordUserPruneStatus(result);
   pollStaleKeywordUserPruneStatusSoon();
@@ -3432,6 +3650,45 @@ async function stopStaleKeywordUserPrune() {
   }
 }
 
+async function resetStaleKeywordUserProgress() {
+  if (!resetStaleKeywordUserProgressButton) return;
+  const confirmed = window.confirm(
+    [
+      "Reset inactive users check progress?",
+      "",
+      "This clears the saved cleanup progress, resume state, and old cleanup reports.",
+      "Start from index will be reset to 1.",
+      "Stale users and skipped users lists will not be deleted.",
+      "",
+      "If a check is currently running, stop it first.",
+      "Continue?"
+    ].join("\n")
+  );
+  if (!confirmed) return;
+
+  resetStaleKeywordUserProgressButton.disabled = true;
+  setStatus("Resetting stale @keyword cleanup progress...");
+  try {
+    const result = await jsonFetch("/admin/keyword-users/prune-stale/progress/reset", { method: "POST" });
+    if (!result) return;
+    currentStaleKeywordUserPruneStatus = result.status ?? null;
+    staleKeywordUserStartIndexTouched = false;
+    if (staleKeywordUserStartIndex) {
+      staleKeywordUserStartIndex.value = "1";
+    }
+    if (result.values) {
+      writeGeneralSettingsForm(result.values);
+    }
+    renderStaleKeywordUserPruneStatus(result.status ?? result);
+    showButtonFeedback(resetStaleKeywordUserProgressButton, "Reset.");
+    setStatus(`Stale @keyword cleanup progress reset. Removed ${Number(result.reset?.deletedFiles?.length ?? 0)} progress file(s).`);
+    await refreshStats();
+    await refreshXApiSettings();
+  } finally {
+    resetStaleKeywordUserProgressButton.disabled = false;
+  }
+}
+
 async function refreshStaleKeywordUserPruneStatus() {
   const result = await jsonFetch("/admin/keyword-users/prune-stale/current");
   renderStaleKeywordUserPruneStatus(result);
@@ -3441,6 +3698,9 @@ async function refreshStaleKeywordUserPruneStatus() {
     }
     if (stopStaleKeywordUsersButton) {
       stopStaleKeywordUsersButton.disabled = false;
+    }
+    if (resetStaleKeywordUserProgressButton) {
+      resetStaleKeywordUserProgressButton.disabled = false;
     }
     return;
   }
@@ -3452,7 +3712,7 @@ async function refreshStaleKeywordUserPruneStatus() {
     return;
   }
   if (shouldPollForStaleKeywordUserAutoRestart(result)) {
-    pollStaleKeywordUserPruneStatusSoon();
+    pollStaleKeywordUserPruneStatusSoon(staleKeywordUserAutoRestartPending(result.job) ? 1000 : 2500);
     return;
   }
   if (pruneStaleKeywordUsersButton) {
@@ -3462,6 +3722,9 @@ async function refreshStaleKeywordUserPruneStatus() {
     stopStaleKeywordUsersButton.disabled = false;
   }
   await refreshStats();
+  if (staleKeywordUserPruneCreditsDepleted(result)) {
+    await refreshXApiSettings();
+  }
   if (listState.kind === "keyword" || listState.kind === "stale_keyword_user") {
     await refreshList();
   }
@@ -3477,7 +3740,54 @@ function shouldPollForStaleKeywordUserAutoRestart(result) {
   return Number.isFinite(restartCount) && Number.isFinite(maxRetries) && restartCount < maxRetries;
 }
 
-function pollStaleKeywordUserPruneStatusSoon() {
+function staleKeywordUserPruneCreditsDepleted(result) {
+  const error = `${result?.job?.error || ""} ${result?.job?.report?.error || ""}`;
+  return /credits?\s*depleted|http\s*402|code\s*402/i.test(error);
+}
+
+function staleKeywordUserAutoRestartRemainingSeconds(job) {
+  const restartAt = Date.parse(job?.autoRestartAt || "");
+  if (!Number.isFinite(restartAt)) {
+    return null;
+  }
+  return Math.max(0, Math.ceil((restartAt - Date.now()) / 1000));
+}
+
+function staleKeywordUserAutoRestartPending(job) {
+  return staleKeywordUserAutoRestartRemainingSeconds(job) !== null && job?.status !== "running";
+}
+
+function staleKeywordUserAutoRestartCountdownText(job) {
+  const remainingSeconds = staleKeywordUserAutoRestartRemainingSeconds(job);
+  if (remainingSeconds === null) {
+    return "";
+  }
+  return `${remainingSeconds}s`;
+}
+
+function syncStaleKeywordUserPruneCountdown(result) {
+  if (staleKeywordUserPruneCountdownTimer) {
+    clearInterval(staleKeywordUserPruneCountdownTimer);
+    staleKeywordUserPruneCountdownTimer = null;
+  }
+  if (!staleKeywordUserAutoRestartPending(result?.job)) {
+    return;
+  }
+  staleKeywordUserPruneCountdownTimer = setInterval(() => {
+    if (!staleKeywordUserAutoRestartPending(currentStaleKeywordUserPruneStatus?.job)) {
+      clearInterval(staleKeywordUserPruneCountdownTimer);
+      staleKeywordUserPruneCountdownTimer = null;
+      return;
+    }
+    renderStaleKeywordUserPruneStatus(currentStaleKeywordUserPruneStatus, { skipCountdownSync: true });
+    renderSessionStaleKeywordUserPrune(currentStaleKeywordUserPruneStatus);
+    if (staleKeywordUserAutoRestartRemainingSeconds(currentStaleKeywordUserPruneStatus?.job) <= 0) {
+      pollStaleKeywordUserPruneStatusSoon(500);
+    }
+  }, 1000);
+}
+
+function pollStaleKeywordUserPruneStatusSoon(delayMs = 2500) {
   if (staleKeywordUserPrunePollTimer) {
     clearTimeout(staleKeywordUserPrunePollTimer);
   }
@@ -3485,22 +3795,26 @@ function pollStaleKeywordUserPruneStatusSoon() {
     refreshStaleKeywordUserPruneStatus().catch((error) => {
       if (pruneStaleKeywordUsersButton) pruneStaleKeywordUsersButton.disabled = false;
       if (stopStaleKeywordUsersButton) stopStaleKeywordUsersButton.disabled = false;
+      if (resetStaleKeywordUserProgressButton) resetStaleKeywordUserProgressButton.disabled = false;
       setStatus(error.message);
     });
-  }, 2500);
+  }, delayMs);
 }
 
-function renderStaleKeywordUserPruneStatus(result) {
+function renderStaleKeywordUserPruneStatus(result, options = {}) {
   if (typeof result?.running !== "boolean" && typeof result?.job?.running === "boolean") {
     result = result.job;
   }
+  currentStaleKeywordUserPruneStatus = result?.job ? result : null;
   const running = Boolean(result?.running);
-  if (pruneStaleKeywordUsersButton) pruneStaleKeywordUsersButton.disabled = running;
+  const restartPending = staleKeywordUserAutoRestartPending(result?.job);
+  if (pruneStaleKeywordUsersButton) pruneStaleKeywordUsersButton.disabled = running || restartPending;
   if (stopStaleKeywordUsersButton) stopStaleKeywordUsersButton.disabled = false;
+  if (resetStaleKeywordUserProgressButton) resetStaleKeywordUserProgressButton.disabled = running;
   if (!staleKeywordUserPruneResult) return;
   const job = result?.job;
-  if (job && !staleKeywordUserInlineListTouched) {
-    staleKeywordUserInlineListVisible = true;
+  if (!options.skipCountdownSync) {
+    syncStaleKeywordUserPruneCountdown(result);
   }
   syncInlineStaleKeywordUsersToggle();
   const staleUsersList = staleKeywordUserInlineListVisible ? renderInlineStaleKeywordUsers(result?.staleUsers) : "";
@@ -3513,11 +3827,13 @@ function renderStaleKeywordUserPruneStatus(result) {
     return;
   }
   const report = job.report;
-  const total = report?.totalCandidates ?? 0;
-  const processed = report?.processedCandidates ?? 0;
-  const remaining = Math.max(0, total - processed);
+  const rawTotal = report?.totalCandidates ?? 0;
+  const rawProcessed = report?.processedCandidates ?? 0;
+  const progressSnapshot = staleKeywordUserProgressSnapshot(report, job, statusEstimate);
+  const total = progressSnapshot.total;
+  const processed = progressSnapshot.processed;
+  const remaining = progressSnapshot.remaining;
   const removed = report?.removedUsers?.length ?? 0;
-  const deleted = report?.deletedUsers?.length ?? 0;
   const kept = report?.keptUsers?.length ?? 0;
   const skipped = report?.skippedUsers?.length ?? 0;
   const status = report?.status ?? job.status;
@@ -3525,60 +3841,60 @@ function renderStaleKeywordUserPruneStatus(result) {
   const modeLabel = mode === "x_api" ? "X API" : "browser session";
   const autoIgnoreLabel = mode === "without_api" && job.autoIgnoreAlert ? " - auto-ignore alerts" : "";
   const maxRetries = Number(job.maxRetries ?? 0);
+  const autoRestartDelaySeconds = Number(job.autoRestartDelaySeconds ?? 0);
   const restartCount = Number(job.restartCount ?? 0);
+  const displayedRestartCount = running ? 0 : restartCount;
   const staleUsersTotal = Number(result?.staleUsers?.total ?? 0);
   const startIndex = Number(job.startIndex ?? report?.startIndex ?? 1);
   const skippedBeforeStartIndex = Number(job.skippedBeforeStartIndex ?? report?.skippedBeforeStartIndex ?? 0);
+  const actionDelayMinSeconds = Math.max(0, Math.floor(Number(job.actionDelayMinSeconds ?? report?.actionDelayMinSeconds ?? 0)));
+  const actionDelayMaxSeconds = Math.max(
+    actionDelayMinSeconds,
+    Math.floor(Number(job.actionDelayMaxSeconds ?? report?.actionDelayMaxSeconds ?? actionDelayMinSeconds))
+  );
   const stoppedRun = job.stoppedRun ? `<p>Stopped run: <code>${escapeHtml(job.stoppedRun.id)}</code></p>` : "";
   const error = job.error ? `<p class="status-problem">${escapeHtml(job.error)}</p>` : "";
   const progress = renderStaleKeywordUserProgress({ processed, total, remaining });
+  const restartCountdown = staleKeywordUserAutoRestartCountdownText(job);
+  const restartCountdownLine = restartCountdown ? `<p class="status-problem">Auto restart in <strong>${escapeHtml(restartCountdown)}</strong>.</p>` : "";
+  const batchProgressLine =
+    progressSnapshot.baseChecked > 0 && rawTotal > 0
+      ? `<p>Current restart batch: <strong>${escapeHtml(rawProcessed)}</strong>/<strong>${escapeHtml(rawTotal)}</strong> checked.</p>`
+      : "";
   const startIndexLine =
     startIndex > 1 || skippedBeforeStartIndex > 0
       ? `<p>Start index: <code>${escapeHtml(startIndex)}</code> (${escapeHtml(skippedBeforeStartIndex)} skipped before start).</p>`
       : "";
-  const removedListHidden = staleKeywordUserRemovedListVisible ? "" : " hidden";
-  const removedList =
-    removed > 0
-      ? `<div class="stale-prune-removed" data-stale-prune-removed-list${removedListHidden}>
-          ${report.removedUsers
-            .map(
-              (user) =>
-                `<div class="stale-prune-user"><code>${escapeHtml(user.keyword)}</code><span>${escapeHtml(
-                  formatRemovedKeywordUserDetail(user)
-                )}</span></div>`
-            )
-            .join("")}
-        </div>`
-      : "";
-  const showRemovedButton =
-    removed > 0
-      ? `<button type="button" class="secondary-button" data-stale-prune-toggle>${staleKeywordUserRemovedListVisible ? "Hide removed users" : "Show removed users"}</button>`
-      : "";
   const retryLine =
     mode === "without_api"
-      ? `<p>Alert retries: <strong>${escapeHtml(restartCount)}</strong>/<strong>${escapeHtml(maxRetries)}</strong></p>`
+      ? `<p>Alert retries: <strong>${escapeHtml(displayedRestartCount)}</strong>/<strong>${escapeHtml(maxRetries)}</strong> - auto-restart pause: <strong>${escapeHtml(autoRestartDelaySeconds)}</strong>s</p>`
       : `<p>Alert retries: <strong>n/a</strong> in X API mode.</p>`;
   staleKeywordUserPruneResult.innerHTML = `
     <div class="job-result-summary">
       ${progress}
       <p>Mode: <strong>${escapeHtml(modeLabel)}</strong></p>
-      <p>Status: <strong>${escapeHtml(status)}</strong>${escapeHtml(autoIgnoreLabel)} - ${processed}/${total} checked - <strong>${remaining}</strong> @ remaining - ${removed} removed this run - ${deleted} keyword removed - ${kept} kept - ${skipped} skipped</p>
+      <p>Execution speed: <strong>${escapeHtml(staleKeywordUserSpeedSummary(actionDelayMinSeconds, actionDelayMaxSeconds))}</strong></p>
+      <p>Status: <strong>${escapeHtml(status)}</strong>${escapeHtml(autoIgnoreLabel)} - ${processed}/${total} checked - <strong>${remaining}</strong> @ remaining - ${kept} kept - ${skipped} skipped</p>
       <p>Stale list total: <strong>${escapeHtml(staleUsersTotal)}</strong></p>
       ${retryLine}
+      ${restartCountdownLine}
       ${startIndexLine}
+      ${batchProgressLine}
       ${estimateLine}
       ${stoppedRun}
       ${error}
-      <div class="button-row">${showRemovedButton}</div>
-      ${removedList}
       ${staleUsersList}
     </div>`;
-  if (status !== "running") {
+  if (restartPending) {
+    if (!options.skipCountdownSync) {
+      setStatus(`Stale @keyword cleanup will auto-restart in ${restartCountdown || "0s"}.`);
+    }
+  } else if (status !== "running" && !options.skipCountdownSync) {
     const message =
       status === "completed"
-        ? `Stale @keyword cleanup completed: ${removed} stale, ${deleted} keyword removed, ${kept} kept, ${skipped} skipped.`
+        ? `Stale @keyword cleanup completed: ${removed} stale, ${kept} kept, ${skipped} skipped.`
         : status === "stopped"
-          ? `Stale @keyword cleanup stopped: ${removed} stale, ${deleted} keyword removed, ${kept} kept, ${skipped} skipped.`
+          ? `Stale @keyword cleanup stopped: ${removed} stale, ${kept} kept, ${skipped} skipped.`
           : `Stale @keyword cleanup failed: ${job.error || "unknown error"}`;
     setStatus(message);
   }
@@ -3588,6 +3904,34 @@ function staleKeywordUserPruneEstimate(result, job) {
   return {
     checkedUsers: Number(result?.estimates?.checkedUsers ?? job?.estimatedCheckedUsers ?? 0),
     suggestedStartIndex: Number(result?.estimates?.suggestedStartIndex ?? job?.suggestedStartIndex ?? 1)
+  };
+}
+
+function staleKeywordUserProgressSnapshot(report, job, estimate) {
+  const rawTotal = Math.max(0, Number(report?.totalCandidates ?? 0));
+  const rawProcessed = Math.max(0, Math.min(Number(report?.processedCandidates ?? 0), rawTotal || Number(report?.processedCandidates ?? 0)));
+  if (!report || rawTotal <= 0) {
+    return {
+      processed: 0,
+      total: 0,
+      remaining: 0,
+      baseChecked: 0,
+      rawProcessed,
+      rawTotal
+    };
+  }
+  const skippedBeforeStartIndex = Math.max(0, Number(job?.skippedBeforeStartIndex ?? report?.skippedBeforeStartIndex ?? 0));
+  const estimatedChecked = Math.max(0, Number(estimate?.checkedUsers ?? 0));
+  const processed = Math.max(skippedBeforeStartIndex + rawProcessed, estimatedChecked);
+  const baseChecked = Math.max(0, processed - rawProcessed);
+  const total = Math.max(processed, baseChecked + rawTotal);
+  return {
+    processed,
+    total,
+    remaining: Math.max(0, total - processed),
+    baseChecked,
+    rawProcessed,
+    rawTotal
   };
 }
 
@@ -3911,6 +4255,14 @@ loadFileButton.addEventListener("click", async () => {
   setStatus(`${pendingImports.length} file${pendingImports.length === 1 ? "" : "s"} imported. You can now save to SQLite.`);
 });
 
+downloadListButton?.addEventListener("click", () => {
+  downloadActiveList();
+});
+
+downloadTimelineTweetsButton?.addEventListener("click", () => {
+  downloadTimelineTweets();
+});
+
 saveImportButton.addEventListener("click", async () => {
   setStatus(`Saving ${pendingImports.length} file${pendingImports.length === 1 ? "" : "s"} to SQLite...`);
   const results = await savePendingImports();
@@ -4045,6 +4397,11 @@ sessionAlertDetail?.addEventListener("click", (event) => {
   if (!button) return;
   loadXSessionAlertSnapshot(button.dataset.alertSnapshotId, button).catch((error) => setStatus(error.message));
 });
+sessionAlertDetail?.addEventListener("input", (event) => {
+  const slider = event.target.closest("[data-alert-snapshot-height]");
+  if (!slider) return;
+  updateAlertSnapshotHeight(slider.dataset.alertSnapshotHeight, slider.value);
+});
 sessionRefreshButton.addEventListener("click", () => {
   refreshCurrentSession().catch((error) => setStatus(error.message));
   refreshSessionKeywords().catch((error) => setStatus(error.message));
@@ -4175,6 +4532,13 @@ stopStaleKeywordUsersButton?.addEventListener("click", () => {
   });
 });
 
+resetStaleKeywordUserProgressButton?.addEventListener("click", () => {
+  resetStaleKeywordUserProgress().catch((error) => {
+    setStatus(error.message);
+    refreshStaleKeywordUserPruneStatus().catch((refreshError) => setStatus(refreshError.message));
+  });
+});
+
 openStaleKeywordUsersButton?.addEventListener("click", () => {
   openStaleKeywordUsersList().catch((error) => setStatus(error.message));
 });
@@ -4194,6 +4558,23 @@ staleKeywordUserStartIndex?.addEventListener("input", () => {
   staleKeywordUserStartIndexTouched = true;
 });
 
+staleKeywordUserSpeedPreset?.addEventListener("change", async () => {
+  applyStaleKeywordUserSpeedPreset(staleKeywordUserSpeedPreset.value);
+  if (!currentStaleKeywordUserPruneStatus?.running) {
+    return;
+  }
+  try {
+    await applyRunningStaleKeywordUserSpeed();
+  } catch (error) {
+    if (error instanceof Error && error.message === "No running stale keyword user pruning job.") {
+      currentStaleKeywordUserPruneStatus = null;
+      refreshStaleKeywordUserPruneStatus().catch(() => undefined);
+      return;
+    }
+    setStatus(error instanceof Error ? error.message : String(error));
+  }
+});
+
 staleKeywordUserAutoIgnoreAlert?.addEventListener("change", syncStaleKeywordUserRetryControls);
 
 staleKeywordUserPruneResult?.addEventListener("click", (event) => {
@@ -4202,13 +4583,6 @@ staleKeywordUserPruneResult?.addEventListener("click", (event) => {
     restoreStaleKeywordUser(restore.dataset.staleInlineRestore, restore).catch((error) => setStatus(error.message));
     return;
   }
-  const toggle = event.target.closest("[data-stale-prune-toggle]");
-  if (!toggle) return;
-  const list = staleKeywordUserPruneResult.querySelector("[data-stale-prune-removed-list]");
-  if (!list) return;
-  staleKeywordUserRemovedListVisible = !staleKeywordUserRemovedListVisible;
-  list.hidden = !staleKeywordUserRemovedListVisible;
-  toggle.textContent = staleKeywordUserRemovedListVisible ? "Hide removed users" : "Show removed users";
 });
 
 const initialAdminSection = window.location.hash.replace("#", "");

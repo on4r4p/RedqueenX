@@ -37,20 +37,26 @@ export function textContainsBannedTerm(text: string, bannedTerm: string): boolea
     return containsBoundedLiteralTerm(searchableText, term);
   }
 
-  const normalizedText = normalizeSearchText(searchableText);
   const normalizedTerm = normalizeSearchText(term);
-  if (!normalizedText || !normalizedTerm) {
+  if (!normalizedTerm) {
     return false;
   }
 
-  return ` ${normalizedText} `.includes(` ${normalizedTerm} `);
+  return searchableText
+    .split(ignoredBannedWordContextBoundary)
+    .map(normalizeSearchText)
+    .filter(Boolean)
+    .some((normalizedText) => ` ${normalizedText} `.includes(` ${normalizedTerm} `));
 }
 
+const ignoredBannedWordContextBoundary = "\u0000";
+
 function stripIgnoredBannedWordContexts(value: string): string {
+  const boundary = ` ${ignoredBannedWordContextBoundary} `;
   return value
-    .replace(/\b(?:https?:\/\/|www\.)\S+/gi, " ")
-    .replace(/(^|\s)(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/\S*)?/gi, "$1 ")
-    .replace(/@[A-Za-z0-9_]+/g, " ");
+    .replace(/\b(?:https?:\/\/|www\.)\S+/gi, boundary)
+    .replace(/(^|\s)(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/\S*)?/gi, `$1${boundary}`)
+    .replace(/@[A-Za-z0-9_]+/g, boundary);
 }
 
 function containsLiteralSyntax(value: string): boolean {

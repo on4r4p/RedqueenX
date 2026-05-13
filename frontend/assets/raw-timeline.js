@@ -166,23 +166,74 @@ function renderRejectedListButtons(item) {
     .filter((reason) => reason.startsWith("banned_word:"))
     .map((reason) => reason.slice("banned_word:".length).trim())
     .filter(Boolean);
-  const buttons = bannedWords.map((word) =>
-    `<button type="button" class="tweet-action-button tweet-list-button" data-list-action="delete" data-list-kind="banned_word" data-list-value="${escapeAttr(word)}" title="Remove ${escapeAttr(word)} from banned words.">${rawListActionText("banned_word", "delete", word)}</button>`
-  );
+  const buttons = [];
   const bannedUserReason = reasons.find((reason) => reason === "banned_user" || reason.startsWith("banned_user:"));
+  const reasonUser = bannedUserReason?.startsWith("banned_user:") ? bannedUserReason.slice("banned_user:".length).trim() : "";
+  const user = formatHandleForList(reasonUser || item.author);
+  let userButton = "";
   if (bannedUserReason) {
-    const reasonUser = bannedUserReason.startsWith("banned_user:") ? bannedUserReason.slice("banned_user:".length).trim() : "";
-    const user = formatHandleForList(reasonUser || item.author);
     if (user) {
-      buttons.push(
-        `<button type="button" class="tweet-action-button tweet-list-button" data-list-action="delete" data-list-kind="banned_user" data-list-value="${escapeAttr(user)}" title="Remove ${escapeAttr(user)} from banned users.">${rawListActionText("banned_user", "delete", user)}</button>`
-      );
+      userButton = `<button type="button" class="tweet-action-button tweet-list-button" data-list-action="delete" data-list-kind="banned_user" data-list-value="${escapeAttr(user)}" title="Remove ${escapeAttr(user)} from banned users.">${rawListActionText("banned_user", "delete", user)}</button>`;
     }
+  } else if (user) {
+    userButton = `<button type="button" class="tweet-action-button tweet-list-button" data-list-action="add" data-list-kind="banned_user" data-list-value="${escapeAttr(user)}" title="Add ${escapeAttr(user)} to banned users.">Ban user</button>`;
   }
   buttons.push(
-    '<button type="button" class="tweet-action-button tweet-list-button" data-list-action="add" data-list-kind="banned_word" data-list-source="prompt" data-list-prompt-button="true" title="Add one or more words to banned words. Separate multiple values with commas, semicolons, or new lines.">Ban some words</button>'
+    ...bannedWords.map((word) =>
+      `<button type="button" class="tweet-action-button tweet-list-button" data-list-action="delete" data-list-kind="banned_word" data-list-value="${escapeAttr(word)}" title="Remove ${escapeAttr(word)} from banned words.">${rawListActionText("banned_word", "delete", word)}</button>`
+    )
+  );
+  buttons.push(
+    renderRawBanWordsPromptButton(bannedWords.length > 0)
+  );
+  buttons.push(
+    `<span class="tweet-right-command-group">${userButton}<button type="button" class="tweet-action-button tweet-accept-button" data-accept-rejected-tweet="true" data-run-id="${escapeAttr(item.runId)}" data-tweet-id="${escapeAttr(item.tweetId)}" title="Accept this rejected tweet into the main Timeline.">Accept this Tweet</button></span>`
   );
   return `<div class="tweet-command-row tweet-list-command-row">${buttons.join("")}</div>`;
+}
+
+function renderRawBanWordsPromptButton(compact = false) {
+  const title = compact
+    ? "Add another word or phrase to banned words."
+    : "Add one word or phrase to banned words.";
+  return `<button type="button" class="tweet-action-button tweet-list-button${compact ? " tweet-list-plus-button" : ""}" data-list-action="add" data-list-kind="banned_word" data-list-source="prompt" data-list-prompt-button="true"${compact ? ' data-list-add-more-word="true"' : ""} title="${title}">${compact ? "+" : "Ban some words"}</button>`;
+}
+
+async function acceptRejectedTweet(button) {
+  const runId = button.dataset.runId || "";
+  const tweetId = button.dataset.tweetId || "";
+  if (!runId || !tweetId) {
+    rawTimelineStatus.textContent = "Missing rejected tweet identifier.";
+    return;
+  }
+  const previousText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Accepting...";
+  rawTimelineStatus.textContent = `Accepting ${tweetId} into Timeline...`;
+  try {
+    const response = await fetch("/admin/rejected-timeline/accept", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId, tweetId })
+    });
+    if (response.status === 401) {
+      rawTimelineStatus.textContent = "Admin login required before accepting a rejected tweet.";
+      return;
+    }
+    const result = await response.json().catch(() => ({ error: "Accept rejected tweet failed." }));
+    if (!response.ok) {
+      throw new Error(result.error || "Accept rejected tweet failed.");
+    }
+    await refreshRawTimeline();
+    rawTimelineStatus.textContent = `Accepted ${tweetId} into Timeline.`;
+  } catch (error) {
+    rawTimelineStatus.textContent = error instanceof Error ? error.message : "Accept rejected tweet failed.";
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+      button.textContent = previousText || "Accept this Tweet";
+    }
+  }
 }
 
 async function refreshRawTimeline() {
@@ -232,8 +283,7 @@ async function refreshRawTimeline() {
   const activeFilters = activeRejectionFilterLabels(rejectionReasonGroups);
   rawTimelineStatus.textContent = [
     rawPageSummary(pagination, items.length),
-    activeFilters.length ? `Filtered by: ${activeFilters.join(", ")}.` : "",
-    "Rejected timeline shows captured tweets rejected by prefiltering or scoring. Avatars, media, and external URLs are never loaded directly."
+    activeFilters.length ? `Filtered by: ${activeFilters.join(", ")}.` : ""
   ]
     .filter(Boolean)
     .join(" ");
@@ -360,8 +410,9 @@ async function changeRawTimelinePage(action) {
     return;
   }
   rawTimelineStatus.textContent = "Loading rejected timeline page...";
+  scrollRawTimelineToTop("auto");
   await refreshRawTimeline();
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  scrollRawTimelineToTop("smooth");
 }
 
 async function changeRawTimelinePageSize(value) {
@@ -377,8 +428,17 @@ async function changeRawTimelinePageSize(value) {
   rawTimelineState.customLimit = true;
   rawTimelineState.offset = 0;
   rawTimelineStatus.textContent = "Loading rejected timeline page...";
+  scrollRawTimelineToTop("auto");
   await refreshRawTimeline();
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  scrollRawTimelineToTop("smooth");
+}
+
+function scrollRawTimelineToTop(behavior = "smooth") {
+  window.scrollTo({ top: 0, behavior });
+  if (behavior === "auto") {
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }
 }
 
 function renderRejectionReasonFilter(options, selectedReasonGroups) {
@@ -387,17 +447,17 @@ function renderRejectionReasonFilter(options, selectedReasonGroups) {
   const reasonGroupOptions = Array.isArray(options) ? options : [];
   rejectionReasonFilter.innerHTML = reasonGroupOptions.length
     ? reasonGroupOptions
-        .map((option) => {
-          const id = String(option.id || "");
-          const label = String(option.label || id);
-          const count = Number(option.count || 0);
-          const checkedAttr = selected.has(id) ? " checked" : "";
-          return `<label class="timeline-filter-option">
+      .map((option) => {
+        const id = String(option.id || "");
+        const label = String(option.label || id);
+        const count = Number(option.count || 0);
+        const checkedAttr = selected.has(id) ? " checked" : "";
+        return `<label class="timeline-filter-option">
             <input type="checkbox" data-reason-group="${escapeAttr(id)}"${checkedAttr} />
             <span>${escapeHtml(label)} <span class="timeline-filter-count">(${count})</span></span>
           </label>`;
-        })
-        .join("")
+      })
+      .join("")
     : '<span class="timeline-filter-empty">No rejection reasons yet</span>';
   if (rejectionReasonClear) {
     rejectionReasonClear.disabled = !hasActiveRejectionFilters();
@@ -462,7 +522,8 @@ function rawListButtonText(button, kind, action, value = "") {
 }
 
 function parseRawPromptListValues(value) {
-  return Array.from(new Set(String(value || "").split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean))).slice(0, 50);
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  return normalized ? [normalized] : [];
 }
 
 function readRawListButtonValues(button) {
@@ -475,13 +536,26 @@ function readRawListButtonValues(button) {
   }
 }
 
-function setRawListButtonFeedback(button, message, tone = "info") {
+function rawAddMoreBanWordButtonAfter(button) {
+  const sibling = button.nextElementSibling;
+  return sibling?.matches?.('[data-list-add-more-word="true"]') ? sibling : null;
+}
+
+function rawListButtonFeedbackElement(button) {
   let feedback = button.nextElementSibling;
+  if (feedback?.matches?.('[data-list-add-more-word="true"]')) {
+    feedback = feedback.nextElementSibling;
+  }
+  return feedback?.dataset.listButtonFeedback === "true" ? feedback : null;
+}
+
+function setRawListButtonFeedback(button, message, tone = "info") {
+  let feedback = rawListButtonFeedbackElement(button);
   if (!feedback || feedback.dataset.listButtonFeedback !== "true") {
     feedback = document.createElement("span");
     feedback.dataset.listButtonFeedback = "true";
     feedback.className = "tweet-list-feedback";
-    button.after(feedback);
+    (rawAddMoreBanWordButtonAfter(button) || button).after(feedback);
   }
   feedback.classList.toggle("is-error", tone === "error");
   feedback.classList.toggle("is-success", tone === "success");
@@ -492,6 +566,7 @@ function setRawListButtonAction(button, kind, action, value, options = {}) {
   const normalizedValue = String(value || "").trim();
   button.dataset.listKind = kind;
   button.dataset.listAction = action;
+  delete button.dataset.listAddMoreWord;
   if (normalizedValue) {
     button.dataset.listValue = normalizedValue;
     delete button.dataset.listValues;
@@ -515,9 +590,9 @@ function setRawListButtonAction(button, kind, action, value, options = {}) {
       ? `Remove ${normalizedValue} from ${label}.`
       : options.readd
         ? `Add ${normalizedValue} back to ${label}.`
-      : normalizedValue
-        ? `Add ${normalizedValue} to ${label}.`
-      : "Add one or more words to banned words. Separate multiple values with commas, semicolons, or new lines.";
+        : normalizedValue
+          ? `Add ${normalizedValue} to ${label}.`
+          : "Add one word or phrase to banned words.";
 }
 
 function setRawListButtonBatchDeleteAction(button, kind, values) {
@@ -528,9 +603,30 @@ function setRawListButtonBatchDeleteAction(button, kind, values) {
   delete button.dataset.listValue;
   delete button.dataset.listSource;
   delete button.dataset.listReadd;
+  delete button.dataset.listAddMoreWord;
   button.textContent = `Unban ${normalizedValues.length} ${kind === "banned_user" ? "users" : "words"}`;
   button.title = `Remove ${normalizedValues.join(", ")} from ${kind === "banned_user" ? "banned users" : "banned words"}.`;
   button.disabled = false;
+}
+
+function ensureAdditionalRawBanWordButton(button) {
+  if (button.dataset.listKind !== "banned_word") return;
+  const commandRow = button.closest(".tweet-list-command-row");
+  if (commandRow?.querySelector('[data-list-add-more-word="true"]')) return;
+  button.insertAdjacentHTML("afterend", renderRawBanWordsPromptButton(true));
+}
+
+function removeRawPromptBanWordButton(button) {
+  const commandRow = button.closest(".tweet-list-command-row");
+  const feedback = rawListButtonFeedbackElement(button);
+  button.remove();
+  feedback?.remove();
+  if (!commandRow) return;
+  const hasBannedWordUnban = commandRow.querySelector('[data-list-kind="banned_word"][data-list-action="delete"]');
+  const addMoreButton = commandRow.querySelector('[data-list-add-more-word="true"]');
+  if (!hasBannedWordUnban && addMoreButton) {
+    addMoreButton.outerHTML = renderRawBanWordsPromptButton(false);
+  }
 }
 
 async function mutateList(kind, action, value, button) {
@@ -564,12 +660,16 @@ async function mutateList(kind, action, value, button) {
   }
   const label = kind === "banned_user" ? "banned users" : "banned words";
   rawTimelineStatus.textContent = action === "delete" ? `Removed ${normalizedValue} from ${label}.` : `Added ${normalizedValue} to ${label}.`;
-  setRawListButtonAction(button, kind, action === "delete" ? "add" : "delete", normalizedValue, { readd: action === "delete" });
-  if (action === "delete" && button.dataset.listPromptButton === "true") {
-    setRawListButtonAction(button, kind, "add", "");
+  if (action === "delete" && kind === "banned_word" && button.dataset.listPromptButton === "true") {
+    removeRawPromptBanWordButton(button);
+    return;
   }
+  setRawListButtonAction(button, kind, action === "delete" ? "add" : "delete", normalizedValue, { readd: action === "delete" });
   const successMessage = action === "delete" ? "Unbanned." : wasReadd ? "Rebanned." : "Banned.";
   setRawListButtonFeedback(button, successMessage, "success");
+  if (action === "add" && kind === "banned_word" && button.dataset.listPromptButton === "true") {
+    ensureAdditionalRawBanWordButton(button);
+  }
 }
 
 async function mutateListBatch(kind, action, values, button) {
@@ -616,13 +716,16 @@ async function mutateListBatch(kind, action, values, button) {
   rawTimelineStatus.textContent = `Added ${normalizedValues.length} values to ${label}.`;
   setRawListButtonBatchDeleteAction(button, kind, normalizedValues);
   setRawListButtonFeedback(button, `Banned ${normalizedValues.length}.`, "success");
+  if (kind === "banned_word" && button.dataset.listPromptButton === "true") {
+    ensureAdditionalRawBanWordButton(button);
+  }
 }
 
 rawTimelinePaginations.forEach((paginationNav) => {
   paginationNav.addEventListener("click", async (event) => {
     const scrollTop = event.target.closest("[data-scroll-top]");
     if (scrollTop) {
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      scrollRawTimelineToTop("smooth");
       return;
     }
     const button = event.target.closest("[data-page-action]");
@@ -695,6 +798,14 @@ rejectedTimelineClearAll?.addEventListener("click", () => {
 });
 
 rawTimeline.addEventListener("click", (event) => {
+  const acceptButton = event.target.closest("[data-accept-rejected-tweet]");
+  if (acceptButton) {
+    acceptRejectedTweet(acceptButton).catch((error) => {
+      rawTimelineStatus.textContent = error.message || "Accept rejected tweet failed.";
+    });
+    return;
+  }
+
   const listButton = event.target.closest("[data-list-action]");
   if (listButton) {
     const kind = listButton.dataset.listKind;
@@ -703,7 +814,7 @@ rawTimeline.addEventListener("click", (event) => {
     let values = readRawListButtonValues(listButton);
     if (action === "add" && listButton.dataset.listSource === "prompt") {
       const selected = selectedTextInsideRaw(listButton);
-      const promptValue = window.prompt("Words or phrases to add to banned words. Separate multiple values with commas, semicolons, or new lines:", selected) || "";
+      const promptValue = window.prompt("Word or phrase to add to banned words:", selected) || "";
       values = parseRawPromptListValues(promptValue);
       value = values[0] || "";
     }

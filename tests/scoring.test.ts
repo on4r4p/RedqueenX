@@ -247,6 +247,44 @@ describe("scoreTweet", () => {
     );
     expect(handleOnly.reasons).not.toContain("banned_word:premium");
 
+    const mentionBridge = scoreTweet(
+      {
+        ...baseTweet,
+        id: "banned-mention-bridge-1",
+        text: "RT @julierobert: Si this advisory confirms the security impact"
+      },
+      {
+        keywords: ["advisory"],
+        following: [],
+        friends: [],
+        bannedUsers: [],
+        bannedWords: ["rt si"],
+        sentTweetIds: [],
+        sentTexts: []
+      },
+      config
+    );
+    expect(mentionBridge.reasons).not.toContain("banned_word:rt si");
+
+    const directPhrase = scoreTweet(
+      {
+        ...baseTweet,
+        id: "banned-direct-phrase-1",
+        text: "This thread says rt si this advisory confirms the security impact"
+      },
+      {
+        keywords: ["advisory"],
+        following: [],
+        friends: [],
+        bannedUsers: [],
+        bannedWords: ["rt si"],
+        sentTweetIds: [],
+        sentTexts: []
+      },
+      config
+    );
+    expect(directPhrase.reasons).toContain("banned_word:rt si");
+
     const visibleTerm = scoreTweet(
       {
         ...baseTweet,

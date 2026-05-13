@@ -19,6 +19,7 @@ Edit `.env` before starting:
 - set `ADMIN_PASSWORD`
 - set `SESSION_SECRET` to a long random value
 - choose `DATABASE_URL`, usually `./redqueenx.sqlite`
+- optionally set `ADMIN_IPV4_WHITELIST` / `ADMIN_IPV4_BLACKLIST` with comma-separated IPv4 or CIDR entries
 - configure either X API mode or Search without API mode
 
 Start the admin server:

@@ -193,10 +193,17 @@ function renderListButtons(item) {
     ? `<button type="button" class="tweet-action-button" data-media-cache-reload="${escapeAttr(item.tweetId)}">Load medias</button>`
     : "";
   return `<div class="tweet-command-row tweet-list-command-row">
-    <button type="button" class="tweet-action-button tweet-list-button" data-list-action="add" data-list-kind="banned_word" data-list-source="prompt" data-list-prompt-button="true" title="Add one or more words to banned words. Separate multiple values with commas, semicolons, or new lines.">Ban some words</button>
     ${banUser}
+    ${renderBanWordsPromptButton(false)}
     ${loadMedia}
   </div>`;
+}
+
+function renderBanWordsPromptButton(compact = false) {
+  const title = compact
+    ? "Add another word or phrase to banned words."
+    : "Add one word or phrase to banned words.";
+  return `<button type="button" class="tweet-action-button tweet-list-button${compact ? " tweet-list-plus-button" : ""}" data-list-action="add" data-list-kind="banned_word" data-list-source="prompt" data-list-prompt-button="true"${compact ? ' data-list-add-more-word="true"' : ""} title="${title}">${compact ? "+" : "Ban some words"}</button>`;
 }
 
 function needsMediaReload(item) {
@@ -353,8 +360,9 @@ async function changeTimelinePage(action) {
     return;
   }
   timelineStatus.textContent = "Loading timeline page...";
+  scrollTimelineToTop("auto");
   await refreshTimeline();
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  scrollTimelineToTop("smooth");
 }
 
 async function changeTimelinePageSize(value) {
@@ -370,8 +378,17 @@ async function changeTimelinePageSize(value) {
   timelineState.customLimit = true;
   timelineState.offset = 0;
   timelineStatus.textContent = "Loading timeline page...";
+  scrollTimelineToTop("auto");
   await refreshTimeline();
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  scrollTimelineToTop("smooth");
+}
+
+function scrollTimelineToTop(behavior = "smooth") {
+  window.scrollTo({ top: 0, behavior });
+  if (behavior === "auto") {
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }
 }
 
 function formatHandleForList(value) {
@@ -411,7 +428,8 @@ function listButtonText(button, kind, action, value = "") {
 }
 
 function parsePromptListValues(value) {
-  return Array.from(new Set(String(value || "").split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean))).slice(0, 50);
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  return normalized ? [normalized] : [];
 }
 
 function readListButtonValues(button) {
@@ -424,13 +442,26 @@ function readListButtonValues(button) {
   }
 }
 
-function setListButtonFeedback(button, message, tone = "info") {
+function addMoreBanWordButtonAfter(button) {
+  const sibling = button.nextElementSibling;
+  return sibling?.matches?.('[data-list-add-more-word="true"]') ? sibling : null;
+}
+
+function listButtonFeedbackElement(button) {
   let feedback = button.nextElementSibling;
+  if (feedback?.matches?.('[data-list-add-more-word="true"]')) {
+    feedback = feedback.nextElementSibling;
+  }
+  return feedback?.dataset.listButtonFeedback === "true" ? feedback : null;
+}
+
+function setListButtonFeedback(button, message, tone = "info") {
+  let feedback = listButtonFeedbackElement(button);
   if (!feedback || feedback.dataset.listButtonFeedback !== "true") {
     feedback = document.createElement("span");
     feedback.dataset.listButtonFeedback = "true";
     feedback.className = "tweet-list-feedback";
-    button.after(feedback);
+    (addMoreBanWordButtonAfter(button) || button).after(feedback);
   }
   feedback.classList.toggle("is-error", tone === "error");
   feedback.classList.toggle("is-success", tone === "success");
@@ -441,6 +472,7 @@ function setListButtonAction(button, kind, action, value, options = {}) {
   const normalizedValue = String(value || "").trim();
   button.dataset.listKind = kind;
   button.dataset.listAction = action;
+  delete button.dataset.listAddMoreWord;
   if (action === "add" && options.readd) {
     button.dataset.listReadd = "true";
   } else {
@@ -469,7 +501,7 @@ function setListButtonAction(button, kind, action, value, options = {}) {
   } else {
     button.title =
       kind === "banned_word"
-        ? "Add one or more words to banned words. Separate multiple values with commas, semicolons, or new lines."
+        ? "Add one word or phrase to banned words."
         : `Add this user to ${label}.`;
   }
 }
@@ -482,9 +514,30 @@ function setListButtonBatchDeleteAction(button, kind, values) {
   delete button.dataset.listValue;
   delete button.dataset.listSource;
   delete button.dataset.listReadd;
+  delete button.dataset.listAddMoreWord;
   button.textContent = `Unban ${normalizedValues.length} ${kind === "banned_user" ? "users" : "words"}`;
   button.title = `Remove ${normalizedValues.join(", ")} from ${kind === "banned_user" ? "banned users" : "banned words"}.`;
   button.disabled = false;
+}
+
+function ensureAdditionalBanWordButton(button) {
+  if (button.dataset.listKind !== "banned_word") return;
+  const commandRow = button.closest(".tweet-list-command-row");
+  if (commandRow?.querySelector('[data-list-add-more-word="true"]')) return;
+  button.insertAdjacentHTML("afterend", renderBanWordsPromptButton(true));
+}
+
+function removePromptBanWordButton(button) {
+  const commandRow = button.closest(".tweet-list-command-row");
+  const feedback = listButtonFeedbackElement(button);
+  button.remove();
+  feedback?.remove();
+  if (!commandRow) return;
+  const hasBannedWordUnban = commandRow.querySelector('[data-list-kind="banned_word"][data-list-action="delete"]');
+  const addMoreButton = commandRow.querySelector('[data-list-add-more-word="true"]');
+  if (!hasBannedWordUnban && addMoreButton) {
+    addMoreButton.outerHTML = renderBanWordsPromptButton(false);
+  }
 }
 
 async function mutateList(kind, action, value, button) {
@@ -518,12 +571,16 @@ async function mutateList(kind, action, value, button) {
   }
   const label = kind === "banned_user" ? "banned users" : "banned words";
   timelineStatus.textContent = action === "delete" ? `Removed ${normalizedValue} from ${label}.` : `Added ${normalizedValue} to ${label}.`;
-  setListButtonAction(button, kind, action === "delete" ? "add" : "delete", normalizedValue, { readd: action === "delete" });
-  if (action === "delete" && button.dataset.listPromptButton === "true") {
-    setListButtonAction(button, kind, "add", "");
+  if (action === "delete" && kind === "banned_word" && button.dataset.listPromptButton === "true") {
+    removePromptBanWordButton(button);
+    return;
   }
+  setListButtonAction(button, kind, action === "delete" ? "add" : "delete", normalizedValue, { readd: action === "delete" });
   const successMessage = action === "delete" ? "Unbanned." : wasReadd ? "Rebanned." : "Banned.";
   setListButtonFeedback(button, successMessage, "success");
+  if (action === "add" && kind === "banned_word" && button.dataset.listPromptButton === "true") {
+    ensureAdditionalBanWordButton(button);
+  }
 }
 
 async function mutateListBatch(kind, action, values, button) {
@@ -570,13 +627,16 @@ async function mutateListBatch(kind, action, values, button) {
   timelineStatus.textContent = `Added ${normalizedValues.length} values to ${label}.`;
   setListButtonBatchDeleteAction(button, kind, normalizedValues);
   setListButtonFeedback(button, `Banned ${normalizedValues.length}.`, "success");
+  if (kind === "banned_word" && button.dataset.listPromptButton === "true") {
+    ensureAdditionalBanWordButton(button);
+  }
 }
 
 timelinePaginations.forEach((paginationNav) => {
   paginationNav.addEventListener("click", async (event) => {
     const scrollTop = event.target.closest("[data-scroll-top]");
     if (scrollTop) {
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      scrollTimelineToTop("smooth");
       return;
     }
     const button = event.target.closest("[data-page-action]");
@@ -680,7 +740,7 @@ timeline.addEventListener("click", async (event) => {
     let values = readListButtonValues(listButton);
     if (action === "add" && listButton.dataset.listSource === "prompt") {
       const selected = selectedTextInside(listButton);
-      const promptValue = window.prompt("Words or phrases to add to banned words. Separate multiple values with commas, semicolons, or new lines:", selected) || "";
+      const promptValue = window.prompt("Word or phrase to add to banned words:", selected) || "";
       values = parsePromptListValues(promptValue);
       value = values[0] || "";
     }
