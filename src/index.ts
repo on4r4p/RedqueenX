@@ -6,7 +6,7 @@ import { restartSignalPath } from "./restart-signal";
 
 async function main() {
   const config = loadConfig();
-  if (!config.adminPassword && !config.adminPasswordHash) {
+  if (config.adminAuthMode === "password" && !config.adminPassword && !config.adminPasswordHash) {
     throw new Error("ADMIN_PASSWORD or ADMIN_PASSWORD_HASH must be set before starting the admin API.");
   }
 

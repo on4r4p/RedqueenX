@@ -9,11 +9,5 @@ example.com {
     reverse_proxy 127.0.0.1:9000
   }
 
-  handle_path /hooks/* {
-    respond "not found" 404
-  }
-
-  handle {
-    reverse_proxy 127.0.0.1:3005
-  }
+  respond "not found" 404
 }

@@ -11,6 +11,48 @@ import { XSessionAlertService } from "../src/admin/xSessionAlertService";
 import { loadConfig } from "../src/config";
 
 describe("admin api", () => {
+  it("trusts client-certificate proxy auth without exposing admin login", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-api-mtls-"));
+    const config = loadConfig({
+      ADMIN_AUTH_MODE: "mtls_proxy",
+      ADMIN_TRUST_PROXY: "true",
+      SESSION_SECRET: "test-session-secret",
+      DATABASE_URL: path.join(tmp, "redqueenx.sqlite"),
+      CURRENT_SESSION_FILE: path.join(tmp, "current-session.log"),
+      X_API_ENABLED: "true"
+    });
+    const database = openMemoryDatabase();
+    const app = createAdminApi({
+      database,
+      config,
+      envPath: path.join(tmp, ".env"),
+      currentSessionFilePath: path.join(tmp, "current-session.log")
+    });
+
+    const adminPage = await app.inject({
+      method: "GET",
+      url: "/admin",
+      headers: { accept: "text/html" }
+    });
+    expect(adminPage.statusCode).toBe(200);
+
+    const loginPage = await app.inject({ method: "GET", url: "/admin/login" });
+    expect(loginPage.statusCode).toBe(404);
+
+    const loginPost = await app.inject({
+      method: "POST",
+      url: "/admin/login",
+      payload: { password: "secret" }
+    });
+    expect(loginPost.statusCode).toBe(404);
+
+    const serverAccess = await app.inject({ method: "GET", url: "/admin/settings/server-access" });
+    expect(serverAccess.statusCode).toBe(200);
+    expect(serverAccess.json().disabled).toBe(true);
+
+    await app.close();
+  });
+
   it("protects admin routes and supports login, list mutations, commands, and import", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-api-"));
     fs.writeFileSync(path.join(tmp, "Rq.Keywords"), "one\n\ntwo", "utf8");

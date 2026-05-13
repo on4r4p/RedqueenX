@@ -1,0 +1,52 @@
+example.com {
+  encode zstd gzip
+
+  @github_webhook {
+    method POST
+    path /hooks/redqueenx-deploy
+  }
+  handle @github_webhook {
+    reverse_proxy 127.0.0.1:9000
+  }
+
+  handle /admin* {
+    redir https://admin.example.com/ 302
+  }
+
+  handle /hooks/* {
+    respond "not found" 404
+  }
+
+  handle / {
+    rewrite * /timeline
+    reverse_proxy 127.0.0.1:3005
+  }
+
+  handle {
+    reverse_proxy 127.0.0.1:3005
+  }
+}
+
+admin.example.com {
+  encode zstd gzip
+
+  tls {
+    client_auth {
+      mode require_and_verify
+      trusted_ca_cert_file /etc/caddy/redqueenx-client-auth/redqueenx-client-ca.crt
+    }
+  }
+
+  handle /admin/login* {
+    respond "not found" 404
+  }
+
+  handle / {
+    rewrite * /admin
+    reverse_proxy 127.0.0.1:3005
+  }
+
+  handle {
+    reverse_proxy 127.0.0.1:3005
+  }
+}

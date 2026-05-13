@@ -2,6 +2,7 @@ const rawTimeline = document.getElementById("raw-timeline");
 const rawTimelineStatus = document.getElementById("raw-timeline-status");
 const rawTimelinePaginations = Array.from(document.querySelectorAll("[data-raw-timeline-pagination]"));
 const rejectionReasonFilter = document.getElementById("rejection-reason-filter");
+const adminLinks = Array.from(document.querySelectorAll("[data-admin-link]"));
 const rejectionReasonClear = document.getElementById("rejection-reason-clear");
 const rejectedTimelineClearAll = document.getElementById("rejected-timeline-clear-all");
 const rawTimelineDefaultPageSize = 50;
@@ -16,6 +17,21 @@ const rawTimelineState = {
   total: 0,
   hasMore: false
 };
+
+async function applyPublicConfig() {
+  if (adminLinks.length === 0) return;
+  try {
+    const response = await fetch("/public-config");
+    if (!response.ok) return;
+    const config = await response.json();
+    if (!config.adminUrl) return;
+    adminLinks.forEach((link) => {
+      link.href = config.adminUrl;
+    });
+  } catch {
+    // Keep the local /admin link when public config cannot be loaded.
+  }
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -327,6 +343,7 @@ async function refreshRawTimeline() {
     .join("");
 }
 
+applyPublicConfig().catch(() => undefined);
 refreshRawTimeline();
 
 function rawPageSummary(pagination, itemCount) {

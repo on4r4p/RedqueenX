@@ -399,7 +399,8 @@ export interface AdminApiOptions {
     | "rssFallbackFeedLimit"
     | "enableXWrite"
     | "x"
-  >;
+  > &
+    Partial<Pick<AppConfig, "adminAuthMode" | "adminPublicUrl">>;
   envPath?: string;
   restartSignalPath?: string;
   restartDelayMs?: number;
@@ -545,6 +546,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   const sessions = new Set<string>();
   const requestStartTimes = new WeakMap<object, number>();
   const hostname = os.hostname();
+  const adminAuthMode = options.config.adminAuthMode ?? "password";
+  const adminPublicUrl = normalizePublicAdminUrl(options.config.adminPublicUrl);
+  const usesProxyClientCertificateAuth = adminAuthMode === "mtls_proxy";
   let activeCrawlerRunId: string | null = null;
   let activeWithoutApiWorker: ChildProcess | null = null;
   let activeWithoutApiWorkerRunId: string | null = null;
@@ -582,15 +586,17 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   app.addHook("onRequest", async (request, reply) => {
     applySecurityHeaders(reply);
     requestStartTimes.set(request, performance.now());
-    const accessDecision = isServerAccessAllowed(getEffectiveServerAccessConfig(), request.ip);
-    if (!accessDecision.allowed) {
-      await recordSession("prob", "server_access.denied", "HTTP request blocked by RedqueenX access policy", {
-        ip: accessDecision.ip ?? request.ip,
-        reason: accessDecision.reason,
-        method: request.method,
-        path: safePath(request.url)
-      });
-      return reply.code(403).send({ error: "Forbidden by RedqueenX access policy" });
+    if (!usesProxyClientCertificateAuth) {
+      const accessDecision = isServerAccessAllowed(getEffectiveServerAccessConfig(), request.ip);
+      if (!accessDecision.allowed) {
+        await recordSession("prob", "server_access.denied", "HTTP request blocked by RedqueenX access policy", {
+          ip: accessDecision.ip ?? request.ip,
+          reason: accessDecision.reason,
+          method: request.method,
+          path: safePath(request.url)
+        });
+        return reply.code(403).send({ error: "Forbidden by RedqueenX access policy" });
+      }
     }
     if (!shouldLogRequest(request.url)) {
       return;
@@ -643,7 +649,25 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.addHook("preHandler", async (request, reply) => {
-    if (!request.url.startsWith("/admin") || request.url === "/admin/login") {
+    if (!request.url.startsWith("/admin")) {
+      return;
+    }
+
+    if (isAdminLoginRoute(request.url)) {
+      return;
+    }
+
+    if (usesProxyClientCertificateAuth) {
+      if (isAdminMutationRequest(request) && !isSameOriginMutationRequest(request)) {
+        await recordSession("prob", "security.csrf_blocked", "Blocked admin mutation from a non-admin origin", {
+          method: request.method,
+          path: safePath(request.url),
+          origin: headerValue(request.headers.origin) ?? null,
+          referer: headerValue(request.headers.referer) ?? null,
+          fetchSite: headerValue(request.headers["sec-fetch-site"]) ?? null
+        });
+        return reply.code(403).send({ error: "Forbidden: admin mutations require the RedqueenX origin." });
+      }
       return;
     }
 
@@ -668,6 +692,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.get("/health", async () => ({ ok: true }));
+
+  app.get("/public-config", async () => ({
+    adminUrl: adminPublicUrl || "/admin",
+    adminAuthMode
+  }));
 
   app.get("/", async (_request, reply) => {
     reply.redirect("/timeline");
@@ -988,6 +1017,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.get("/admin/login", async (_request, reply) => {
+    if (usesProxyClientCertificateAuth) {
+      return reply.code(404).type("text/plain").send("not found");
+    }
     return sendFrontendPage(reply, pageRoot, "login.html");
   });
 
@@ -1006,6 +1038,10 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.post("/admin/login", async (request, reply) => {
+    if (usesProxyClientCertificateAuth) {
+      reply.code(404).send({ error: "Admin password login is disabled when client certificate authentication is active." });
+      return;
+    }
     const body = loginSchema.parse(request.body);
     const valid = verifyAdminPassword(body.password, {
       password: options.config.adminPassword,
@@ -1030,6 +1066,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.post("/admin/logout", async (request, reply) => {
+    if (usesProxyClientCertificateAuth) {
+      return { ok: true, authMode: adminAuthMode };
+    }
     const sessionId = request.cookies.redqueen_session;
     if (sessionId) {
       sessions.delete(sessionId);
@@ -1048,6 +1087,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       staleKeywordUserPrune,
       xBudget: xBudget.snapshot(undefined, runs.current()?.id),
       runtimeModes: {
+        adminAuthMode,
+        adminPublicUrl: adminPublicUrl || null,
         xApiEnabled: xApiConfig.xApiEnabled,
         searchWithoutApiEnabled: xApiConfig.searchWithoutApiEnabled
       },
@@ -1526,6 +1567,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       xSessionAlerts: xSessionAlerts.openAlerts(),
       staleKeywordUserPrune,
       runtimeModes: {
+        adminAuthMode,
+        adminPublicUrl: adminPublicUrl || null,
         xApiEnabled: getXApiConfig().xApiEnabled,
         searchWithoutApiEnabled: getXApiConfig().searchWithoutApiEnabled
       }
@@ -1635,10 +1678,25 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const storedConfig = settings.getServerAccessConfig(DEFAULT_SERVER_ACCESS_CONFIG);
     const config = getEffectiveServerAccessConfig(storedConfig);
     const currentIp = isServerAccessAllowed(config, request.ip).ip ?? request.ip;
-    return { config, storedConfig, envConfig: serverAccessEnvConfig, currentIp };
+    return {
+      config,
+      storedConfig,
+      envConfig: serverAccessEnvConfig,
+      currentIp,
+      disabled: usesProxyClientCertificateAuth,
+      disabledReason: usesProxyClientCertificateAuth
+        ? "Client certificate authentication is active at the reverse proxy, so app-level IPv4 lists are ignored."
+        : null
+    };
   });
 
   app.patch("/admin/settings/server-access", async (request, reply) => {
+    if (usesProxyClientCertificateAuth) {
+      reply.code(409).send({
+        error: "Server access lists are disabled while client certificate authentication is active."
+      });
+      return;
+    }
     const body = serverAccessUpdateSchema.parse(request.body ?? {});
     let nextStoredConfig = serverAccessConfigSchema.parse({
       whitelist: parseAccessListInput(body.whitelist),
@@ -5646,6 +5704,18 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 function shouldLogRequest(url: string): boolean {
   const pathname = safePath(url);
   return pathname.startsWith("/admin");
+}
+
+function isAdminLoginRoute(url: string): boolean {
+  return safePath(url) === "/admin/login";
+}
+
+function normalizePublicAdminUrl(value: string | undefined): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return "";
+  }
+  return trimmed.replace(/\/+$/, "");
 }
 
 function applySecurityHeaders(reply: FastifyReply): void {

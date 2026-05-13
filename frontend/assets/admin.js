@@ -41,6 +41,7 @@ const downloadTimelineTweetsButton = document.getElementById("download-timeline-
 const importFileDetail = document.getElementById("import-file-detail");
 const serverAccessForm = document.getElementById("server-access-form");
 const serverAccessCurrentIp = document.getElementById("server-access-current-ip");
+const serverAccessDisabledNote = document.getElementById("server-access-disabled-note");
 const scoringForm = document.getElementById("scoring-form");
 const generalSettingsForm = document.getElementById("general-settings-form");
 const staleKeywordUserDays = document.getElementById("stale-keyword-user-days");
@@ -410,6 +411,8 @@ const envFields = [
   "ADMIN_HOST",
   "ADMIN_PORT",
   "ADMIN_TRUST_PROXY",
+  "ADMIN_AUTH_MODE",
+  "ADMIN_PUBLIC_URL",
   "ADMIN_PASSWORD",
   "SESSION_SECRET",
   "DATABASE_URL",
@@ -460,6 +463,9 @@ const adminTooltipByName = {
     "Extra IPv4 addresses or CIDR ranges always blocked by the HTTP access policy after the server restarts. Blacklist entries win over whitelist entries.",
   ADMIN_TRUST_PROXY:
     "Enable only when RedqueenX is behind a trusted local reverse proxy such as Caddy, so the whitelist uses the real client IP from X-Forwarded-For.",
+  ADMIN_AUTH_MODE:
+    "password keeps the local admin login page. mtls_proxy trusts a local reverse proxy that already required a valid client certificate.",
+  ADMIN_PUBLIC_URL: "External admin URL used by public timeline navigation, for example https://admin.example.com.",
   allowedLanguages: "Comma-separated language codes accepted by the tweet scoring rules.",
   enableAllowedLanguages: "Enable or disable the allowed-language rejection check.",
   minimumSearchResults: "Minimum number of search results required before the keyword is considered useful.",
@@ -1404,6 +1410,7 @@ async function refreshStats() {
   ]);
   if (!data) return;
   currentRuntimeModes = data.runtimeModes || {};
+  applyAdminAuthModeUi();
   openXSessionAlerts = data.xSessionAlerts || [];
   latestListCounts = data.lists || {};
   renderXSessionAlertHeader();
@@ -1680,6 +1687,31 @@ function xLoginNoVncUrl() {
 
 function currentSearchIsolation() {
   return searchWithoutApiForm.elements.SEARCH_WITHOUT_API_ISOLATION?.value || "host_netns";
+}
+
+function currentAdminAuthMode() {
+  return currentRuntimeModes.adminAuthMode || envForm?.elements?.ADMIN_AUTH_MODE?.value || "password";
+}
+
+function applyAdminAuthModeUi() {
+  const isClientCertMode = currentAdminAuthMode() === "mtls_proxy";
+  serverAccessForm?.classList.toggle("is-disabled", isClientCertMode);
+  for (const field of serverAccessForm?.querySelectorAll("textarea, button") || []) {
+    field.disabled = isClientCertMode;
+  }
+  if (serverAccessDisabledNote) {
+    serverAccessDisabledNote.classList.toggle("is-hidden", !isClientCertMode);
+    serverAccessDisabledNote.textContent = isClientCertMode
+      ? "Client certificate authentication is active. IPv4 whitelist and blacklist are ignored in this mode."
+      : "";
+  }
+  for (const fieldName of ["ADMIN_IPV4_WHITELIST", "ADMIN_IPV4_BLACKLIST"]) {
+    const field = envForm?.elements?.[fieldName];
+    if (field) {
+      field.disabled = isClientCertMode;
+      field.closest("label")?.classList.toggle("is-disabled", isClientCertMode);
+    }
+  }
 }
 
 function xLoginCommand(accountId, extraArgs = "") {
@@ -3252,6 +3284,11 @@ async function refreshServerAccessSettings() {
   if (!data) return;
 
   writeServerAccessForm(data.config, data.currentIp);
+  if (data.disabled && serverAccessDisabledNote) {
+    serverAccessDisabledNote.textContent =
+      data.disabledReason || "Client certificate authentication is active. IPv4 whitelist and blacklist are ignored in this mode.";
+  }
+  applyAdminAuthModeUi();
 }
 
 async function refreshEnvSettings() {
@@ -3259,6 +3296,7 @@ async function refreshEnvSettings() {
   if (!data) return;
 
   writeEnvForm(data.values);
+  applyAdminAuthModeUi();
 }
 
 async function refreshXApiSettings() {
@@ -3269,6 +3307,7 @@ async function refreshXApiSettings() {
   writeGeneralSettingsForm(data.values);
   writeSearchWithoutApiForm(data.values);
   applyRuntimeModeUi();
+  applyAdminAuthModeUi();
   await refreshOpenVpnProfiles(data.values?.VPN_CONFIG);
 }
 
@@ -3282,6 +3321,7 @@ function writeEnvForm(values) {
       }
     }
   }
+  applyAdminAuthModeUi();
 }
 
 function writeXApiForm(values) {
@@ -4685,6 +4725,10 @@ listContent.addEventListener("scroll", () => {
 
 serverAccessForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (currentAdminAuthMode() === "mtls_proxy") {
+    setStatus("Server access lists are disabled while client certificate authentication is active.");
+    return;
+  }
   const submitter = event.submitter;
   const result = await jsonFetch("/admin/settings/server-access", {
     method: "PATCH",
@@ -4758,6 +4802,7 @@ staleKeywordUserSpeedPreset?.addEventListener("change", async () => {
 
 staleKeywordUserAutoIgnoreAlert?.addEventListener("change", syncStaleKeywordUserRetryControls);
 searchWithoutApiAutoIgnoreAlert?.addEventListener("change", syncSearchWithoutApiRetryControls);
+envForm?.elements?.ADMIN_AUTH_MODE?.addEventListener("change", applyAdminAuthModeUi);
 
 staleKeywordUserPruneResult?.addEventListener("click", (event) => {
   const restore = event.target.closest("[data-stale-inline-restore]");

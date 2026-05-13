@@ -6,6 +6,8 @@ export const envKeys = [
   "ADMIN_HOST",
   "ADMIN_PORT",
   "ADMIN_TRUST_PROXY",
+  "ADMIN_AUTH_MODE",
+  "ADMIN_PUBLIC_URL",
   "ADMIN_PASSWORD",
   "SESSION_SECRET",
   "DATABASE_URL",

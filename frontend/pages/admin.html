@@ -412,6 +412,7 @@
             <h2>RedqueenX</h2>
             <p class="muted">Whitelist limits HTTPS access when it is not empty. Blacklist always blocks matching IPv4
               addresses.</p>
+            <p id="server-access-disabled-note" class="muted is-hidden"></p>
             <div class="settings-grid server-access-grid">
               <label>
                 <span>IPv4 whitelist</span>
@@ -1239,6 +1240,17 @@
                     <option value="false">false</option>
                     <option value="true">true</option>
                   </select>
+                </label>
+                <label>
+                  <span>ADMIN_AUTH_MODE</span>
+                  <select name="ADMIN_AUTH_MODE">
+                    <option value="password">password</option>
+                    <option value="mtls_proxy">mtls_proxy</option>
+                  </select>
+                </label>
+                <label>
+                  <span>ADMIN_PUBLIC_URL</span>
+                  <input name="ADMIN_PUBLIC_URL" type="url" autocomplete="off" placeholder="https://admin.example.com" />
                 </label>
                 <label>
                   <span>DATABASE_URL</span>

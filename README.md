@@ -238,14 +238,13 @@ Docker services are split deliberately:
 - `x-login`: temporary service for visible X login only; it runs Chrome on Xvfb and exposes it through noVNC on localhost.
 - `init-runtime`: one-shot helper that creates persistent runtime directories and fixes ownership for the configured UID/GID.
 
-On a VPS that already has Caddy installed on the host, point the host Caddy to the Docker admin port:
+When Caddy is already installed on the host, point the host Caddy to the Docker admin port:
 
 ```caddyfile
 your-domain.example {
   reverse_proxy 127.0.0.1:3005
 }
 ```
-
 
 For a self-contained local Docker stack with the bundled Caddy container, use:
 
@@ -267,10 +266,10 @@ Then open:
 http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale
 ```
 
-If RedqueenX is on a VPS, keep noVNC bound to `127.0.0.1` and use an SSH tunnel:
+If RedqueenX runs on a remote host, keep noVNC bound to `127.0.0.1` and use an SSH tunnel:
 
 ```bash
-ssh -L 6080:127.0.0.1:6080 user@your-vps
+ssh -L 6080:127.0.0.1:6080 user@example.com
 ```
 
 The noVNC port is controlled by `X_LOGIN_NOVNC_PORT`.
@@ -307,22 +306,22 @@ docker compose exec worker npm run diagnose:vpn
 
 The route check must show `dev tun...`. If OpenVPN is stopped or `tun+` disappears, the worker and media fetcher fail closed instead of using the host route.
 
-### VPS GitHub Webhook Deploy
+### Signed Webhook Deploy
 
-The repo includes a signed GitHub webhook config in `ops/webhook/hooks.json`.
-Do not commit the real secret. On the VPS, replace
-`CHANGE_ME_GITHUB_WEBHOOK_SECRET` with a long random value, then use that same
-value in GitHub.
+The repo includes a signed webhook config in `ops/webhook/hooks.json`.
+Do not commit the real secret. On the target server, replace
+the placeholder secret in `ops/webhook/hooks.json` with a long random value,
+then configure the same value in the webhook sender.
 
-Recommended VPS layout:
+Recommended server layout:
 
 ```bash
 sudo mkdir -p /opt
-sudo git clone https://github.com/<owner>/<repo>.git /opt/redqueenx
-cd /opt/redqueenx
+sudo git clone https://example.com/<owner>/<repo>.git /opt/RedqueenX
+cd /opt/RedqueenX
 cp .env.example .env
 openssl rand -hex 32
-# Put that generated value in ops/webhook/hooks.json, replacing CHANGE_ME_GITHUB_WEBHOOK_SECRET.
+# Put that generated value in the secret field in ops/webhook/hooks.json.
 sudo cp ops/webhook/redqueenx-webhook.service.example /etc/systemd/system/redqueenx-webhook.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now redqueenx-webhook
@@ -335,3 +334,71 @@ then reload Caddy:
 sudo caddy validate --config /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
+
+Configure the webhook sender with:
+
+- Payload URL: `https://example.com/hooks/redqueenx-deploy`
+- Content type: `application/json`
+- Secret: the same value placed in `ops/webhook/hooks.json` on the server
+- Event: the push event for the deployed branch
+- Active: enabled
+
+This webhook is separate from any CI or registry secrets. Registry credentials
+are only needed if another system builds or pushes Docker images.
+
+### Admin Access Hardening
+
+The safest setup is to keep the admin UI off the public web and expose only the
+deploy webhook route. Use `ops/webhook/Caddyfile.redqueenx.private-admin.example`
+on the host, then open the admin panel through an SSH tunnel:
+
+```bash
+ssh -L 3005:127.0.0.1:3005 root@example.com
+```
+
+Then open `http://127.0.0.1:3005` locally. In this mode, the public domain only
+serves `/hooks/redqueenx-deploy`; the admin UI is reachable only through SSH.
+
+If public browser access is required, use mTLS on a separate hostname, for
+example `admin.example.com`, and keep `example.com` for the
+deploy webhook. Do not require mTLS on the webhook hostname unless the webhook
+sender can present the required client certificate.
+
+Generate a client CA and a browser-importable certificate on the host:
+
+```bash
+sudo mkdir -p /etc/caddy/redqueenx-client-auth
+cd /etc/caddy/redqueenx-client-auth
+
+sudo openssl genrsa -out redqueenx-client-ca.key 4096
+sudo openssl req -x509 -new -nodes -key redqueenx-client-ca.key -sha256 -days 3650 \
+  -out redqueenx-client-ca.crt -subj "/CN=RedqueenX Client CA"
+
+sudo openssl genrsa -out client.key 4096
+sudo openssl req -new -key client.key -out client.csr -subj "/CN=redqueenx-admin-client"
+sudo openssl x509 -req -in client.csr -CA redqueenx-client-ca.crt \
+  -CAkey redqueenx-client-ca.key -CAcreateserial -out client.crt -days 365 -sha256
+
+sudo openssl pkcs12 -export -inkey client.key -in client.crt \
+  -certfile redqueenx-client-ca.crt -out client.p12
+
+sudo chmod 600 *.key *.p12
+sudo chmod 644 *.crt
+```
+
+Import `client.p12` into the browser, then use
+`ops/webhook/Caddyfile.redqueenx.mtls-admin.example` as the Caddy route.
+
+For this mTLS layout, set these values in `.env` before restarting the
+Docker admin service:
+
+```env
+ADMIN_AUTH_MODE=mtls_proxy
+ADMIN_PUBLIC_URL=https://admin.example.com
+```
+
+The public hostname serves the timeline and the deploy webhook. `/admin/*` on
+the public hostname redirects to the admin hostname. On the admin hostname,
+Caddy requires the browser client certificate and `/admin/login` intentionally
+returns 404; local password login remains available only when
+`ADMIN_AUTH_MODE=password`.

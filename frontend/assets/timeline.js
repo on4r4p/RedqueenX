@@ -2,6 +2,7 @@ const timeline = document.getElementById("timeline");
 const timelineStatus = document.getElementById("timeline-status");
 const timelinePaginations = Array.from(document.querySelectorAll("[data-timeline-pagination]"));
 const rawTimelineLinks = Array.from(document.querySelectorAll("[data-raw-timeline-link]"));
+const adminLinks = Array.from(document.querySelectorAll("[data-admin-link]"));
 const retryAbsTwimgFailures = document.getElementById("retry-abs-twimg-failures");
 const timelineDefaultPageSize = 50;
 const timelineMaxPageSize = 200;
@@ -13,6 +14,21 @@ const timelineState = {
   total: 0,
   hasMore: false
 };
+
+async function applyPublicConfig() {
+  if (adminLinks.length === 0) return;
+  try {
+    const response = await fetch("/public-config");
+    if (!response.ok) return;
+    const config = await response.json();
+    if (!config.adminUrl) return;
+    adminLinks.forEach((link) => {
+      link.href = config.adminUrl;
+    });
+  } catch {
+    // Keep the local /admin link when public config cannot be loaded.
+  }
+}
 
 function avatarText(author) {
   if (!author) return "RQ";
@@ -287,6 +303,7 @@ async function refreshTimeline() {
     .join("");
 }
 
+applyPublicConfig().catch(() => undefined);
 refreshTimeline().catch((error) => {
   timelineStatus.textContent = error instanceof Error ? error.message : "Timeline failed to load.";
   timeline.innerHTML = '<div class="empty-state">Timeline failed to load.</div>';
