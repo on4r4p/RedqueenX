@@ -217,6 +217,7 @@ function scanExampleEnv(file, text, failures) {
     "change-me-to-a-long-random-string"
   ]);
   const safePrefixes = ["./", "/", "http://", "https://"];
+  const nonSensitiveKeys = new Set(["ADMIN_AUTH_MODE"]);
   const sensitiveKeyPattern = /(?:API_KEY|TOKEN|SECRET|PASSWORD|AUTH|COOKIE|BEARER|CLIENT_ID|CLIENT_SECRET|ACCESS_TOKEN)/i;
 
   for (const line of text.split(/\r?\n/)) {
@@ -227,6 +228,9 @@ function scanExampleEnv(file, text, failures) {
     const [key, ...valueParts] = trimmed.split("=");
     const value = valueParts.join("=").trim().replace(/^["']|["']$/g, "");
     if (/KEYWORDS?|KEY_DELAY/i.test(key)) {
+      continue;
+    }
+    if (nonSensitiveKeys.has(key)) {
       continue;
     }
     if (!sensitiveKeyPattern.test(key)) {
