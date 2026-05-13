@@ -1,28 +1,36 @@
 name: Docker Publish
  
 on:
-  push:
+  workflow_run:
+    workflows:
+      - CI
     branches:
       - main
-  workflow_dispatch:
+    types:
+      - completed
 
 permissions:
   contents: read
 
 concurrency:
-  group: docker-publish-main
+  group: docker-publish-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 env:
   DOCKERHUB_NAMESPACE: on4r4p
+  DEPLOY_REF: refs/heads/${{ github.event.workflow_run.head_branch }}
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
 
 jobs:
   publish:
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -40,15 +48,15 @@ jobs:
           push: true
           tags: |
             ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-admin:latest
-            ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-admin:sha-${{ github.sha }}
+            ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-admin:sha-${{ env.DEPLOY_SHA }}
             ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-worker:latest
-            ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-worker:sha-${{ github.sha }}
+            ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-worker:sha-${{ env.DEPLOY_SHA }}
             ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-vpn:latest
-            ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-vpn:sha-${{ github.sha }}
+            ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-vpn:sha-${{ env.DEPLOY_SHA }}
             ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-init-runtime:latest
-            ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-init-runtime:sha-${{ github.sha }}
+            ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-init-runtime:sha-${{ env.DEPLOY_SHA }}
             ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-x-login:latest
-            ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-x-login:sha-${{ github.sha }}
+            ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-x-login:sha-${{ env.DEPLOY_SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -73,8 +81,8 @@ jobs:
 
           payload="$(
             jq -nc \
-              --arg ref "${GITHUB_REF}" \
-              --arg sha "${GITHUB_SHA}" \
+              --arg ref "${DEPLOY_REF}" \
+              --arg sha "${DEPLOY_SHA}" \
               --arg repository "${GITHUB_REPOSITORY}" \
               '{ref: $ref, after: $sha, repository: {full_name: $repository}}'
           )"
