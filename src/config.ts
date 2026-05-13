@@ -5,6 +5,10 @@ import { parseAccessListInput } from "./admin/serverAccess";
 const envSchema = z.object({
   ADMIN_HOST: z.string().default("0.0.0.0"),
   ADMIN_PORT: z.coerce.number().int().positive().default(3005),
+  ADMIN_TRUST_PROXY: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
   ADMIN_PASSWORD: z.string().optional(),
   ADMIN_PASSWORD_HASH: z.string().optional(),
   SESSION_SECRET: z.string().default("redqueenx-dev-session-secret"),
@@ -58,8 +62,13 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  SEARCH_WITHOUT_API_MAX_RETRIES: z.coerce.number().int().min(0).max(20).default(3),
+  SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS: z.coerce.number().int().min(0).max(3600).default(10),
   SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN: z.coerce.number().int().min(1).default(10),
-  SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX: z.coerce.number().int().min(1).default(180),
   SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES: z.coerce.number().int().min(0).default(15),
   SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES: z.coerce.number().int().min(0).default(120),
   SEARCH_WITHOUT_API_SCROLLS_MIN: z.coerce.number().int().min(0).default(0),
@@ -97,13 +106,16 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("true")
     .transform((value) => value === "true"),
-  DOCKER_X11_FORWARD_ENABLED: z
+  X_LOGIN_NOVNC_PORT: z.coerce.number().int().min(1).max(65535).default(6080),
+  X_LOGIN_SCREEN: z.string().min(5).max(40).default("1920x1080x24"),
+  X_LOGIN_SERVICE_MAX_SECONDS: z.coerce.number().int().min(60).max(86400).default(1200),
+  X_LOGIN_BROWSER: z.enum(["chrome", "firefox"]).default("chrome"),
+  X_LOGIN_SAVE_MODE: z.enum(["auto", "cdp", "profile"]).default("auto"),
+  X_LOGIN_START_URL: z.string().url().default("https://x.com/login"),
+  X_LOGIN_REUSE_BROWSER_PROFILE: z
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
-  DOCKER_X11_HOST: z.string().default(""),
-  DOCKER_X11_PORT: z.coerce.number().int().min(1).max(65535).default(6010),
-  DOCKER_XAUTHORITY: z.string().default("/tmp/redqueenx-docker.xauth"),
   X_LOGIN_SKIP_NETWORK_PRECHECK: z
     .enum(["true", "false"])
     .default("false")
@@ -177,6 +189,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   return {
     adminHost: parsed.ADMIN_HOST,
     adminPort: parsed.ADMIN_PORT,
+    adminTrustProxy: parsed.ADMIN_TRUST_PROXY,
     adminPassword: parsed.ADMIN_PASSWORD,
     adminPasswordHash: parsed.ADMIN_PASSWORD_HASH,
     sessionSecret: parsed.SESSION_SECRET,
@@ -204,8 +217,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     searchWithoutApiSessionKeywordLimit: parsed.SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT,
     searchWithoutApiSessionKeywordLimitRandom: parsed.SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM,
     searchWithoutApiRandomizeKeywordOrder: parsed.SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER,
+    searchWithoutApiAutoIgnoreAlert: parsed.SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT,
+    searchWithoutApiMaxRetries: parsed.SEARCH_WITHOUT_API_MAX_RETRIES,
+    searchWithoutApiAutoRestartDelaySeconds: parsed.SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS,
     searchWithoutApiRequestsBeforePauseMin: parsed.SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN,
-    searchWithoutApiRequestsBeforePauseMax: parsed.SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX,
     searchWithoutApiPauseMinMinutes: parsed.SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES,
     searchWithoutApiPauseMaxMinutes: parsed.SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES,
     searchWithoutApiScrollsMin: parsed.SEARCH_WITHOUT_API_SCROLLS_MIN,
@@ -231,10 +246,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     staleKeywordUserMaxRetries: parsed.STALE_KEYWORD_USER_MAX_RETRIES,
     staleKeywordUserAutoRestartDelaySeconds: parsed.STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS,
     rawTimelineEnabled: parsed.RAW_TIMELINE_ENABLED,
-    dockerX11ForwardEnabled: parsed.DOCKER_X11_FORWARD_ENABLED,
-    dockerX11Host: parsed.DOCKER_X11_HOST,
-    dockerX11Port: parsed.DOCKER_X11_PORT,
-    dockerXauthority: parsed.DOCKER_XAUTHORITY,
+    xLoginNovncPort: parsed.X_LOGIN_NOVNC_PORT,
+    xLoginScreen: parsed.X_LOGIN_SCREEN,
+    xLoginServiceMaxSeconds: parsed.X_LOGIN_SERVICE_MAX_SECONDS,
+    xLoginBrowser: parsed.X_LOGIN_BROWSER,
+    xLoginSaveMode: parsed.X_LOGIN_SAVE_MODE,
+    xLoginStartUrl: parsed.X_LOGIN_START_URL,
+    xLoginReuseBrowserProfile: parsed.X_LOGIN_REUSE_BROWSER_PROFILE,
     xLoginSkipNetworkPrecheck: parsed.X_LOGIN_SKIP_NETWORK_PRECHECK,
     vpnNetnsName: parsed.VPN_NETNS_NAME,
     vpnHostIface: parsed.VPN_HOST_IFACE,

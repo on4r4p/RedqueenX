@@ -5,6 +5,7 @@ config_path="${VPN_CONFIG:-/app/ops/vpn/custom.conf}"
 remote_host="${VPN_REMOTE_HOST:-}"
 remote_port="${VPN_REMOTE_PORT:-1194}"
 remote_proto="${VPN_REMOTE_PROTO:-udp}"
+novnc_port="${X_LOGIN_NOVNC_PORT:-6080}"
 
 if [[ ! -f "$config_path" ]]; then
   echo "OpenVPN config not found: $config_path" >&2
@@ -42,6 +43,11 @@ if [[ -z "$remote_ip" ]]; then
   exit 1
 fi
 
+if [[ ! "$novnc_port" =~ ^[0-9]+$ ]] || (( novnc_port < 1 || novnc_port > 65535 )); then
+  echo "Warning: invalid X_LOGIN_NOVNC_PORT=$novnc_port; noVNC login UI will not be allowed." >&2
+  novnc_port=""
+fi
+
 mkdir -p /app/runtime
 sanitized_config="/app/runtime/docker-openvpn.conf"
 config_dir="$(cd "$(dirname "$config_path")" && pwd)"
@@ -53,6 +59,8 @@ awk \
   -v config_dir="$config_dir" '
     function absolute_path(value) {
       if (value ~ /^\//) return value;
+      if (value ~ /^\.\/ops\/vpn\//) return "/app/" substr(value, 3);
+      if (value ~ /^ops\/vpn\//) return "/app/" value;
       return config_dir "/" value;
     }
     $1 == "remote" {
@@ -83,6 +91,10 @@ iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -o eth0 -p "$remote_proto" -d "$remote_ip" --dport "$remote_port" -j ACCEPT
+if [[ -n "$novnc_port" ]]; then
+  echo "Allowing Docker noVNC login UI on tcp/$novnc_port"
+  iptables -A INPUT -i eth0 -p tcp --dport "$novnc_port" -j ACCEPT
+fi
 iptables -A OUTPUT -o tun+ -j ACCEPT
 
 if command -v ip6tables >/dev/null 2>&1; then

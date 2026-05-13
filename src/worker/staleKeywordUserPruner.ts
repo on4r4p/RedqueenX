@@ -31,6 +31,7 @@ import {
   sameManualVerificationDetection,
   type ManualVerificationDetection
 } from "./browserSearch";
+import { shouldDisableChromiumSandbox } from "./chromiumSandbox";
 import { randomDelayMs, type HumanPacingConfig, typeWithPacing } from "./humanPacing";
 import { assertVpnRuntime } from "./vpnGuard";
 
@@ -1673,7 +1674,7 @@ function browserLaunchOptions(
       "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
       "--disable-dev-shm-usage",
       "--disable-gpu",
-      ...(config.playwrightDisableSandbox && process.getuid?.() === 0 ? ["--no-sandbox"] : [])
+      ...(shouldDisableChromiumSandbox(config.playwrightDisableSandbox) ? ["--no-sandbox"] : [])
     ]
   };
 }
@@ -1706,10 +1707,10 @@ function x11SocketPath(display: string): string | undefined {
 
 function findChromiumExecutable(): string | undefined {
   return [
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome-stable",
     "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable"
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser"
   ].find((candidate) => fsSync.existsSync(candidate));
 }
 

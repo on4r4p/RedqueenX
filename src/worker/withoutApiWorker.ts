@@ -33,6 +33,7 @@ import {
   sameManualVerificationDetection,
   type ManualVerificationDetection
 } from "./browserSearch";
+import { shouldDisableChromiumSandbox } from "./chromiumSandbox";
 import {
   hoverVisibleTweets,
   nextMouseProfile,
@@ -122,7 +123,7 @@ const throwingXClient = {
 
 function xLoginCommand(accountId: number, config: Pick<AppConfig, "searchWithoutApiIsolation">): string {
   return config.searchWithoutApiIsolation === "docker_vpn"
-    ? `docker compose run --rm x-login --account-id ${accountId}`
+    ? `docker compose run --rm --service-ports x-login --account-id ${accountId}`
     : `npm run netns:x-login -- --account-id ${accountId}`;
 }
 
@@ -134,17 +135,17 @@ function manualVerificationRecommendation(accountId: number, config: Pick<AppCon
     "No more scraping or login will run for this X account until this alert is resolved.",
     "Log in manually from the usual IP/VPN profile used by this X account.",
     "Let the human solve CAPTCHA/2FA/challenge manually.",
-    "The Docker visible login flow uses SSH X forwarding only; no VNC/noVNC fallback exists.",
+    "The Docker visible login flow uses noVNC, so it works without host Wayland/X11 forwarding.",
     "Return here after the session is saved, then mark the alert as resolved with a note.",
-    `Recommended Docker commands: ops/docker/x11-bridge.sh; docker compose run --rm x-login --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save; docker compose exec worker npm run diagnose:vpn.`
+    `Recommended Docker commands: docker compose run --rm --service-ports x-login --account-id ${accountId} --resolve-alert; open the noVNC URL printed by the command; press Enter in the terminal after X is visibly logged in; docker compose exec worker npm run diagnose:vpn.`
   ].join(" ");
 }
 
 function manualVerificationCommands(accountId: number, config: Pick<AppConfig, "searchWithoutApiIsolation">): string[] {
   return config.searchWithoutApiIsolation === "docker_vpn"
     ? [
-        "ops/docker/x11-bridge.sh",
-        `docker compose run --rm x-login --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`,
+        `docker compose run --rm --service-ports x-login --account-id ${accountId} --resolve-alert`,
+        "Open http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale, or tunnel that port from the VPS.",
         "docker compose exec worker npm run diagnose:vpn",
         "docker compose up -d worker"
       ]
@@ -613,6 +614,12 @@ async function runBrowserSearchLoop(input: {
       apiCallsUsed: searchesInWindow,
       apiCallLimit: searchesBeforePause,
       apiCallsRemaining: Math.max(0, searchesBeforePause - searchesInWindow),
+      browserAlertAutoIgnore: input.config.searchWithoutApiAutoIgnoreAlert,
+      browserAlertMaxRetries: input.config.searchWithoutApiMaxRetries,
+      browserAlertAutoRestartDelaySeconds: input.config.searchWithoutApiAutoRestartDelaySeconds,
+      browserAlertRetryCount: 0,
+      browserAlertAutoRestartAt: null,
+      browserAlertLastCompletedKeywords: completedKeywords,
       acceptedTweets: acceptedTotal,
       rejectedTweets: rejectedTotal,
       lastScore: scored[0]?.decision.score ?? null,
@@ -1525,6 +1532,12 @@ function createBrowserRunStats(
     apiCallsRemaining: apiCallLimit,
     apiWindowMinutes: config.searchWithoutApiPauseMaxMinutes,
     nextApiResetAt: null,
+    browserAlertAutoIgnore: config.searchWithoutApiAutoIgnoreAlert,
+    browserAlertRetryCount: existingStats?.browserAlertRetryCount ?? 0,
+    browserAlertMaxRetries: config.searchWithoutApiMaxRetries,
+    browserAlertAutoRestartDelaySeconds: config.searchWithoutApiAutoRestartDelaySeconds,
+    browserAlertAutoRestartAt: existingStats?.browserAlertAutoRestartAt ?? null,
+    browserAlertLastCompletedKeywords: existingStats?.browserAlertLastCompletedKeywords ?? null,
     acceptedTweets: 0,
     rejectedTweets: 0,
     lastScore: null,
@@ -1537,9 +1550,8 @@ function searchesBeforePauseForKeywords(remainingKeywords: number, config: Retur
   if (remaining <= 0) {
     return 0;
   }
-  const automaticLimit = Math.ceil(remaining / 2);
-  const manualMax = Math.max(1, Math.floor(config.searchWithoutApiRequestsBeforePauseMax));
-  return Math.max(1, Math.min(remaining, automaticLimit, manualMax));
+  const manualMin = Math.max(1, Math.floor(config.searchWithoutApiRequestsBeforePauseMin));
+  return Math.min(remaining, manualMin);
 }
 
 function browserPacingConfig(config: ReturnType<typeof loadConfig>): HumanPacingConfig {
@@ -1674,7 +1686,7 @@ function browserLaunchOptions(config: ReturnType<typeof loadConfig>, record: (le
     "--disable-dev-shm-usage",
     "--disable-gpu"
   ];
-  if (config.playwrightDisableSandbox && process.getuid?.() === 0) {
+  if (shouldDisableChromiumSandbox(config.playwrightDisableSandbox)) {
     args.push("--no-sandbox");
   }
   return {
@@ -1713,10 +1725,10 @@ function x11SocketPath(display: string) {
 
 function findChromiumExecutable(): string | undefined {
   return [
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome-stable",
     "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable"
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser"
   ].find((candidate) => fsSync.existsSync(candidate));
 }
 

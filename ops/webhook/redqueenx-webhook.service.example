@@ -1,0 +1,17 @@
+[Unit]
+Description=RedqueenX GitHub deploy webhook
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/redqueenx
+Environment=REDQUEENX_DEPLOY_DIR=/opt/redqueenx
+Environment=REDQUEENX_COMPOSE_FILE=compose.prod.yaml
+Environment=REDQUEENX_DEPLOY_BRANCH=main
+ExecStart=/usr/bin/webhook -hooks /opt/redqueenx/ops/webhook/hooks.json -ip 127.0.0.1 -port 9000 -verbose
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

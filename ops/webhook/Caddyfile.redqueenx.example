@@ -1,0 +1,19 @@
+yoururl {
+  encode zstd gzip
+
+  @github_webhook {
+    method POST
+    path /hooks/redqueenx-deploy
+  }
+  handle @github_webhook {
+    reverse_proxy 127.0.0.1:9000
+  }
+
+  handle_path /hooks/* {
+    respond "not found" 404
+  }
+
+  handle {
+    reverse_proxy 127.0.0.1:3005
+  }
+}

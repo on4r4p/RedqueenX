@@ -8,6 +8,7 @@ import { RunService } from "../src/admin/runService";
 import { TimelineTweetService } from "../src/admin/timelineTweetService";
 import { XBrowserAccountService } from "../src/admin/xBrowserAccountService";
 import { XSessionAlertService } from "../src/admin/xSessionAlertService";
+import { loadConfig } from "../src/config";
 
 describe("admin api", () => {
   it("protects admin routes and supports login, list mutations, commands, and import", async () => {
@@ -32,6 +33,7 @@ describe("admin api", () => {
       config: {
         adminPassword: "secret",
         adminPasswordHash: undefined,
+        adminTrustProxy: false,
         sessionSecret: "test-session-secret",
         adminIpv4Whitelist: [],
         adminIpv4Blacklist: [],
@@ -55,8 +57,10 @@ describe("admin api", () => {
         searchWithoutApiSessionKeywordLimit: 50,
         searchWithoutApiSessionKeywordLimitRandom: false,
         searchWithoutApiRandomizeKeywordOrder: false,
+        searchWithoutApiAutoIgnoreAlert: false,
+        searchWithoutApiMaxRetries: 3,
+        searchWithoutApiAutoRestartDelaySeconds: 10,
         searchWithoutApiRequestsBeforePauseMin: 10,
-        searchWithoutApiRequestsBeforePauseMax: 180,
         searchWithoutApiPauseMinMinutes: 15,
         searchWithoutApiPauseMaxMinutes: 120,
         searchWithoutApiScrollsMin: 0,
@@ -82,10 +86,13 @@ describe("admin api", () => {
         staleKeywordUserMaxRetries: 3,
         staleKeywordUserAutoRestartDelaySeconds: 10,
         rawTimelineEnabled: true,
-        dockerX11ForwardEnabled: false,
-        dockerX11Host: "",
-        dockerX11Port: 6010,
-        dockerXauthority: "/tmp/redqueenx-docker.xauth",
+        xLoginNovncPort: 6080,
+        xLoginScreen: "1920x1080x24",
+        xLoginServiceMaxSeconds: 1200,
+        xLoginBrowser: "chrome",
+        xLoginSaveMode: "auto",
+        xLoginStartUrl: "https://x.com/login",
+        xLoginReuseBrowserProfile: false,
         xLoginSkipNetworkPrecheck: false,
         vpnNetnsName: "redqueenx-vpn",
         vpnHostIface: "",
@@ -387,7 +394,13 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="search-without-api-form"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_ENABLED"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_ISOLATION"');
-    expect(adminPage.body).toContain('name="DOCKER_X11_FORWARD_ENABLED"');
+    expect(adminPage.body).toContain('name="X_LOGIN_NOVNC_PORT"');
+    expect(adminPage.body).toContain('name="X_LOGIN_SCREEN"');
+    expect(adminPage.body).toContain('name="X_LOGIN_SERVICE_MAX_SECONDS"');
+    expect(adminPage.body).toContain('name="X_LOGIN_BROWSER"');
+    expect(adminPage.body).toContain('name="X_LOGIN_SAVE_MODE"');
+    expect(adminPage.body).toContain('name="X_LOGIN_REUSE_BROWSER_PROFILE"');
+    expect(adminPage.body).toContain('name="X_LOGIN_START_URL"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM"');
     expect(adminPage.body).toContain('name="TIMELINE_DEFAULT_PAGE_SIZE"');
@@ -409,7 +422,11 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="open-skipped-keyword-users-button"');
     expect(adminPage.body).toContain('id="prune-stale-keyword-users-button"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER"');
-    expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX"');
+    expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT"');
+    expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_MAX_RETRIES"');
+    expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS"');
+    expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN"');
+    expect(adminPage.body).not.toContain('name="SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX"');
     expect(adminPage.body).toContain('<option value="search_terms_used">SearchTerms.Used</option>');
     expect(adminPage.body).toContain("Linux namespace / OpenVPN");
     expect(adminPage.body).toContain("VPN diagnostics");
@@ -432,6 +449,9 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="x-browser-account-select"');
     expect(adminPage.body).toContain('id="x-browser-identifier"');
     expect(adminPage.body).toContain('id="x-browser-session-validation"');
+    expect(adminPage.body).toContain('id="x-browser-session-import"');
+    expect(adminPage.body).toContain('id="x-browser-session-export"');
+    expect(adminPage.body).toContain('id="x-browser-session-import-file"');
     expect(adminPage.body).toContain('id="x-browser-account-save"');
     expect(adminPage.body).toContain('data-path-picker="file"');
     expect(adminPage.body).toContain('data-path-copy-to="./ops/vpn"');
@@ -770,6 +790,7 @@ describe("admin api", () => {
     const openVpnAuthPath = path.join(openVpnProfileDir, openVpnAuthName);
     const secondOpenVpnProfileName = `admin-api-profile-second-${process.pid}-${Date.now()}.ovpn`;
     const secondOpenVpnProfilePath = path.join(openVpnProfileDir, secondOpenVpnProfileName);
+    let importedXBrowserSessionPath: string | null = null;
     fs.mkdirSync(openVpnProfileDir, { recursive: true });
     fs.writeFileSync(
       openVpnProfilePath,
@@ -827,6 +848,7 @@ describe("admin api", () => {
         }
       });
       expect(xBrowserAccount.statusCode).toBe(200);
+      importedXBrowserSessionPath = path.resolve(xBrowserAccount.json().account.storageStatePath);
       expect(xBrowserAccount.json()).toMatchObject({
         account: {
           vpnProfilePath: `./ops/vpn/${openVpnProfileName}`,
@@ -840,6 +862,68 @@ describe("admin api", () => {
         }
       });
       expect(JSON.stringify(xBrowserAccount.json())).not.toContain("vpn-pass");
+      const missingXBrowserSessionExport = await app.inject({
+        method: "GET",
+        url: `/admin/x-browser-accounts/${xBrowserAccount.json().account.id}/session`,
+        headers: authHeaders
+      });
+      expect(missingXBrowserSessionExport.statusCode).toBe(404);
+      const invalidXBrowserSessionImport = await app.inject({
+        method: "POST",
+        url: `/admin/x-browser-accounts/${xBrowserAccount.json().account.id}/session`,
+        headers: authHeaders,
+        payload: {
+          filename: "bad-session.json",
+          content: JSON.stringify({ cookies: [], origins: [] })
+        }
+      });
+      expect(invalidXBrowserSessionImport.statusCode).toBe(400);
+      const importedStorageState = {
+        cookies: [
+          {
+            name: "auth_token",
+            value: "secret-x-session-token",
+            domain: ".x.com",
+            path: "/",
+            expires: -1,
+            httpOnly: true,
+            secure: true,
+            sameSite: "Lax"
+          }
+        ],
+        origins: []
+      };
+      const xBrowserSessionImport = await app.inject({
+        method: "POST",
+        url: `/admin/x-browser-accounts/${xBrowserAccount.json().account.id}/session`,
+        headers: authHeaders,
+        payload: {
+          filename: "x-session.json",
+          content: JSON.stringify(importedStorageState)
+        }
+      });
+      expect(xBrowserSessionImport.statusCode).toBe(200);
+      expect(xBrowserSessionImport.json()).toMatchObject({
+        imported: true,
+        cookieCount: 1,
+        filename: "x-session.json",
+        account: {
+          id: xBrowserAccount.json().account.id,
+          sessionStatus: "valid",
+          storageStateExists: true
+        }
+      });
+      expect(JSON.stringify(xBrowserSessionImport.json())).not.toContain("secret-x-session-token");
+      expect(importedXBrowserSessionPath).toBeTruthy();
+      expect(fs.statSync(importedXBrowserSessionPath as string).mode & 0o777).toBe(0o600);
+      const xBrowserSessionExport = await app.inject({
+        method: "GET",
+        url: `/admin/x-browser-accounts/${xBrowserAccount.json().account.id}/session`,
+        headers: authHeaders
+      });
+      expect(xBrowserSessionExport.statusCode).toBe(200);
+      expect(xBrowserSessionExport.headers["content-disposition"]).toContain("redqueenx_test-x-session.json");
+      expect(JSON.parse(xBrowserSessionExport.body)).toMatchObject(importedStorageState);
       const xBrowserAccounts = await app.inject({
         method: "GET",
         url: "/admin/x-browser-accounts",
@@ -930,6 +1014,9 @@ describe("admin api", () => {
       fs.rmSync(openVpnProfilePath, { force: true });
       fs.rmSync(openVpnAuthPath, { force: true });
       fs.rmSync(secondOpenVpnProfilePath, { force: true });
+      if (importedXBrowserSessionPath) {
+        fs.rmSync(importedXBrowserSessionPath, { force: true });
+      }
     }
 
     const scoringDefaults = await app.inject({
@@ -998,6 +1085,9 @@ describe("admin api", () => {
       SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: "50",
       SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: "false",
       SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: "false",
+      SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: "false",
+      SEARCH_WITHOUT_API_MAX_RETRIES: "3",
+      SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS: "10",
       TIMELINE_DEFAULT_PAGE_SIZE: "50",
       RUN_CHAIN_COUNT: "1",
       STALE_KEYWORD_USER_MAX_AGE_DAYS: "90",
@@ -1008,12 +1098,14 @@ describe("admin api", () => {
       STALE_KEYWORD_USER_MAX_RETRIES: "3",
       STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS: "10",
       RAW_TIMELINE_ENABLED: "true",
-      DOCKER_X11_FORWARD_ENABLED: "false",
-      DOCKER_X11_HOST: "",
-      DOCKER_X11_PORT: "6010",
-      DOCKER_XAUTHORITY: "/tmp/redqueenx-docker.xauth",
+      X_LOGIN_NOVNC_PORT: "6080",
+      X_LOGIN_SCREEN: "1920x1080x24",
+      X_LOGIN_SERVICE_MAX_SECONDS: "1200",
+      X_LOGIN_BROWSER: "chrome",
+      X_LOGIN_SAVE_MODE: "auto",
+      X_LOGIN_START_URL: "https://x.com/login",
+      X_LOGIN_REUSE_BROWSER_PROFILE: "false",
       SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN: "10",
-      SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX: "180",
       SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES: "15",
       SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES: "120",
       SEARCH_WITHOUT_API_SCROLLS_MIN: "0",
@@ -1234,6 +1326,9 @@ describe("admin api", () => {
           SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: "12",
           SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: "true",
           SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: "true",
+          SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: "true",
+          SEARCH_WITHOUT_API_MAX_RETRIES: "4",
+          SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS: "30",
           SEARCH_WITHOUT_API_SCROLLS_MAX: "12",
           SEARCH_WITHOUT_API_MOUSE_PROFILE: "smooth2",
           VPN_REMOTE_HOST: "vpn.example.test",
@@ -1255,6 +1350,9 @@ describe("admin api", () => {
       SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: "12",
       SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: "true",
       SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: "true",
+      SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: "true",
+      SEARCH_WITHOUT_API_MAX_RETRIES: "4",
+      SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS: "30",
       SEARCH_WITHOUT_API_SCROLLS_MAX: "12",
       SEARCH_WITHOUT_API_MOUSE_PROFILE: "smooth2",
       VPN_REMOTE_HOST: "vpn.example.test",
@@ -1271,6 +1369,9 @@ describe("admin api", () => {
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT=12");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM=true");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER=true");
+    expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT=true");
+    expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_MAX_RETRIES=4");
+    expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS=30");
     expect(envAfterSearchWithoutApiEnable).toContain("X_LOGIN_SKIP_NETWORK_PRECHECK=true");
     expect(envAfterSearchWithoutApiEnable).toContain("VPN_REMOTE_HOST=vpn.example.test");
     expect(envAfterSearchWithoutApiEnable).toContain("VPN_REMOTE_PORT=443");
@@ -2205,5 +2306,49 @@ describe("admin api", () => {
     });
 
     await app.close();
+  });
+
+  it("applies server access rules to the forwarded client IP when trust proxy is enabled", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-api-proxy-"));
+    const currentSessionFilePath = path.join(tmp, "current-session.log");
+    const config = loadConfig({
+      ADMIN_PASSWORD: "secret",
+      SESSION_SECRET: "test-session-secret",
+      CURRENT_SESSION_FILE: currentSessionFilePath,
+      DATABASE_URL: path.join(tmp, "redqueenx.sqlite"),
+      ADMIN_TRUST_PROXY: "true",
+      ADMIN_IPV4_WHITELIST: "203.0.113.5/32",
+      ADMIN_IPV4_BLACKLIST: ""
+    });
+    const app = createAdminApi({
+      database: openMemoryDatabase(),
+      config,
+      envPath: path.join(tmp, ".env"),
+      currentSessionFilePath,
+      restartDelayMs: 0
+    });
+
+    try {
+      const allowed = await app.inject({
+        method: "POST",
+        url: "/admin/login",
+        remoteAddress: "127.0.0.1",
+        headers: { "x-forwarded-for": "203.0.113.5" },
+        payload: { password: "secret" }
+      });
+      expect(allowed.statusCode).toBe(200);
+
+      const blocked = await app.inject({
+        method: "POST",
+        url: "/admin/login",
+        remoteAddress: "127.0.0.1",
+        headers: { "x-forwarded-for": "198.51.100.7" },
+        payload: { password: "secret" }
+      });
+      expect(blocked.statusCode).toBe(403);
+      expect(blocked.json()).toEqual({ error: "Forbidden by RedqueenX access policy" });
+    } finally {
+      await app.close();
+    }
   });
 });

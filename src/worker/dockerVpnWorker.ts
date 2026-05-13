@@ -10,6 +10,8 @@ import { CurrentSessionService, type CurrentSessionLevel } from "../admin/curren
 import { ListService } from "../admin/listService";
 import { MediaCacheJobService, type MediaCacheJobRecord } from "../admin/mediaCacheJobService";
 import { parseRunStats, RunService } from "../admin/runService";
+import { XBrowserAccountService } from "../admin/xBrowserAccountService";
+import { XSessionAlertService } from "../admin/xSessionAlertService";
 import { normalizeValue } from "../text";
 import type { RunRecord, RunStats } from "../types";
 import { assertVpnRuntime } from "./vpnGuard";
@@ -52,6 +54,8 @@ async function main() {
   const database = openDatabase(config.databaseUrl);
   const runs = new RunService(database);
   const lists = new ListService(database);
+  const accounts = new XBrowserAccountService(database);
+  const alerts = new XSessionAlertService(database);
   const mediaCacheJobs = new MediaCacheJobService(database);
   const currentSession = new CurrentSessionService(config.currentSessionFile);
   const record = (level: CurrentSessionLevel, type: string, message: string, data: Record<string, unknown> = {}) =>
@@ -71,9 +75,20 @@ async function main() {
       await assertVpnRuntime(config, "Docker VPN worker");
       const currentRun = runs.current();
       if (currentRun?.status === "running") {
+        const completedKeywordsAtStart = parseRunStats(currentRun.statsJson).completedKeywords;
         const code = await runWithoutApiWorker(currentRun, config, record);
         if (code === 0) {
           await maybeStartNextChainedRun(currentRun.id, runs, lists, config, record);
+        } else if (code === 2) {
+          await maybeRestartWithoutApiAfterAlert(
+            currentRun.id,
+            completedKeywordsAtStart,
+            runs,
+            accounts,
+            alerts,
+            config,
+            record
+          );
         }
         continue;
       }
@@ -109,6 +124,143 @@ async function runWithoutApiWorker(
     failedType: "docker_vpn.worker.child.failed",
     data: { runId: run.id }
   });
+}
+
+async function maybeRestartWithoutApiAfterAlert(
+  runId: string,
+  completedKeywordsAtStart: number,
+  runs: RunService,
+  accounts: XBrowserAccountService,
+  alerts: XSessionAlertService,
+  config: AppConfig,
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>
+): Promise<boolean> {
+  const run = runs.get(runId);
+  if (!run || run.status !== "paused") {
+    return false;
+  }
+  const account = accounts.findByVpnProfilePath(config.vpnConfig);
+  const alert = account ? alerts.openForAccount(account.id) : alerts.openAlerts()[0] ?? null;
+  if (!alert) {
+    return false;
+  }
+
+  await record("prob", "docker_vpn.browser.waiting_alert_resolution", "Docker VPN browser run is waiting for X session alert resolution", {
+    runId,
+    alertId: alert.id,
+    accountId: alert.accountId,
+    xIdentifier: alert.xIdentifier,
+    autoIgnoreAlert: config.searchWithoutApiAutoIgnoreAlert,
+    maxRetries: config.searchWithoutApiMaxRetries,
+    autoRestartDelaySeconds: config.searchWithoutApiAutoRestartDelaySeconds
+  });
+
+  if (!config.searchWithoutApiAutoIgnoreAlert) {
+    return false;
+  }
+
+  const stats = parseRunStats(run.statsJson);
+  const lastAlertCompleted = stats.browserAlertLastCompletedKeywords ?? completedKeywordsAtStart;
+  const progressedSinceLastAlert = stats.completedKeywords > lastAlertCompleted;
+  const previousRetryCount = progressedSinceLastAlert ? 0 : Math.max(0, Math.floor(stats.browserAlertRetryCount ?? 0));
+  const maxRetries = Math.max(0, Math.floor(config.searchWithoutApiMaxRetries ?? 0));
+  if (previousRetryCount >= maxRetries) {
+    runs.updateStats(runId, {
+      browserAlertAutoIgnore: true,
+      browserAlertRetryCount: previousRetryCount,
+      browserAlertMaxRetries: maxRetries,
+      browserAlertAutoRestartDelaySeconds: config.searchWithoutApiAutoRestartDelaySeconds,
+      browserAlertAutoRestartAt: null,
+      browserAlertLastCompletedKeywords: stats.completedKeywords
+    });
+    await record("prob", "docker_vpn.browser.auto_ignore_limit", "Docker VPN browser run auto-ignore limit reached", {
+      runId,
+      alertId: alert.id,
+      retryCount: previousRetryCount,
+      maxRetries
+    });
+    return false;
+  }
+
+  const closedAlert = alerts.ignore(alert.id);
+  const readyAccount = accounts.findById(closedAlert.accountId);
+  if (readyAccount?.storageStateExists) {
+    accounts.markStatus(closedAlert.accountId, "valid");
+  }
+  const nextRetryCount = previousRetryCount + 1;
+  const delayMs = dockerWithoutApiAlertRestartDelayMs(config.searchWithoutApiAutoRestartDelaySeconds);
+  const restartAt = new Date(Date.now() + delayMs).toISOString();
+  runs.updateStats(runId, {
+    browserAlertAutoIgnore: true,
+    browserAlertRetryCount: nextRetryCount,
+    browserAlertMaxRetries: maxRetries,
+    browserAlertAutoRestartDelaySeconds: config.searchWithoutApiAutoRestartDelaySeconds,
+    browserAlertAutoRestartAt: restartAt,
+    browserAlertLastCompletedKeywords: stats.completedKeywords,
+    nextApiResetAt: restartAt
+  });
+  await record("prob", "docker_vpn.browser.alert_auto_ignored", "Docker VPN X session alert auto-ignored for Search without API", {
+    runId,
+    alertId: closedAlert.id,
+    accountId: closedAlert.accountId,
+    xIdentifier: closedAlert.xIdentifier,
+    retryCount: nextRetryCount,
+    maxRetries,
+    autoRestartDelaySeconds: config.searchWithoutApiAutoRestartDelaySeconds
+  });
+  await record("info", "docker_vpn.browser.auto_restart_wait", "Docker VPN browser run waiting before restart after X session alert", {
+    runId,
+    alertId: closedAlert.id,
+    retryCount: nextRetryCount,
+    maxRetries,
+    restartAt,
+    delayMs
+  });
+
+  await interruptibleDockerDelay(delayMs);
+  if (shuttingDown) {
+    return false;
+  }
+
+  const current = runs.get(runId);
+  if (!current || current.status !== "paused") {
+    return false;
+  }
+  const currentAccount = accounts.findByVpnProfilePath(config.vpnConfig);
+  if (currentAccount && alerts.openForAccount(currentAccount.id)) {
+    await record("prob", "docker_vpn.browser.auto_restart_blocked", "Docker VPN browser run auto-restart blocked by another open X session alert", {
+      runId,
+      accountId: currentAccount.id,
+      xIdentifier: currentAccount.xIdentifier
+    });
+    return false;
+  }
+  runs.updateStats(runId, {
+    browserAlertAutoRestartAt: null,
+    nextApiResetAt: null
+  });
+  const resumed = runs.resume(runId);
+  await record("info", "docker_vpn.browser.auto_restarted", "Docker VPN browser run restarted after X session alert", {
+    runId: resumed.id,
+    alertId: closedAlert.id,
+    retryCount: nextRetryCount,
+    maxRetries
+  });
+  return true;
+}
+
+function dockerWithoutApiAlertRestartDelayMs(seconds: number): number {
+  if (process.env.VITEST === "true" || process.env.NODE_ENV === "test") {
+    return 0;
+  }
+  return Math.max(0, Math.floor(seconds)) * 1000;
+}
+
+async function interruptibleDockerDelay(ms: number): Promise<void> {
+  const deadline = Date.now() + Math.max(0, ms);
+  while (!shuttingDown && Date.now() < deadline) {
+    await delay(Math.min(1_000, deadline - Date.now()));
+  }
 }
 
 async function processOneStaleKeywordUserPruneRequest(
@@ -372,8 +524,8 @@ function childBaseEnv(config: AppConfig): NodeJS.ProcessEnv {
     SEARCH_WITHOUT_API_PROFILE_DIR: config.searchWithoutApiProfileDir,
     SEARCH_WITHOUT_API_MEDIA_CACHE_DIR: config.searchWithoutApiMediaCacheDir,
     REDQUEENX_DOCKER_VPN: "true",
-    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
-    PLAYWRIGHT_DISABLE_SANDBOX: process.env.PLAYWRIGHT_DISABLE_SANDBOX || "true"
+    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/google-chrome-stable",
+    PLAYWRIGHT_DISABLE_SANDBOX: process.env.PLAYWRIGHT_DISABLE_SANDBOX || "false"
   };
 }
 

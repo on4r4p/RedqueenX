@@ -51,6 +51,9 @@ const staleKeywordUserActionDelayMaxSeconds = document.getElementById("stale-key
 const staleKeywordUserAutoIgnoreAlert = document.getElementById("stale-keyword-user-auto-ignore-alert");
 const staleKeywordUserMaxRetries = document.getElementById("stale-keyword-user-max-retries");
 const staleKeywordUserAutoRestartDelaySeconds = document.getElementById("stale-keyword-user-auto-restart-delay-seconds");
+const searchWithoutApiAutoIgnoreAlert = document.getElementById("search-without-api-auto-ignore-alert");
+const searchWithoutApiMaxRetries = document.getElementById("search-without-api-max-retries");
+const searchWithoutApiAutoRestartDelaySeconds = document.getElementById("search-without-api-auto-restart-delay-seconds");
 const openStaleKeywordUsersButton = document.getElementById("open-stale-keyword-users-button");
 const openSkippedKeywordUsersButton = document.getElementById("open-skipped-keyword-users-button");
 const toggleInlineStaleKeywordUsersButton = document.getElementById("toggle-inline-stale-keyword-users-button");
@@ -61,6 +64,7 @@ const staleKeywordUserPruneResult = document.getElementById("stale-keyword-user-
 const searchWithoutApiForm = document.getElementById("search-without-api-form");
 const searchWithoutApiControls = document.getElementById("search-without-api-controls");
 const dockerVpnOnlySettings = Array.from(document.querySelectorAll(".docker-vpn-only"));
+const hostNetnsOnlySettings = Array.from(document.querySelectorAll(".host-netns-only"));
 const openVpnProfileSelect = document.getElementById("openvpn-profile-select");
 const openVpnProfileDetail = document.getElementById("openvpn-profile-detail");
 const openVpnSettingsSaveButton = document.getElementById("openvpn-settings-save-button");
@@ -80,8 +84,12 @@ const xBrowserLinkAllProfiles = document.getElementById("x-browser-link-all-prof
 const xBrowserSessionValidation = document.getElementById("x-browser-session-validation");
 const xBrowserAccountDetail = document.getElementById("x-browser-account-detail");
 const xBrowserLoginCommand = document.getElementById("x-browser-login-command");
+const xBrowserLoginHelp = document.getElementById("x-browser-login-help");
 const xBrowserAccountSave = document.getElementById("x-browser-account-save");
 const xBrowserAccountDelete = document.getElementById("x-browser-account-delete");
+const xBrowserSessionImport = document.getElementById("x-browser-session-import");
+const xBrowserSessionExport = document.getElementById("x-browser-session-export");
+const xBrowserSessionImportFile = document.getElementById("x-browser-session-import-file");
 const xApiForm = document.getElementById("x-api-form");
 const xApiControls = document.getElementById("x-api-controls");
 const resetXCountersButton = document.getElementById("reset-x-counters-button");
@@ -318,7 +326,10 @@ const generalSettingsFields = [
   "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT",
   "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM",
   "SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER",
-  "SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX",
+  "SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT",
+  "SEARCH_WITHOUT_API_MAX_RETRIES",
+  "SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS",
+  "SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN",
   "SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES",
   "SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES",
   "SEARCH_WITHOUT_API_MAX_SCROLLS",
@@ -370,10 +381,13 @@ const searchWithoutApiFields = [
   "SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB",
   "SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS",
   "SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS",
-  "DOCKER_X11_FORWARD_ENABLED",
-  "DOCKER_X11_HOST",
-  "DOCKER_X11_PORT",
-  "DOCKER_XAUTHORITY",
+  "X_LOGIN_NOVNC_PORT",
+  "X_LOGIN_SCREEN",
+  "X_LOGIN_SERVICE_MAX_SECONDS",
+  "X_LOGIN_BROWSER",
+  "X_LOGIN_SAVE_MODE",
+  "X_LOGIN_REUSE_BROWSER_PROFILE",
+  "X_LOGIN_START_URL",
   "VPN_NETNS_NAME",
   "VPN_HOST_IFACE",
   "VPN_NETNS_CIDR",
@@ -395,6 +409,7 @@ const searchWithoutApiFields = [
 const envFields = [
   "ADMIN_HOST",
   "ADMIN_PORT",
+  "ADMIN_TRUST_PROXY",
   "ADMIN_PASSWORD",
   "SESSION_SECRET",
   "DATABASE_URL",
@@ -443,6 +458,8 @@ const adminTooltipByName = {
     "Extra IPv4 addresses or CIDR ranges always allowed by the HTTP access policy after the server restarts. Comma, space, semicolon, or newline separators are accepted.",
   ADMIN_IPV4_BLACKLIST:
     "Extra IPv4 addresses or CIDR ranges always blocked by the HTTP access policy after the server restarts. Blacklist entries win over whitelist entries.",
+  ADMIN_TRUST_PROXY:
+    "Enable only when RedqueenX is behind a trusted local reverse proxy such as Caddy, so the whitelist uses the real client IP from X-Forwarded-For.",
   allowedLanguages: "Comma-separated language codes accepted by the tweet scoring rules.",
   enableAllowedLanguages: "Enable or disable the allowed-language rejection check.",
   minimumSearchResults: "Minimum number of search results required before the keyword is considered useful.",
@@ -497,8 +514,14 @@ const adminTooltipByName = {
     "When true, each session randomly chooses a keyword count between 1 and the configured session limit.",
   SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER:
     "Shuffle eligible keywords before applying the session limit so each run does not always start with the same entries.",
-  SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX:
-    "Hard maximum number of keyword searches allowed before a pacing pause. The automatic limit is half of remaining session keywords, rounded up, capped by this value.",
+  SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT:
+    "When Search without Api is stopped by an X session alert, mark that alert ignored automatically and resume the same run.",
+  SEARCH_WITHOUT_API_MAX_RETRIES:
+    "Maximum restart attempts after X session alerts during Search without Api. Used only when Ignore alerts is enabled.",
+  SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS:
+    "Seconds to wait after an X session alert is auto-ignored before resuming Search without Api.",
+  SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN:
+    "Number of keyword searches required before a pacing pause. The runtime will not pause earlier unless the session has no keywords left.",
   SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES: "Minimum random pause duration after the search limit is reached.",
   SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES: "Maximum random pause duration after the search limit is reached.",
   SEARCH_WITHOUT_API_SCROLLS_MIN: "Minimum random number of result-page scrolls per search.",
@@ -518,10 +541,16 @@ const adminTooltipByName = {
   SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB: "Maximum size accepted for a single downloaded image or video.",
   SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS: "Minimum delay between two media downloads in the VPN worker.",
   SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS: "Maximum delay between two media downloads in the VPN worker.",
-  DOCKER_X11_FORWARD_ENABLED: "Enable only for temporary docker compose run x-login sessions launched from an SSH X-forwarded host shell.",
-  DOCKER_X11_HOST: "Host or bridge IP that the x-login container uses to reach the SSH X forwarding proxy.",
-  DOCKER_X11_PORT: "TCP port for the SSH X forwarding proxy. Display :10 normally maps to port 6010.",
-  DOCKER_XAUTHORITY: "Temporary xauth file generated by ops/docker/x11-bridge.sh and mounted into the x-login container.",
+  X_LOGIN_NOVNC_PORT: "Host/container port used by the Docker noVNC login page. Bound to 127.0.0.1 by Compose.",
+  X_LOGIN_SCREEN: "Virtual screen size used by Docker x-login, for example 1920x1080x24.",
+  X_LOGIN_SERVICE_MAX_SECONDS: "Maximum lifetime of one Docker x-login/noVNC container. The service exits automatically when it reaches this limit.",
+  X_LOGIN_BROWSER:
+    "Browser used by Docker noVNC manual login. Firefox auto-saves when X Home is loaded and avoids the Chrome onboarding 400/code 399 loop.",
+  X_LOGIN_SAVE_MODE:
+    "How x-login saves the browser session. Auto uses profile extraction in Docker noVNC and live CDP capture in host namespace.",
+  X_LOGIN_REUSE_BROWSER_PROFILE:
+    "Reuse the previous Docker browser profile during manual x-login. Keep false to avoid reusing a partial/broken X login flow.",
+  X_LOGIN_START_URL: "Initial X login page opened by the manual browser helper.",
   TIMELINE_DEFAULT_PAGE_SIZE: "Default number of tweets shown per page on Timeline and Rejected Timeline when the URL has no limit parameter.",
   RUN_CHAIN_COUNT:
     "Number of runs launched sequentially from Start. Chaining stops if a run fails, pauses for session verification, or no eligible keyword remains.",
@@ -554,7 +583,7 @@ const adminTooltipByName = {
   VPN_DIAGNOSTIC_STRICT: "Fail diagnostics when required network checks cannot be verified.",
   VPN_DIAGNOSTIC_PLAYWRIGHT: "Run browser-level VPN diagnostics through Playwright.",
   PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: "Optional path to system Chromium used by Playwright.",
-  PLAYWRIGHT_DISABLE_SANDBOX: "Launch Chromium with --no-sandbox when true. Useful in constrained servers.",
+  PLAYWRIGHT_DISABLE_SANDBOX: "Launch Chromium with --no-sandbox when true. Keep false in Docker unless Chromium reports that no sandbox is usable.",
   X_API_ENABLED: "Enable or disable X API search. Disabling it stops any active X API run.",
   X_API_CREDIT_USD: "Remaining account credit available for X API usage.",
   X_API_TOTAL_CREDIT_USED_USD: "Total X credit already consumed outside this local cost estimate.",
@@ -637,6 +666,9 @@ const adminTooltipById = {
   "x-browser-session-validation": "Shows whether RedqueenX can see a saved Playwright browser session for this X account.",
   "x-browser-account-save": "Save or update the link between OpenVPN profiles and this X account.",
   "x-browser-account-delete": "Delete only the database link. The sensitive storageState file is left on disk until removed manually.",
+  "x-browser-session-import": "Import a Playwright storageState JSON file for the selected X browser account. This overwrites the saved session file.",
+  "x-browser-session-export": "Download the selected X browser account storageState JSON file.",
+  "x-browser-session-import-file": "Choose the Playwright storageState JSON file to import for the selected X browser account.",
   "session-auto-refresh": "Refresh this session view automatically every few seconds.",
   "session-include-admin-polling": "Show or hide admin polling requests in the session log.",
   "session-tweet-content": "Include tweet text in session log output.",
@@ -1558,6 +1590,12 @@ function renderXBrowserAccountPanel(vpnProfilePath = currentVpnProfilePath()) {
   if (xBrowserAccountDelete) {
     xBrowserAccountDelete.disabled = !selectedAccount;
   }
+  if (xBrowserSessionImport) {
+    xBrowserSessionImport.disabled = !selectedAccount;
+  }
+  if (xBrowserSessionExport) {
+    xBrowserSessionExport.disabled = !selectedAccount?.storageStateExists;
+  }
   if (xBrowserLinkAllProfiles) {
     xBrowserLinkAllProfiles.checked = Boolean(selectedAccount && (selectedAccount.vpnProfilePaths?.length ?? 1) >= openVpnProfiles.length && openVpnProfiles.length > 1);
   }
@@ -1593,12 +1631,14 @@ function renderXBrowserAccountDetail(account, vpnProfilePath = currentVpnProfile
   if (!vpnProfilePath) {
     xBrowserAccountDetail.textContent = "Choose an OpenVPN profile before linking an X account.";
     xBrowserLoginCommand.textContent = "Choose an OpenVPN profile first.";
+    renderXBrowserLoginHelp(null);
     return;
   }
   if (!account) {
     xBrowserAccountDetail.textContent =
       "No X browser account is linked to this OpenVPN profile yet. Save a handle after creating the X account.";
     xBrowserLoginCommand.textContent = "Save an account first.";
+    renderXBrowserLoginHelp(null);
     return;
   }
 
@@ -1608,8 +1648,34 @@ function renderXBrowserAccountDetail(account, vpnProfilePath = currentVpnProfile
   const linkedCount = account.vpnProfilePaths?.length ?? 1;
   const linked = linkedCount > 1 ? ` Linked VPN profiles: ${linkedCount}.` : ` Linked VPN profile: ${account.vpnProfilePath}.`;
   const lock = account.openAlert ? ` LOCKED by alert #${account.openAlert.id}: ${account.openAlert.alertType}.` : "";
-  xBrowserAccountDetail.textContent = `${account.sessionStatus} - ${session}.${linked}${lastLogin}${ip}${lock}`;
+  const noVnc = currentSearchIsolation() === "docker_vpn" ? ` noVNC: ${xLoginNoVncUrl()}.` : "";
+  xBrowserAccountDetail.textContent = `${account.sessionStatus} - ${session}.${linked}${lastLogin}${ip}${lock}${noVnc}`;
   xBrowserLoginCommand.textContent = xLoginCommand(account.id);
+  renderXBrowserLoginHelp(account);
+}
+
+function renderXBrowserLoginHelp(account) {
+  if (!xBrowserLoginHelp) return;
+  if (!account) {
+    xBrowserLoginHelp.textContent = "";
+    return;
+  }
+  if (currentSearchIsolation() === "docker_vpn") {
+    const noVncUrl = xLoginNoVncUrl();
+    xBrowserLoginHelp.innerHTML =
+      `Docker login uses a browser-based noVNC window, not a local desktop window. ` +
+      `Run the command, open <a href="${escapeAttribute(noVncUrl)}" target="_blank" rel="noreferrer">${escapeHtml(noVncUrl)}</a>, ` +
+      `log in to X inside that page, then press Enter in the terminal to save the session. ` +
+      `With Firefox, the session is saved automatically when X Home is visible. Use the noVNC side-panel clipboard if host paste does not sync.`;
+    return;
+  }
+  xBrowserLoginHelp.textContent =
+    "Host namespace login opens a visible Chrome window on this computer. Log in to X there, then press Enter in the terminal to save the session.";
+}
+
+function xLoginNoVncUrl() {
+  const noVncPort = searchWithoutApiForm.elements.X_LOGIN_NOVNC_PORT?.value || "6080";
+  return `http://127.0.0.1:${noVncPort}/vnc.html?autoconnect=1&resize=scale`;
 }
 
 function currentSearchIsolation() {
@@ -1619,9 +1685,15 @@ function currentSearchIsolation() {
 function xLoginCommand(accountId, extraArgs = "") {
   const base =
     currentSearchIsolation() === "docker_vpn"
-      ? `docker compose run --rm x-login --account-id ${accountId}`
+      ? `docker compose run --rm --service-ports x-login --account-id ${accountId}`
       : `npm run netns:x-login -- --account-id ${accountId}`;
   return extraArgs ? `${base} ${extraArgs}` : base;
+}
+
+function xLoginAlertArgs() {
+  return currentSearchIsolation() === "docker_vpn"
+    ? "--resolve-alert"
+    : "--resolve-alert --auto-save-on-login --hold-open-after-save";
 }
 
 function currentVpnProfilePath() {
@@ -1644,6 +1716,10 @@ function accountForVpnProfile(vpnProfilePath) {
 function accountById(accountId) {
   const numericId = Number(accountId);
   return xBrowserAccounts.find((account) => account.id === numericId) ?? null;
+}
+
+function selectedXBrowserAccount() {
+  return accountById(xBrowserAccountSelect?.value) ?? accountForVpnProfile(currentVpnProfilePath());
 }
 
 async function saveXBrowserAccount() {
@@ -1680,7 +1756,7 @@ async function saveXBrowserAccount() {
 }
 
 async function deleteSelectedXBrowserAccount() {
-  const account = accountForVpnProfile(currentVpnProfilePath()) ?? accountById(xBrowserAccountSelect?.value);
+  const account = selectedXBrowserAccount();
   if (!account) return;
   const confirmed = window.confirm(`Delete the X browser account link for ${account.xIdentifier}? The session file stays on disk.`);
   if (!confirmed) return;
@@ -1689,6 +1765,46 @@ async function deleteSelectedXBrowserAccount() {
   if (!result) return;
   await refreshXBrowserAccounts();
   setStatus(`X browser account link deleted: ${account.xIdentifier}.`);
+}
+
+function exportSelectedXBrowserSession() {
+  const account = selectedXBrowserAccount();
+  if (!account) {
+    setStatus("Select or save an X browser account before exporting a session.");
+    return;
+  }
+  if (!account.storageStateExists) {
+    setStatus("No X browser session file exists for this account yet.");
+    return;
+  }
+  window.location.href = `/admin/x-browser-accounts/${encodeURIComponent(account.id)}/session`;
+}
+
+async function importSelectedXBrowserSessionFile(file) {
+  const account = selectedXBrowserAccount();
+  if (!account) {
+    setStatus("Select or save an X browser account before importing a session.");
+    return;
+  }
+  if (!file) return;
+  const confirmed = window.confirm(
+    `Import this X browser session for ${account.xIdentifier}? This overwrites the saved session file at ${account.storageStatePath}.`
+  );
+  if (!confirmed) return;
+
+  const content = await file.text();
+  const result = await jsonFetch(`/admin/x-browser-accounts/${encodeURIComponent(account.id)}/session`, {
+    method: "POST",
+    body: JSON.stringify({
+      filename: file.name,
+      content
+    })
+  });
+  if (!result) return;
+
+  await refreshXBrowserAccounts();
+  showButtonFeedback(xBrowserSessionImport, "Imported.");
+  setStatus(`X browser session imported for ${result.account.xIdentifier}.`);
 }
 
 async function shutdownOpenVpn() {
@@ -1725,6 +1841,14 @@ async function shutdownOpenVpn() {
 }
 
 async function checkOpenVpnSudoStatus() {
+  if (currentSearchIsolation() === "docker_vpn") {
+    const message = "Docker VPN mode does not use the host root helper.";
+    if (openVpnSudoDetail) {
+      openVpnSudoDetail.textContent = message;
+    }
+    setStatus(message);
+    return;
+  }
   const result = await jsonFetch("/admin/vpn/sudo-status");
   if (!result) return;
 
@@ -2130,19 +2254,19 @@ function formatXSessionAlertCommands(alert) {
   if (currentSearchIsolation() === "docker_vpn") {
     return [
       "Terminal fallback:",
-      "  ops/docker/x11-bridge.sh",
-      `  ${xLoginCommand(alert.accountId, "--resolve-alert --auto-save-on-login --hold-open-after-save")}`,
+      `  ${xLoginCommand(alert.accountId, xLoginAlertArgs())}`,
+      `  Open ${xLoginNoVncUrl()}`,
       "  docker compose exec worker npm run diagnose:vpn",
       "  docker compose up -d worker",
       "",
       "Admin button:",
-      "  Docker mode does not mount the Docker socket in admin. Launch visible X login shows this command instead of starting a process."
+      "  Docker mode does not mount the Docker socket in admin. Launch visible X login shows the noVNC command instead of starting a process."
     ].join("\n");
   }
   return [
     "Terminal fallback:",
     "  npm run setup:local",
-    `  ${xLoginCommand(alert.accountId, "--resolve-alert --auto-save-on-login --hold-open-after-save")}`,
+    `  ${xLoginCommand(alert.accountId, xLoginAlertArgs())}`,
     "  npm run netns:diagnose",
     "  npm run netns:worker",
     "",
@@ -2562,7 +2686,7 @@ async function refreshCurrentSession() {
   renderSessionStaleKeywordUserPrune(data.staleKeywordUserPrune);
   currentSessionStats = stats;
   sessionAcceptedTweets.textContent = `${stats.acceptedTweets} OK / ${stats.rejectedTweets} rejected`;
-  setSessionNextReset(stats.nextApiResetAt, data.runtimeModes);
+  setSessionNextReset(stats.browserAlertAutoRestartAt || stats.nextApiResetAt, data.runtimeModes);
   sessionLog.textContent = data.session.lines.length
     ? data.session.lines.join("\n")
     : "No runtime event.";
@@ -2642,6 +2766,9 @@ function renderSessionStaleKeywordUserPrune(status) {
 
 function setSessionNextReset(value, runtimeModes = {}) {
   sessionNextResetAt = value ? Date.parse(value) : null;
+  if (sessionNextResetLabel && runtimeModes.searchWithoutApiEnabled && currentSessionStats?.browserAlertAutoRestartAt) {
+    sessionNextResetLabel.textContent = "Alert auto restart";
+  }
   renderSessionTimers(runtimeModes);
   if (sessionNextResetTimer) {
     clearInterval(sessionNextResetTimer);
@@ -2878,6 +3005,12 @@ function parseRunStats(statsJson) {
     apiCallsRemaining: 0,
     apiWindowMinutes: 0,
     nextApiResetAt: null,
+    browserAlertAutoIgnore: false,
+    browserAlertRetryCount: 0,
+    browserAlertMaxRetries: 0,
+    browserAlertAutoRestartDelaySeconds: 0,
+    browserAlertAutoRestartAt: null,
+    browserAlertLastCompletedKeywords: null,
     acceptedTweets: 0,
     rejectedTweets: 0,
     lastScore: null,
@@ -2894,6 +3027,9 @@ function parseRunStats(statsJson) {
 function formatSearchesBeforePause(stats, runtimeModes = {}) {
   if (!runtimeModes.searchWithoutApiEnabled) {
     return `${stats.apiCallsRemaining} / ${stats.apiCallLimit}`;
+  }
+  if (stats.browserAlertAutoRestartAt) {
+    return `alert retry ${stats.browserAlertRetryCount ?? 0} / ${stats.browserAlertMaxRetries ?? 0}`;
   }
   const remainingKeywords = Math.max(0, Number(stats.remainingKeywords ?? 0));
   const completedInWindow = Math.max(0, Number(stats.apiCallsUsed ?? 0));
@@ -3186,6 +3322,7 @@ function writeGeneralSettingsForm(values) {
   }
   applyRawTimelineUi(values);
   syncStaleKeywordUserRetryControls();
+  syncSearchWithoutApiRetryControls();
   syncStaleKeywordUserSpeedPresetFromValues();
 }
 
@@ -3206,6 +3343,18 @@ function syncStaleKeywordUserRetryControls() {
   }
   document.getElementById("stale-keyword-user-max-retries-label")?.classList.toggle("is-check-disabled", !enabled);
   document.getElementById("stale-keyword-user-auto-restart-delay-label")?.classList.toggle("is-check-disabled", !enabled);
+}
+
+function syncSearchWithoutApiRetryControls() {
+  const enabled = Boolean(searchWithoutApiAutoIgnoreAlert?.checked);
+  if (searchWithoutApiMaxRetries) {
+    searchWithoutApiMaxRetries.disabled = !enabled;
+  }
+  if (searchWithoutApiAutoRestartDelaySeconds) {
+    searchWithoutApiAutoRestartDelaySeconds.disabled = !enabled;
+  }
+  document.getElementById("search-without-api-max-retries-label")?.classList.toggle("is-check-disabled", !enabled);
+  document.getElementById("search-without-api-auto-restart-delay-label")?.classList.toggle("is-check-disabled", !enabled);
 }
 
 function inferStaleKeywordUserSpeedPreset(minSeconds, maxSeconds) {
@@ -3427,6 +3576,17 @@ function applyIsolationBackendUi() {
       field.disabled = !isDockerVpn;
     }
   });
+  hostNetnsOnlySettings.forEach((container) => {
+    container.classList.toggle("is-disabled", isDockerVpn);
+    for (const field of container.querySelectorAll("input, select, textarea, button")) {
+      field.disabled = isDockerVpn;
+    }
+  });
+  if (openVpnSudoDetail) {
+    openVpnSudoDetail.textContent = isDockerVpn
+      ? "Docker VPN mode does not use the host root helper."
+      : "Check whether admin Start/Resume can prepare the VPN namespace without a sudo password prompt.";
+  }
 }
 
 async function saveRuntimeModeSettings(values, statusMessage, feedbackTarget = null) {
@@ -4194,6 +4354,27 @@ xBrowserAccountDelete?.addEventListener("click", () => {
   deleteSelectedXBrowserAccount().catch((error) => setStatus(error.message));
 });
 
+xBrowserSessionExport?.addEventListener("click", () => {
+  exportSelectedXBrowserSession();
+});
+
+xBrowserSessionImport?.addEventListener("click", () => {
+  if (!selectedXBrowserAccount()) {
+    setStatus("Select or save an X browser account before importing a session.");
+    return;
+  }
+  xBrowserSessionImportFile?.click();
+});
+
+xBrowserSessionImportFile?.addEventListener("change", () => {
+  const file = xBrowserSessionImportFile.files?.[0];
+  importSelectedXBrowserSessionFile(file)
+    .catch((error) => setStatus(error.message))
+    .finally(() => {
+      xBrowserSessionImportFile.value = "";
+    });
+});
+
 openVpnShutdownButton?.addEventListener("click", () => {
   shutdownOpenVpn().catch((error) => setStatus(error.message));
 });
@@ -4576,6 +4757,7 @@ staleKeywordUserSpeedPreset?.addEventListener("change", async () => {
 });
 
 staleKeywordUserAutoIgnoreAlert?.addEventListener("change", syncStaleKeywordUserRetryControls);
+searchWithoutApiAutoIgnoreAlert?.addEventListener("change", syncSearchWithoutApiRetryControls);
 
 staleKeywordUserPruneResult?.addEventListener("click", (event) => {
   const restore = event.target.closest("[data-stale-inline-restore]");

@@ -2,17 +2,21 @@ import "dotenv/config";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { chromium } from "playwright-core";
+import SqliteDatabase from "better-sqlite3";
+import { chromium, type BrowserContext, type Page, type Response } from "playwright-core";
 import { loadConfig } from "../config";
 import { openDatabase } from "../db/database";
 import { runVpnDiagnostics, type VpnDiagnosticsReport } from "../diagnostics/vpn";
 import { EnvService } from "../admin/envService";
 import { XBrowserAccountService, type XBrowserAccountRecord } from "../admin/xBrowserAccountService";
 import { XSessionAlertService } from "../admin/xSessionAlertService";
+import { clearStaleChromiumProfileLocks } from "./chromiumProfileLock";
+import { shouldDisableChromiumSandbox } from "./chromiumSandbox";
 import { assertVpnRuntime } from "./vpnGuard";
 
 interface LoginArgs {
@@ -30,6 +34,9 @@ interface LoginContextSummary {
   linkedVpnProfileCount: number;
   vpnPublicIpv4: string | null;
 }
+
+type XLoginSaveMode = "cdp" | "profile";
+type XLoginBrowser = "chrome" | "firefox";
 
 let lastLoginContext: LoginContextSummary | null = null;
 
@@ -62,34 +69,66 @@ async function main() {
           : "Alert-resolution mode requested. Opening visible Chrome for manual human verification."
       );
       console.log("X login network precheck is skipped in alert-resolution mode so the human can inspect the page directly.");
-    } else {
+    }
+    const saveMode = xLoginSaveMode();
+    const loginBrowser = xLoginBrowser();
+    if (loginBrowser === "firefox" && saveMode !== "profile") {
+      throw new Error("X_LOGIN_BROWSER=firefox requires X_LOGIN_SAVE_MODE=auto or profile.");
+    }
+    if (!args.resolveAlert && saveMode !== "profile") {
       await assertXLoginApiReachable();
+    } else if (!args.resolveAlert && saveMode === "profile") {
+      console.log("X login network precheck is skipped in profile-save mode so the human login can proceed in normal Chrome.");
     }
 
     const storageStatePath = path.resolve(process.cwd(), account.storageStatePath);
-    const browserProfileDir = path.resolve(process.cwd(), account.browserProfileDir);
+    const savedBrowserProfileDir = path.resolve(process.cwd(), account.browserProfileDir);
+    const browserProfileDir = await xLoginBrowserProfileDir(savedBrowserProfileDir, loginBrowser);
     await fs.mkdir(path.dirname(storageStatePath), { recursive: true });
     await fs.mkdir(browserProfileDir, { recursive: true });
+    const removedProfileLocks =
+      loginBrowser === "firefox"
+        ? await clearStaleFirefoxProfileLocks(browserProfileDir)
+        : await clearStaleChromiumProfileLocks(browserProfileDir);
 
-    const executablePath = config.playwrightChromiumExecutablePath || findChromiumExecutable();
+    const executablePath =
+      loginBrowser === "firefox" ? findFirefoxExecutable() : config.playwrightChromiumExecutablePath || findChromiumExecutable();
     const display = detectGraphicalDisplay();
-    const launchArgs = [
-      ...display.launchArgs,
-      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-      "--disable-dev-shm-usage",
-      "--disable-gpu"
-    ];
-    if (shouldDisableSandbox(config.playwrightDisableSandbox)) {
+    const minimalChromeLaunch = loginBrowser === "chrome" && isDockerVpnLoginRuntime() && saveMode === "profile";
+    const launchArgs = minimalChromeLaunch
+      ? []
+      : [
+          ...display.launchArgs,
+          "--disable-dev-shm-usage"
+        ];
+    if (shouldDisableChromiumSandbox(config.playwrightDisableSandbox)) {
       launchArgs.push("--no-sandbox");
     }
     const cdpPort = Number(process.env.X_LOGIN_CDP_PORT || "9222");
+    const cdpAddress = chromeCdpBindAddress();
+    const cdpTimeoutMs = xLoginCdpTimeoutMs();
+    const startUrl = xLoginStartUrl();
 
     console.log(`X account: ${account.xIdentifier}`);
     console.log(`VPN profile: ${config.vpnConfig}`);
     console.log(`Linked VPN profiles on this X account: ${account.vpnProfilePaths.length}`);
     console.log(`VPN public IPv4: ${publicIpv4 ?? "unknown"}`);
     console.log(`Storage state will be saved to: ${account.storageStatePath}`);
+    console.log(`Login URL: ${startUrl}`);
+    console.log(`Login browser: ${loginBrowser}`);
+    console.log(
+      browserProfileDir === savedBrowserProfileDir
+        ? `Browser profile: ${account.browserProfileDir}`
+        : "Browser profile: temporary clean profile for this login attempt"
+    );
+    console.log(`Session save mode: ${saveMode === "profile" ? "profile extraction after manual login" : "live CDP capture"}`);
     console.log(`Graphical display: ${display.label}`);
+    if (minimalChromeLaunch) {
+      console.log("Docker noVNC login is using minimal Chrome flags to keep the manual X login flow closer to a normal browser.");
+    }
+    if (removedProfileLocks.length > 0) {
+      console.log(`Removed stale Chromium profile locks: ${removedProfileLocks.join(", ")}.`);
+    }
     console.log("A normal visible Chrome window will open through the VPN namespace.");
     console.log("Log in manually, including any 2FA or challenge requested by X.");
     if (args.autoSaveOnLogin) {
@@ -97,54 +136,97 @@ async function main() {
       if (args.holdOpenAfterSave) {
         console.log("Manual alert mode is active: Chrome will stay open after the session is saved. Close Chrome yourself when the challenge is fully resolved.");
       }
+    } else if (loginBrowser === "firefox" && saveMode === "profile") {
+      console.log("Firefox noVNC save mode: after X Home is visible, close the Firefox window inside noVNC to save the session.");
     }
 
-    const chrome = launchManualChrome(browserProfileDir, executablePath, launchArgs, cdpPort, display);
-
-    try {
-      await waitForChromeCdp(cdpPort, chrome);
-
-      const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
+    if (saveMode === "profile") {
+      const browserProcess =
+        loginBrowser === "firefox"
+          ? launchManualFirefox(browserProfileDir, executablePath, startUrl, display)
+          : launchManualChrome(browserProfileDir, executablePath, launchArgs, null, startUrl, display, {
+              minimal: minimalChromeLaunch
+            });
       try {
-        const context = browser.contexts()[0];
-        if (!context) {
-          throw new Error("Unable to access the Chrome browser context through CDP.");
-        }
-        if (args.autoSaveOnLogin) {
-          await waitForXLoginCookie(context, Number(process.env.X_LOGIN_AUTO_SAVE_TIMEOUT_MS || 30 * 60 * 1000));
+        if (loginBrowser === "firefox") {
+          await waitForChromeExit(browserProcess);
+        } else if (args.autoSaveOnLogin) {
+          console.log("Auto-save was requested, but profile-save mode needs one manual Enter after the account is visibly logged in.");
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+          });
+          await rl.question("When the account is visibly logged in, press Enter here to close the browser and save the session. ");
+          rl.close();
         } else {
           const rl = readline.createInterface({
             input: process.stdin,
             output: process.stdout
           });
-          await rl.question("When the account is logged in, press Enter here to save the session. ");
+          await rl.question("When the account is visibly logged in, press Enter here to close the browser and save the session. ");
           rl.close();
         }
-        await ensureXLoginCookie(context);
-        await context.storageState({ path: storageStatePath });
       } finally {
-        if (!args.holdOpenAfterSave) {
-          await browser.close();
+        if (loginBrowser !== "firefox" || browserProcess.exitCode === null) {
+          await stopChromeAndWait(browserProcess);
         }
       }
+      if (loginBrowser === "firefox") {
+        await clearStaleFirefoxProfileLocks(browserProfileDir);
+      } else {
+        await clearStaleChromiumProfileLocks(browserProfileDir);
+        await saveStorageStateFromBrowserProfile(browserProfileDir, storageStatePath, executablePath, launchArgs);
+      }
+    } else {
+      const chrome = launchManualChrome(browserProfileDir, executablePath, launchArgs, { port: cdpPort, address: cdpAddress }, startUrl, display);
+      try {
+        await waitForChromeCdp(cdpPort, chrome, cdpTimeoutMs);
 
-      const updated = accounts.markLogin(account.id, publicIpv4);
-      const precheckReset = await resetXLoginNetworkPrecheck();
-      console.log(greenTerminal("V Session validated and saved."));
-      console.log(`Session saved for ${updated.xIdentifier}.`);
-      console.log(`Last login IPv4 recorded as: ${updated.lastLoginPublicIpv4 ?? "unknown"}`);
-      if (precheckReset) {
-        console.log("X_LOGIN_SKIP_NETWORK_PRECHECK was reset to false in .env.");
+        const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
+        try {
+          const context = browser.contexts()[0];
+          if (!context) {
+            throw new Error("Unable to access the Chrome browser context through CDP.");
+          }
+          attachXLoginDiagnostics(context);
+          await prepareVisibleLoginPage(context, startUrl);
+          if (args.autoSaveOnLogin) {
+            await waitForXLoginCookie(context, Number(process.env.X_LOGIN_AUTO_SAVE_TIMEOUT_MS || 30 * 60 * 1000));
+          } else {
+            const rl = readline.createInterface({
+              input: process.stdin,
+              output: process.stdout
+            });
+            await rl.question("When the account is logged in, press Enter here to save the session. ");
+            rl.close();
+          }
+          await ensureXLoginCookie(context);
+          await context.storageState({ path: storageStatePath });
+        } finally {
+          if (!args.holdOpenAfterSave) {
+            await browser.close();
+          }
+        }
+
+        if (args.holdOpenAfterSave) {
+          console.log("Chrome is still open for manual verification. Finish CAPTCHA/2FA/challenge if needed, then close the Chrome window.");
+          await waitForChromeExit(chrome);
+          console.log("Chrome was closed by the user. Manual X login helper is exiting.");
+        }
+      } finally {
+        if (!args.holdOpenAfterSave) {
+          stopChrome(chrome);
+        }
       }
-      if (args.holdOpenAfterSave) {
-        console.log("Chrome is still open for manual verification. Finish CAPTCHA/2FA/challenge if needed, then close the Chrome window.");
-        await waitForChromeExit(chrome);
-        console.log("Chrome was closed by the user. Manual X login helper is exiting.");
-      }
-    } finally {
-      if (!args.holdOpenAfterSave) {
-        stopChrome(chrome);
-      }
+    }
+
+    const updated = accounts.markLogin(account.id, publicIpv4);
+    const precheckReset = await resetXLoginNetworkPrecheck();
+    console.log(greenTerminal("V Session validated and saved."));
+    console.log(`Session saved for ${updated.xIdentifier}.`);
+    console.log(`Last login IPv4 recorded as: ${updated.lastLoginPublicIpv4 ?? "unknown"}`);
+    if (precheckReset) {
+      console.log("X_LOGIN_SKIP_NETWORK_PRECHECK was reset to false in .env.");
     }
   } finally {
     database.close();
@@ -301,42 +383,85 @@ async function assertXLoginApiReachable() {
   }
 }
 
-function shouldDisableSandbox(configured: boolean) {
-  const uid = process.getuid?.();
-  return configured && uid === 0;
-}
-
 function findChromiumExecutable(): string | undefined {
   return [
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome-stable",
     "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable"
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser"
   ].find((candidate) => fsSync.existsSync(candidate));
+}
+
+function findFirefoxExecutable(): string | undefined {
+  return [
+    "/usr/bin/firefox-esr",
+    "/usr/bin/firefox"
+  ].find((candidate) => fsSync.existsSync(candidate));
+}
+
+async function xLoginBrowserProfileDir(savedBrowserProfileDir: string, browser: XLoginBrowser) {
+  const persistentProfileDir = browser === "firefox" ? path.join(savedBrowserProfileDir, "firefox") : savedBrowserProfileDir;
+  if (process.env.X_LOGIN_REUSE_BROWSER_PROFILE === "true") {
+    return persistentProfileDir;
+  }
+  return fs.mkdtemp(path.join(os.tmpdir(), `redqueenx-x-login-${browser}-`));
+}
+
+async function clearStaleFirefoxProfileLocks(profileDir: string) {
+  const removed: string[] = [];
+  for (const filename of ["parent.lock", ".parentlock", "lock"]) {
+    const target = path.join(profileDir, filename);
+    try {
+      await fs.unlink(target);
+      removed.push(filename);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+  return removed;
 }
 
 function launchManualChrome(
   userDataDir: string,
   executablePath: string | undefined,
   args: string[],
-  cdpPort: number,
-  display: ReturnType<typeof detectGraphicalDisplay>
+  cdp: { port: number; address: string } | null,
+  startUrl: string,
+  display: ReturnType<typeof detectGraphicalDisplay>,
+  options: { minimal?: boolean } = {}
 ) {
   if (!executablePath) {
     throw new Error("No Chrome/Chromium executable found. Set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH in Settings.");
   }
 
-  const chromeArgs = [
-    `--user-data-dir=${userDataDir}`,
-    `--remote-debugging-port=${cdpPort}`,
-    "--remote-debugging-address=127.0.0.1",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--password-store=basic",
-    "--use-mock-keychain",
-    ...args,
-    "https://x.com/i/flow/login"
-  ];
+  const chromeArgs = options.minimal
+    ? [
+        `--user-data-dir=${userDataDir}`,
+        ...sanitizeXLoginChromeArgs(args),
+        startUrl
+      ]
+    : [
+        `--user-data-dir=${userDataDir}`,
+        ...(cdp
+          ? [
+              `--remote-debugging-port=${cdp.port}`,
+              `--remote-debugging-address=${cdp.address}`,
+              "--remote-allow-origins=*"
+            ]
+          : []),
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+        "--use-mock-keychain",
+        "--new-window",
+        "--start-maximized",
+        "--window-position=80,80",
+        "--window-size=1400,950",
+        ...sanitizeXLoginChromeArgs(args),
+        startUrl
+      ];
 
   try {
     return spawn(executablePath, chromeArgs, {
@@ -348,7 +473,87 @@ function launchManualChrome(
   }
 }
 
-async function waitForChromeCdp(port: number, chrome: ChildProcess) {
+function launchManualFirefox(
+  userDataDir: string,
+  executablePath: string | undefined,
+  startUrl: string,
+  display: ReturnType<typeof detectGraphicalDisplay>
+) {
+  if (!executablePath) {
+    throw new Error("No Firefox executable found. Rebuild the Docker image so firefox-esr is installed.");
+  }
+
+  const firefoxArgs = [
+    "-profile",
+    userDataDir,
+    "-no-remote",
+    "-new-window",
+    startUrl
+  ];
+
+  try {
+    return spawn(executablePath, firefoxArgs, {
+      stdio: ["ignore", "ignore", "pipe"],
+      env: process.env
+    });
+  } catch (error) {
+    throw new Error(friendlyBrowserLaunchError(error, display));
+  }
+}
+
+export function sanitizeXLoginChromeArgs(args: string[]) {
+  return args.filter((arg) => !arg.startsWith("--disable-blink-features="));
+}
+
+function xLoginSaveMode(): XLoginSaveMode {
+  const raw = (process.env.X_LOGIN_SAVE_MODE || "auto").trim().toLowerCase();
+  if (raw === "cdp" || raw === "profile") {
+    return raw;
+  }
+  if (raw === "auto" || raw === "") {
+    return isDockerVpnLoginRuntime() ? "profile" : "cdp";
+  }
+  throw new Error("X_LOGIN_SAVE_MODE must be auto, cdp, or profile.");
+}
+
+function xLoginBrowser(): XLoginBrowser {
+  const raw = (process.env.X_LOGIN_BROWSER || "chrome").trim().toLowerCase();
+  if (raw === "chrome" || raw === "firefox") {
+    return raw;
+  }
+  throw new Error("X_LOGIN_BROWSER must be chrome or firefox.");
+}
+
+function xLoginStartUrl() {
+  const value = process.env.X_LOGIN_START_URL?.trim() || "https://x.com/login";
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || (url.hostname !== "x.com" && url.hostname !== "twitter.com")) {
+      throw new Error();
+    }
+    return url.toString();
+  } catch {
+    throw new Error("X_LOGIN_START_URL must be an https://x.com/... or https://twitter.com/... URL.");
+  }
+}
+
+function chromeCdpBindAddress() {
+  return isDockerVpnLoginRuntime() ? "0.0.0.0" : "127.0.0.1";
+}
+
+function isDockerVpnLoginRuntime() {
+  return process.env.REDQUEENX_DOCKER_VPN === "true" || process.env.SEARCH_WITHOUT_API_ISOLATION === "docker_vpn";
+}
+
+function xLoginCdpTimeoutMs() {
+  const parsed = Number(process.env.X_LOGIN_CDP_TIMEOUT_MS || "60000");
+  if (!Number.isFinite(parsed)) {
+    return 60_000;
+  }
+  return Math.max(5_000, Math.floor(parsed));
+}
+
+async function waitForChromeCdp(port: number, chrome: ChildProcess, timeoutMs: number) {
   const endpoint = `http://127.0.0.1:${port}/json/version`;
   let stderr = "";
   chrome.stderr?.on("data", (chunk) => {
@@ -358,7 +563,9 @@ async function waitForChromeCdp(port: number, chrome: ChildProcess) {
     }
   });
 
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const safeTimeoutMs = Math.max(5_000, timeoutMs);
+  const deadline = Date.now() + safeTimeoutMs;
+  while (Date.now() < deadline) {
     if (chrome.exitCode !== null) {
       throw new Error(
         friendlyBrowserLaunchError(
@@ -376,7 +583,128 @@ async function waitForChromeCdp(port: number, chrome: ChildProcess) {
     await delay(100);
   }
 
-  throw new Error(`Chrome did not expose its local debugging endpoint at ${endpoint}.`);
+  throw new Error(
+    [
+      `Chrome did not expose its local debugging endpoint at ${endpoint} within ${Math.round(safeTimeoutMs / 1000)}s.`,
+      stderr.trim() ? `Chrome stderr:\n${stderr.trim()}` : "Chrome stderr was empty.",
+      "If the visible Chrome window opened anyway, the CDP port may be blocked or already in use inside the Docker VPN namespace.",
+      "Retry after closing any old x-login windows, or set X_LOGIN_CDP_PORT to another port before running x-login."
+    ].join("\n")
+  );
+}
+
+function attachXLoginDiagnostics(context: BrowserContext) {
+  const attachPage = (page: Page) => {
+    page.on("requestfailed", (request) => {
+      if (isXLoginDiagnosticUrl(request.url())) {
+        console.log(`X login request failed: ${safeDiagnosticUrl(request.url())} - ${request.failure()?.errorText ?? "unknown error"}`);
+      }
+    });
+    page.on("response", (response) => {
+      if (response.status() >= 400 && isXLoginDiagnosticResponse(response)) {
+        console.log(`X login response ${response.status()}: ${safeDiagnosticUrl(response.url())}`);
+        void logXLoginApiErrorDetail(response).catch(() => undefined);
+      }
+    });
+    page.on("console", (message) => {
+      if (message.type() === "error" && /login|onboarding|api|network|failed|error/i.test(message.text())) {
+        console.log(`X login console error: ${firstLine(message.text()).slice(0, 240)}`);
+      }
+    });
+  };
+
+  for (const page of context.pages()) {
+    attachPage(page);
+  }
+  context.on("page", attachPage);
+}
+
+async function prepareVisibleLoginPage(context: BrowserContext, startUrl: string) {
+  const page = context.pages().find((candidate) => !candidate.isClosed()) ?? (await context.newPage());
+  await page.bringToFront().catch(() => undefined);
+  await page.evaluate("window.focus()").catch(() => undefined);
+
+  if (!isXPageUrl(page.url())) {
+    await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch((error) => {
+      console.log(`X login page navigation warning: ${firstLine(errorMessage(error)).slice(0, 240)}`);
+    });
+  }
+
+  await page.bringToFront().catch(() => undefined);
+  await page.evaluate("window.focus()").catch(() => undefined);
+  console.log(`Visible login page ready: ${safeDiagnosticUrl(page.url())}`);
+}
+
+function isXPageUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.hostname === "x.com" || url.hostname === "twitter.com";
+  } catch {
+    return false;
+  }
+}
+
+async function logXLoginApiErrorDetail(response: Response) {
+  if (!/\/onboarding\/task\.json/.test(new URL(response.url()).pathname)) {
+    return;
+  }
+  const contentType = response.headers()["content-type"] ?? "";
+  if (!contentType.includes("json")) {
+    return;
+  }
+  const detail = summarizeXLoginApiError(await response.text());
+  if (detail) {
+    console.log(`X login API error detail: ${detail}`);
+  }
+}
+
+export function summarizeXLoginApiError(text: string) {
+  try {
+    const parsed = JSON.parse(text) as { errors?: Array<{ code?: unknown; message?: unknown }> };
+    const errors = Array.isArray(parsed.errors) ? parsed.errors : [];
+    const messages = errors
+      .map((error) => {
+        const code = typeof error.code === "number" || typeof error.code === "string" ? String(error.code) : "";
+        const message = typeof error.message === "string" ? error.message : "";
+        return [code && `code ${code}`, message && sanitizeXLoginApiErrorMessage(message)].filter(Boolean).join(": ");
+      })
+      .filter(Boolean);
+    return messages.slice(0, 3).join(" | ");
+  } catch {
+    return "";
+  }
+}
+
+function sanitizeXLoginApiErrorMessage(message: string) {
+  return message
+    .replace(/\bg;[^\s]+/g, "[redacted]")
+    .replace(/[A-Za-z0-9_-]{24,}/g, "[redacted]")
+    .slice(0, 300);
+}
+
+function isXLoginDiagnosticResponse(response: Response) {
+  return isXLoginDiagnosticUrl(response.url());
+}
+
+function isXLoginDiagnosticUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return (
+      (url.hostname === "api.x.com" || url.hostname.endsWith(".x.com") || url.hostname.endsWith(".twitter.com")) &&
+      (/\/onboarding\/task\.json|\/i\/api\//.test(url.pathname) || /login|onboarding|account/.test(url.pathname))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function safeDiagnosticUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return firstLine(value).slice(0, 240);
+  }
 }
 
 async function ensureXLoginCookie(context: { cookies: (urls?: string[]) => Promise<Array<{ name: string }>> }) {
@@ -386,6 +714,131 @@ async function ensureXLoginCookie(context: { cookies: (urls?: string[]) => Promi
       "X login cookie was not found. Keep the Chrome window open, finish the X login, then press Enter only after the account is visibly logged in."
     );
   }
+}
+
+async function saveStorageStateFromBrowserProfile(
+  browserProfileDir: string,
+  storageStatePath: string,
+  executablePath: string | undefined,
+  args: string[]
+) {
+  if (!executablePath) {
+    throw new Error("No Chrome/Chromium executable found. Set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH in Settings.");
+  }
+  const extractionArgs = sanitizeXLoginChromeArgs(
+    args.filter((arg) => arg !== "--enable-features=UseOzonePlatform" && !arg.startsWith("--ozone-platform="))
+  );
+  const context = await chromium.launchPersistentContext(browserProfileDir, {
+    executablePath,
+    headless: true,
+    args: extractionArgs,
+    timeout: 60_000
+  });
+  try {
+    await ensureXLoginCookie(context);
+    await context.storageState({ path: storageStatePath });
+  } finally {
+    await context.close().catch(() => undefined);
+  }
+}
+
+type FirefoxCookieRow = {
+  host: string;
+  path: string;
+  name: string;
+  value: string;
+  expiry: number;
+  isSecure: number;
+  isHttpOnly: number;
+  sameSite: number | null;
+};
+
+async function saveStorageStateFromFirefoxProfile(browserProfileDir: string, storageStatePath: string) {
+  const cookieDbPath = path.join(browserProfileDir, "cookies.sqlite");
+  if (!fsSync.existsSync(cookieDbPath)) {
+    throw new Error("Firefox cookie database was not found. Finish the X login before pressing Enter.");
+  }
+
+  const database = new SqliteDatabase(cookieDbPath, { readonly: true, fileMustExist: true });
+  try {
+    const rows = database
+      .prepare(
+        `
+          SELECT host, path, name, value, expiry, isSecure, isHttpOnly, sameSite
+          FROM moz_cookies
+          WHERE host LIKE '%x.com' OR host LIKE '%twitter.com'
+        `
+      )
+      .all() as FirefoxCookieRow[];
+
+    const cookies = rows.map((row) => ({
+      name: row.name,
+      value: row.value,
+      domain: row.host,
+      path: row.path || "/",
+      expires: Number.isFinite(row.expiry) && row.expiry > 0 ? row.expiry : -1,
+      httpOnly: Boolean(row.isHttpOnly),
+      secure: Boolean(row.isSecure),
+      sameSite: firefoxSameSite(row.sameSite)
+    }));
+
+    if (!cookies.some((cookie) => cookie.name === "auth_token")) {
+      throw new Error(
+        "X login cookie was not found in the Firefox profile. Keep the noVNC browser open, finish the X login, then press Enter only after the account is visibly logged in."
+      );
+    }
+
+    await fs.mkdir(path.dirname(storageStatePath), { recursive: true });
+    await fs.writeFile(storageStatePath, `${JSON.stringify({ cookies, origins: [] }, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600
+    });
+    await fs.chmod(storageStatePath, 0o600).catch(() => undefined);
+  } finally {
+    database.close();
+  }
+}
+
+async function waitForFirefoxStorageState(
+  browserProfileDir: string,
+  storageStatePath: string,
+  browserProcess: ChildProcess,
+  timeoutMs: number
+) {
+  const startedAt = Date.now();
+  const safeTimeoutMs = Math.max(60_000, Math.min(timeoutMs, 60 * 60 * 1000));
+  let lastError: unknown;
+
+  while (Date.now() - startedAt < safeTimeoutMs) {
+    try {
+      await saveStorageStateFromFirefoxProfile(browserProfileDir, storageStatePath);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (browserProcess.exitCode !== null || browserProcess.signalCode !== null) {
+      break;
+    }
+    await delay(2_000);
+  }
+
+  const detail = lastError instanceof Error ? ` Last check: ${lastError.message}` : "";
+  throw new Error(
+    [
+      "Timed out while waiting for the X login cookie in Firefox.",
+      "Keep the noVNC Firefox window open until X Home is visibly loaded.",
+      detail
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
+}
+
+function firefoxSameSite(value: number | null): "Strict" | "Lax" | "None" {
+  if (value === 2) return "Strict";
+  if (value === 1) return "Lax";
+  return "None";
 }
 
 async function waitForXLoginCookie(
@@ -416,6 +869,18 @@ function stopChrome(chrome: ChildProcess) {
     return;
   }
   chrome.kill("SIGTERM");
+}
+
+async function stopChromeAndWait(chrome: ChildProcess) {
+  if (chrome.exitCode !== null || chrome.signalCode !== null) {
+    return;
+  }
+  chrome.kill("SIGTERM");
+  await Promise.race([waitForChromeExit(chrome), delay(8_000)]);
+  if (chrome.exitCode === null && chrome.signalCode === null) {
+    chrome.kill("SIGKILL");
+    await waitForChromeExit(chrome);
+  }
 }
 
 async function waitForChromeExit(chrome: ChildProcess): Promise<void> {
@@ -484,9 +949,13 @@ function x11DisplayInfo(display: string, socketPath: string | undefined, note = 
   };
 }
 
-function x11SocketPath(display: string) {
-  const match = display.match(/:(\d+)/);
-  return match ? `/tmp/.X11-unix/X${match[1]}` : undefined;
+export function x11SocketPath(display: string) {
+  const trimmed = display.trim();
+  const localMatch =
+    trimmed.match(/^:(\d+)(?:\.\d+)?$/) ??
+    trimmed.match(/^unix:(\d+)(?:\.\d+)?$/i) ??
+    trimmed.match(/^unix\/:(\d+)(?:\.\d+)?$/i);
+  return localMatch ? `/tmp/.X11-unix/X${localMatch[1]}` : undefined;
 }
 
 function noDisplayError(reason: string) {
@@ -532,7 +1001,7 @@ function printUsage() {
   console.log("  npm run netns:x-login -- --vpn-profile ./ops/vpn/client.ovpn");
   console.log("  npm run netns:x-login -- --account-id <id> --resolve-alert");
   console.log("  npm run netns:x-login -- --account-id <id> --resolve-alert --auto-save-on-login --hold-open-after-save");
-  console.log("  docker compose run --rm x-login --account-id <id>");
+  console.log("  docker compose run --rm --service-ports x-login --account-id <id>");
 }
 
 if (require.main === module) {

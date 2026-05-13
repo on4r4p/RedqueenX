@@ -813,6 +813,17 @@ h2 {
   opacity: 0.48;
 }
 
+.host-netns-only.is-disabled {
+  opacity: 0.48;
+}
+
+.host-netns-only.is-disabled input,
+.host-netns-only.is-disabled select,
+.host-netns-only.is-disabled textarea,
+.host-netns-only.is-disabled button {
+  cursor: not-allowed;
+}
+
 .switch-field {
   display: inline-grid;
   grid-template-columns: max-content 52px;
@@ -1122,6 +1133,17 @@ h2 {
   overflow-wrap: anywhere;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.x-browser-login-help {
+  margin: -4px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.x-browser-login-help a {
+  color: #67e8f9;
 }
 
 .sudo-bridge-panel {

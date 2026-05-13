@@ -702,10 +702,26 @@
                       <option value="true">true</option>
                     </select>
                   </label>
+                  <label class="inline-check">
+                    <input id="search-without-api-auto-ignore-alert" name="SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT"
+                      type="checkbox" />
+                    <span>Ignore alerts</span>
+                  </label>
+                  <label id="search-without-api-max-retries-label">
+                    <span>Max retry</span>
+                    <input id="search-without-api-max-retries" name="SEARCH_WITHOUT_API_MAX_RETRIES" type="number"
+                      min="0" max="20" step="1" placeholder="3" />
+                  </label>
+                  <label id="search-without-api-auto-restart-delay-label">
+                    <span>Pause before auto restart</span>
+                    <input id="search-without-api-auto-restart-delay-seconds"
+                      name="SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS" type="number" min="0" max="3600" step="1"
+                      placeholder="10" />
+                  </label>
                   <label>
-                    <span>Max keywords before pause</span>
-                    <input name="SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX" type="number" min="1" step="1"
-                      placeholder="180" />
+                    <span>Keywords before pause</span>
+                    <input name="SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN" type="number" min="1" step="1"
+                      placeholder="10" />
                   </label>
                   <label>
                     <span>Pause min minutes</span>
@@ -771,24 +787,43 @@
                     </select>
                   </label>
                   <label class="docker-vpn-only is-hidden">
-                    <span>Docker X11 forwarding</span>
-                    <select name="DOCKER_X11_FORWARD_ENABLED">
+                    <span>Docker noVNC port</span>
+                    <input name="X_LOGIN_NOVNC_PORT" type="number" min="1" max="65535" step="1" placeholder="6080" />
+                  </label>
+                  <label class="docker-vpn-only is-hidden">
+                    <span>Docker login screen</span>
+                    <input name="X_LOGIN_SCREEN" type="text" placeholder="1920x1080x24" autocomplete="off" />
+                  </label>
+                  <label class="docker-vpn-only is-hidden">
+                    <span>Docker login max seconds</span>
+                    <input name="X_LOGIN_SERVICE_MAX_SECONDS" type="number" min="60" max="86400" step="1"
+                      placeholder="1200" />
+                  </label>
+                  <label class="docker-vpn-only is-hidden">
+                    <span>Docker login save mode</span>
+                    <select name="X_LOGIN_SAVE_MODE">
+                      <option value="auto">auto</option>
+                      <option value="profile">profile</option>
+                      <option value="cdp">cdp</option>
+                    </select>
+                  </label>
+                  <label class="docker-vpn-only is-hidden">
+                    <span>Docker login browser</span>
+                    <select name="X_LOGIN_BROWSER">
+                      <option value="chrome">chrome</option>
+                      <option value="firefox">firefox</option>
+                    </select>
+                  </label>
+                  <label class="docker-vpn-only is-hidden">
+                    <span>Reuse Docker browser profile</span>
+                    <select name="X_LOGIN_REUSE_BROWSER_PROFILE">
                       <option value="false">false</option>
                       <option value="true">true</option>
                     </select>
                   </label>
                   <label class="docker-vpn-only is-hidden">
-                    <span>Docker X11 host</span>
-                    <input name="DOCKER_X11_HOST" type="text" placeholder="172.17.0.1" autocomplete="off" />
-                  </label>
-                  <label class="docker-vpn-only is-hidden">
-                    <span>Docker X11 port</span>
-                    <input name="DOCKER_X11_PORT" type="number" min="1" max="65535" step="1" placeholder="6010" />
-                  </label>
-                  <label class="docker-vpn-only is-hidden">
-                    <span>Docker Xauthority path</span>
-                    <input name="DOCKER_XAUTHORITY" type="text" placeholder="/tmp/redqueenx-docker.xauth"
-                      autocomplete="off" data-path-picker="file" data-path-picker-start="/tmp" />
+                    <span>X login URL</span>
+                    <input name="X_LOGIN_START_URL" type="url" placeholder="https://x.com/login" autocomplete="off" />
                   </label>
                 </div>
                 <div class="settings-subsection-actions">
@@ -939,7 +974,7 @@
               <fieldset class="settings-subsection">
                 <legend>Linux namespace / OpenVPN</legend>
                 <div class="settings-grid">
-                  <label>
+                  <label class="host-netns-only">
                     <span>Namespace name</span>
                     <input name="VPN_NETNS_NAME" type="text" placeholder="redqueenx-vpn" autocomplete="off" />
                   </label>
@@ -988,7 +1023,7 @@
                   </label>
                 </div>
                 <p id="openvpn-profile-detail" class="openvpn-profile-detail muted"></p>
-                <div class="sudo-bridge-panel">
+                <div class="sudo-bridge-panel host-netns-only">
                   <div>
                     <strong>Root helper</strong>
                     <p id="openvpn-sudo-detail" class="muted">Check whether admin Start/Resume can prepare the VPN
@@ -1034,13 +1069,18 @@
                 </div>
                 <p id="x-browser-session-validation" class="x-session-validation">No browser session saved yet.</p>
                 <p id="x-browser-account-detail" class="openvpn-profile-detail muted"></p>
-                <p class="muted">Local login command: <code id="x-browser-login-command">Save an account first.</code>
-                </p>
+                <p class="muted">Login command: <code id="x-browser-login-command">Save an account first.</code></p>
+                <p id="x-browser-login-help" class="x-browser-login-help muted"></p>
                 <div class="button-row compact-row">
+                  <button id="x-browser-session-import" type="button" class="secondary-button" disabled>Import
+                    session</button>
+                  <button id="x-browser-session-export" type="button" class="secondary-button" disabled>Export
+                    session</button>
                   <button id="x-browser-account-save" type="button" class="secondary-button">Save X account
                     link</button>
                   <button id="x-browser-account-delete" type="button" class="secondary-button" disabled>Delete
                     link</button>
+                  <input id="x-browser-session-import-file" type="file" accept="application/json,.json" hidden />
                 </div>
               </fieldset>
 
@@ -1192,6 +1232,13 @@
                 <label>
                   <span>ADMIN_PORT</span>
                   <input name="ADMIN_PORT" type="number" min="1" max="65535" step="1" />
+                </label>
+                <label>
+                  <span>ADMIN_TRUST_PROXY</span>
+                  <select name="ADMIN_TRUST_PROXY">
+                    <option value="false">false</option>
+                    <option value="true">true</option>
+                  </select>
                 </label>
                 <label>
                   <span>DATABASE_URL</span>

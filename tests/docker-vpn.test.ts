@@ -10,10 +10,91 @@ import { XSessionAlertService } from "../src/admin/xSessionAlertService";
 import { loadConfig } from "../src/config";
 import { openMemoryDatabase } from "../src/db/database";
 import type { ScoreDecision, TweetCandidate } from "../src/types";
+import { clearStaleChromiumProfileLocks } from "../src/worker/chromiumProfileLock";
+import { shouldDisableChromiumSandbox } from "../src/worker/chromiumSandbox";
+import { sanitizeXLoginChromeArgs, summarizeXLoginApiError, x11SocketPath } from "../src/worker/xLogin";
 
 describe("docker_vpn isolation", () => {
   it("keeps host_netns as the default isolation backend", () => {
     expect(loadConfig({}).searchWithoutApiIsolation).toBe("host_netns");
+  });
+
+  it("refuses to switch to docker_vpn while the legacy rqvpn-host interface exists", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-docker-vpn-switch-"));
+    const currentSessionFile = path.join(tmp, "current-session.log");
+    const envPath = path.join(tmp, ".env");
+    const fakeBinDir = path.join(tmp, "bin");
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.writeFileSync(envPath, "", "utf8");
+    fs.writeFileSync(
+      path.join(fakeBinDir, "ip"),
+      `#!/bin/sh
+if [ "$1" = "link" ] && [ "$2" = "show" ] && [ "$3" = "rqvpn-host" ]; then
+  echo "5: rqvpn-host@if4: <BROADCAST,MULTICAST,UP,LOWER_UP>"
+  exit 0
+fi
+echo "unexpected ip call: $*" >&2
+exit 1
+`,
+      "utf8"
+    );
+    fs.chmodSync(path.join(fakeBinDir, "ip"), 0o755);
+
+    const config = loadConfig({
+      ADMIN_PASSWORD: "secret",
+      SESSION_SECRET: "test-session-secret",
+      CURRENT_SESSION_FILE: currentSessionFile,
+      DATABASE_URL: path.join(tmp, "redqueenx.sqlite"),
+      X_API_ENABLED: "false",
+      SEARCH_WITHOUT_API_ENABLED: "true",
+      SEARCH_WITHOUT_API_ISOLATION: "host_netns"
+    });
+    const database = openMemoryDatabase();
+    const app = createAdminApi({
+      database,
+      config,
+      envPath,
+      currentSessionFilePath: currentSessionFile,
+      restartDelayMs: 0
+    });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}${path.delimiter}${originalPath ?? ""}`;
+
+    try {
+      const login = await app.inject({ method: "POST", url: "/admin/login", payload: { password: "secret" } });
+      expect(login.statusCode).toBe(200);
+      const cookie = login.headers["set-cookie"];
+      const authHeaders = { cookie: Array.isArray(cookie) ? cookie[0] : String(cookie) };
+
+      const response = await app.inject({
+        method: "PATCH",
+        url: "/admin/settings/x-api",
+        headers: authHeaders,
+        payload: { values: { SEARCH_WITHOUT_API_ISOLATION: "docker_vpn" } }
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: expect.stringContaining("rqvpn-host"),
+        legacyNetns: {
+          interfaceName: "rqvpn-host",
+          checked: true,
+          present: true
+        }
+      });
+
+      const current = await app.inject({
+        method: "GET",
+        url: "/admin/settings/x-api",
+        headers: authHeaders
+      });
+      expect(current.statusCode).toBe(200);
+      expect(current.json().config.searchWithoutApiIsolation).toBe("host_netns");
+      expect(fs.readFileSync(envPath, "utf8")).not.toContain("SEARCH_WITHOUT_API_ISOLATION=docker_vpn");
+    } finally {
+      process.env.PATH = originalPath;
+      await app.close();
+    }
   });
 
   it("parses admin IPv4 whitelist and blacklist from env lists", () => {
@@ -24,6 +105,62 @@ describe("docker_vpn isolation", () => {
 
     expect(config.adminIpv4Whitelist).toEqual(["192.168.0.1/24", "127.0.0.1", "37.67.185.138/32"]);
     expect(config.adminIpv4Blacklist).toEqual(["203.0.113.10", "198.51.100.0/24"]);
+  });
+
+  it("does not require a local X11 socket for Docker or SSH TCP displays", () => {
+    expect(x11SocketPath("172.17.0.1:0.0")).toBeUndefined();
+    expect(x11SocketPath("localhost:10.0")).toBeUndefined();
+    expect(x11SocketPath(":0")).toBe("/tmp/.X11-unix/X0");
+    expect(x11SocketPath("unix:1.0")).toBe("/tmp/.X11-unix/X1");
+  });
+
+  it("removes unsupported anti-automation flags from visible Docker x-login", () => {
+    expect(sanitizeXLoginChromeArgs(["--ozone-platform=x11", "--disable-blink-features=AutomationControlled"])).toEqual([
+      "--ozone-platform=x11"
+    ]);
+  });
+
+  it("prints only sanitized X login API error details", () => {
+    const detail = summarizeXLoginApiError(
+      JSON.stringify({
+        errors: [{ code: 366, message: "Bad flow token g;177866619941009045:-1778666201427:LzIDRsrl22PJPOX1miicgQRi:1" }]
+      })
+    );
+
+    expect(detail).toBe("code 366: Bad flow token [redacted]");
+  });
+
+  it("keeps Chromium sandbox enabled for non-root Docker VPN containers", () => {
+    expect(shouldDisableChromiumSandbox(true, { REDQUEENX_DOCKER_VPN: "true" }, 1000)).toBe(false);
+    expect(shouldDisableChromiumSandbox(true, { SEARCH_WITHOUT_API_ISOLATION: "docker_vpn" }, 1000)).toBe(false);
+    expect(shouldDisableChromiumSandbox(true, { REDQUEENX_CHROMIUM_SANDBOX_UNAVAILABLE: "true" }, 1000)).toBe(true);
+    expect(shouldDisableChromiumSandbox(true, {}, 0)).toBe(true);
+    expect(shouldDisableChromiumSandbox(true, {}, 1000)).toBe(false);
+    expect(shouldDisableChromiumSandbox(false, { REDQUEENX_CHROMIUM_SANDBOX_UNAVAILABLE: "true" }, 1000)).toBe(false);
+  });
+
+  it("clears stale Chromium singleton locks left by failed Docker x-login attempts", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-chromium-profile-"));
+    fs.symlinkSync("old-container-49", path.join(tmp, "SingletonLock"));
+    fs.symlinkSync("/tmp/redqueenx-missing-chrome/SingletonSocket", path.join(tmp, "SingletonSocket"));
+    fs.symlinkSync("11691698302493908969", path.join(tmp, "SingletonCookie"));
+
+    const removed = await clearStaleChromiumProfileLocks(tmp);
+
+    expect(removed).toEqual(["SingletonLock", "SingletonSocket", "SingletonCookie"]);
+    expect(fs.existsSync(path.join(tmp, "SingletonLock"))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, "SingletonSocket"))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, "SingletonCookie"))).toBe(false);
+  });
+
+  it("keeps Chromium singleton locks when they point at the current process", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-chromium-active-profile-"));
+    fs.symlinkSync(`${os.hostname()}-${process.pid}`, path.join(tmp, "SingletonLock"));
+
+    const removed = await clearStaleChromiumProfileLocks(tmp);
+
+    expect(removed).toEqual([]);
+    expect(fs.lstatSync(path.join(tmp, "SingletonLock")).isSymbolicLink()).toBe(true);
   });
 
   it("queues admin media cache reloads instead of launching host netns scripts", async () => {
@@ -538,10 +675,23 @@ describe("docker_vpn isolation", () => {
 
   it("keeps Docker Compose from injecting the full .env into service environments", () => {
     const compose = fs.readFileSync(path.join(process.cwd(), "compose.yaml"), "utf8");
+    const dockerfile = fs.readFileSync(path.join(process.cwd(), "Dockerfile"), "utf8");
     expect(compose).not.toContain("env_file:");
+    expect(compose).toContain("profiles:");
+    expect(compose).toContain("- caddy");
+    expect(compose).toContain('"127.0.0.1:${ADMIN_PORT:-3005}:${ADMIN_PORT:-3005}"');
     expect(compose).toContain("./.env:/app/.env:rw");
     expect(compose).toContain("./.env:/app/.env:ro");
-    expect(compose).toContain("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium");
+    expect(compose).toContain("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/google-chrome-stable");
+    expect(compose).toContain('PLAYWRIGHT_DISABLE_SANDBOX: "false"');
+    expect(dockerfile).toContain("firefox-esr");
+    expect(compose).toContain("seccomp=unconfined");
+    expect(compose).toContain("X_LOGIN_NOVNC_PORT: ${X_LOGIN_NOVNC_PORT:-6080}");
+    expect(compose).toContain("X_LOGIN_SERVICE_MAX_SECONDS: ${X_LOGIN_SERVICE_MAX_SECONDS:-1200}");
+    expect(compose).toContain("X_LOGIN_BROWSER: ${X_LOGIN_BROWSER:-chrome}");
+    expect(compose).toContain("X_LOGIN_REUSE_BROWSER_PROFILE: ${X_LOGIN_REUSE_BROWSER_PROFILE:-false}");
+    expect(compose).toContain('"127.0.0.1:${X_LOGIN_NOVNC_PORT:-6080}:${X_LOGIN_NOVNC_PORT:-6080}"');
+    expect(compose).not.toContain("/tmp/.X11-unix:/tmp/.X11-unix:rw");
     expect(compose).toContain("init-runtime:");
   });
 
@@ -550,6 +700,24 @@ describe("docker_vpn isolation", () => {
     expect(entrypoint).not.toContain("iptables -A INPUT -i tun+ -j ACCEPT");
     expect(entrypoint).toContain("iptables -A OUTPUT -o tun+ -j ACCEPT");
     expect(entrypoint).toContain("iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT");
+    expect(entrypoint).toContain('iptables -A INPUT -i eth0 -p tcp --dport "$novnc_port" -j ACCEPT');
+  });
+
+  it("uses Xvfb and noVNC for Docker x-login instead of host X11 forwarding", () => {
+    const entrypoint = fs.readFileSync(path.join(process.cwd(), "ops/docker/x-login-entrypoint.sh"), "utf8");
+    expect(entrypoint).toContain("Xvfb");
+    expect(entrypoint).toContain("x11vnc");
+    expect(entrypoint).toContain("websockify --web=/usr/share/novnc");
+    expect(entrypoint).toContain("http://127.0.0.1:${novnc_port}/vnc.html");
+    expect(entrypoint).toContain('timeout --foreground --kill-after=15s "${service_max_seconds}s" npm run x:login -- "$@" &');
+    expect(entrypoint).toContain("handle_signal()");
+    expect(entrypoint).not.toContain("DOCKER_X11");
+  });
+
+  it("keeps project-local OpenVPN auth paths valid inside Docker", () => {
+    const entrypoint = fs.readFileSync(path.join(process.cwd(), "ops/docker/openvpn-entrypoint.sh"), "utf8");
+    expect(entrypoint).toContain('if (value ~ /^\\.\\/ops\\/vpn\\//) return "/app/" substr(value, 3);');
+    expect(entrypoint).toContain('if (value ~ /^ops\\/vpn\\//) return "/app/" value;');
   });
 });
 

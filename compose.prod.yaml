@@ -1,6 +1,6 @@
 services:
   init-runtime:
-    build: .
+    image: on4r4p/redqueenx-init-runtime:latest
     user: "0:0"
     command:
       - sh
@@ -35,7 +35,7 @@ services:
       - caddy_config:/config
 
   admin:
-    build: .
+    image: on4r4p/redqueenx-admin:latest
     restart: unless-stopped
     user: "${REDQUEENX_UID:-1000}:${REDQUEENX_GID:-1000}"
     command: ["npm", "run", "start"]
@@ -63,7 +63,7 @@ services:
       - ./ops/vpn:/app/ops/vpn:rw
 
   vpn:
-    build: .
+    image: on4r4p/redqueenx-vpn:latest
     restart: unless-stopped
     command: ["/app/ops/docker/openvpn-entrypoint.sh"]
     cap_add:
@@ -84,7 +84,7 @@ services:
       - ./ops/vpn:/app/ops/vpn:ro
 
   worker:
-    build: .
+    image: on4r4p/redqueenx-worker:latest
     restart: unless-stopped
     user: "${REDQUEENX_UID:-1000}:${REDQUEENX_GID:-1000}"
     security_opt:
@@ -113,7 +113,7 @@ services:
       - ./ops/vpn:/app/ops/vpn:ro
 
   x-login:
-    build: .
+    image: on4r4p/redqueenx-x-login:latest
     profiles:
       - manual
     user: "${REDQUEENX_UID:-1000}:${REDQUEENX_GID:-1000}"

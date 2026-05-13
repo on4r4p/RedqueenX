@@ -226,35 +226,75 @@ Then start the main services:
 ```bash
 export REDQUEENX_UID=$(id -u)
 export REDQUEENX_GID=$(id -g)
-docker compose up -d caddy admin vpn worker
+docker compose up -d admin vpn worker
 ```
 
 Docker services are split deliberately:
 
-- `admin`: non-privileged RedqueenX admin server behind Caddy; no Docker socket is mounted.
-- `caddy`: HTTPS reverse proxy to `admin:3005`.
+- `admin`: non-privileged RedqueenX admin server exposed on `127.0.0.1:${ADMIN_PORT:-3005}` for a host reverse proxy; no Docker socket is mounted.
+- `caddy`: optional HTTPS reverse proxy to `admin:${ADMIN_PORT:-3005}`. It only starts with the `caddy` profile.
 - `vpn`: the only service with `NET_ADMIN` and `/dev/net/tun`; it runs OpenVPN and applies an internal kill switch.
 - `worker`: shares `vpn` networking with `network_mode: service:vpn`; it picks up without-API runs and media-cache jobs from SQLite.
-- `x-login`: temporary service for visible X login only; it uses SSH X forwarding, never VNC/noVNC.
+- `x-login`: temporary service for visible X login only; it runs Chrome on Xvfb and exposes it through noVNC on localhost.
 - `init-runtime`: one-shot helper that creates persistent runtime directories and fixes ownership for the configured UID/GID.
+
+On a VPS that already has Caddy installed on the host, point the host Caddy to the Docker admin port:
+
+```caddyfile
+your-domain.example {
+  reverse_proxy 127.0.0.1:3005
+}
+```
+
+
+For a self-contained local Docker stack with the bundled Caddy container, use:
+
+```bash
+docker compose --profile caddy up -d admin vpn worker caddy
+```
 
 In Docker mode, admin does not call `npm run netns:*`. `Load medias` records a media-cache job in SQLite, then the Docker worker downloads it through the VPN container. The full `.env` file is not injected into every service environment: `admin` mounts it read/write for settings, `worker` and `x-login` mount it read-only, and `vpn` receives only explicit VPN variables.
 
-For visible X login, connect to the server with SSH X forwarding, run the bridge, export the variables it prints, then launch the temporary service:
+For visible X login, launch the temporary noVNC service:
 
 ```bash
-ops/docker/x11-bridge.sh
-docker compose run --rm x-login --account-id <id>
+docker compose run --rm --service-ports x-login --account-id <id>
 ```
+
+Then open:
+
+```text
+http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale
+```
+
+If RedqueenX is on a VPS, keep noVNC bound to `127.0.0.1` and use an SSH tunnel:
+
+```bash
+ssh -L 6080:127.0.0.1:6080 user@your-vps
+```
+
+The noVNC port is controlled by `X_LOGIN_NOVNC_PORT`.
+Docker login can use Chrome or Firefox with `X_LOGIN_BROWSER`; Firefox is the recommended fallback when X rejects Chrome with onboarding code 399. In Firefox noVNC mode, close the Firefox window after X Home is visible; RedqueenX then extracts the cookies and saves the session, so no terminal Enter is required.
+Keep `X_LOGIN_REUSE_BROWSER_PROFILE=false` when testing X login, because a partial failed login flow can poison the next attempt.
+
+For clipboard input, use the noVNC side panel clipboard control. Direct host clipboard sync depends on the browser and is not always automatic. The container enables NumLock for the numeric keypad and can set an X keyboard layout with `X_LOGIN_KEYBOARD_LAYOUT=fr` or another layout code.
+
+If Docker noVNC keeps returning to the login screen with X onboarding `code 399`, use the session import workaround:
+
+1. Run the host/non-Docker X login flow that works on the local desktop.
+2. Open Admin > Settings > X browser account and export that saved session.
+3. Switch back to Docker mode, select the same X browser account, and import the exported session JSON.
+4. Confirm the account shows `session file present`, then run a small Search without Api test before a long run.
+
+This avoids repeating the rejected noVNC login flow while still letting Docker workers reuse a valid Playwright `storageState`.
 
 For alert recovery:
 
 ```bash
-docker compose run --rm x-login --account-id <id> --resolve-alert --auto-save-on-login --hold-open-after-save
+docker compose run --rm --service-ports x-login --account-id <id> --resolve-alert
 ```
 
-There is no VNC, no noVNC, and no browser display exposed through the web UI.
-The X11 bridge is temporary and bound to the Docker host interface for the `x-login` session only; stop the bridge process after the login window is closed.
+Only noVNC is exposed, and Compose binds it to localhost by default. The `x-login` service exits after the browser session is saved, and `X_LOGIN_SERVICE_MAX_SECONDS` limits how long one noVNC login container may stay alive if it is forgotten.
 
 Useful Docker validation commands:
 
@@ -266,3 +306,32 @@ docker compose exec worker npm run diagnose:vpn
 ```
 
 The route check must show `dev tun...`. If OpenVPN is stopped or `tun+` disappears, the worker and media fetcher fail closed instead of using the host route.
+
+### VPS GitHub Webhook Deploy
+
+The repo includes a signed GitHub webhook config in `ops/webhook/hooks.json`.
+Do not commit the real secret. On the VPS, replace
+`CHANGE_ME_GITHUB_WEBHOOK_SECRET` with a long random value, then use that same
+value in GitHub.
+
+Recommended VPS layout:
+
+```bash
+sudo mkdir -p /opt
+sudo git clone https://github.com/<owner>/<repo>.git /opt/redqueenx
+cd /opt/redqueenx
+cp .env.example .env
+openssl rand -hex 32
+# Put that generated value in ops/webhook/hooks.json, replacing CHANGE_ME_GITHUB_WEBHOOK_SECRET.
+sudo cp ops/webhook/redqueenx-webhook.service.example /etc/systemd/system/redqueenx-webhook.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now redqueenx-webhook
+```
+
+Edit host Caddy with the route from `ops/webhook/Caddyfile.redqueenx.example`,
+then reload Caddy:
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```

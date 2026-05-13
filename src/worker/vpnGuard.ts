@@ -37,7 +37,7 @@ async function assertDockerVpnRuntime(purpose: string): Promise<void> {
       [
         `${purpose} must run inside the Docker VPN network before any browser action starts.`,
         `Expected REDQUEENX_DOCKER_VPN=true, got ${process.env.REDQUEENX_DOCKER_VPN || "unset"}.`,
-        "Launch it through docker compose up -d worker or docker compose run --rm x-login, not through direct worker scripts."
+        "Launch it through docker compose up -d worker or docker compose run --rm --service-ports x-login, not through direct worker scripts."
       ].join(" ")
     );
   }

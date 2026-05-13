@@ -54,6 +54,7 @@ import type { KeywordUserPruneMode, StaleKeywordUserPruneReport } from "../worke
 
 const execFileAsync = promisify(execFile);
 const netnsHelperPath = "/usr/local/sbin/redqueenx-netns";
+const legacyNetnsHostVethName = "rqvpn-host";
 
 function hasUsableNetnsHelper(): boolean {
   try {
@@ -165,6 +166,10 @@ const xBrowserAccountSchema = z.object({
 const xBrowserAccountParamSchema = z.object({
   accountId: z.coerce.number().int().positive()
 });
+const xBrowserSessionImportSchema = z.object({
+  filename: z.string().max(255).optional(),
+  content: z.string().min(1).max(maxImportContentLength)
+});
 const xSessionAlertParamSchema = z.object({
   alertId: z.coerce.number().int().positive()
 });
@@ -216,8 +221,10 @@ const xApiUpdateSchema = z.object({
       "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT",
       "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM",
       "SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER",
+      "SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT",
+      "SEARCH_WITHOUT_API_MAX_RETRIES",
+      "SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS",
       "SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN",
-      "SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX",
       "SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES",
       "SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES",
       "SEARCH_WITHOUT_API_SCROLLS_MIN",
@@ -243,10 +250,13 @@ const xApiUpdateSchema = z.object({
       "STALE_KEYWORD_USER_MAX_RETRIES",
       "STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS",
       "RAW_TIMELINE_ENABLED",
-      "DOCKER_X11_FORWARD_ENABLED",
-      "DOCKER_X11_HOST",
-      "DOCKER_X11_PORT",
-      "DOCKER_XAUTHORITY",
+      "X_LOGIN_NOVNC_PORT",
+      "X_LOGIN_SCREEN",
+      "X_LOGIN_SERVICE_MAX_SECONDS",
+      "X_LOGIN_BROWSER",
+      "X_LOGIN_SAVE_MODE",
+      "X_LOGIN_START_URL",
+      "X_LOGIN_REUSE_BROWSER_PROFILE",
       "X_LOGIN_SKIP_NETWORK_PRECHECK",
       "VPN_NETNS_NAME",
       "VPN_HOST_IFACE",
@@ -294,6 +304,7 @@ export interface AdminApiOptions {
     AppConfig,
     | "adminPassword"
     | "adminPasswordHash"
+    | "adminTrustProxy"
     | "sessionSecret"
     | "adminIpv4Whitelist"
     | "adminIpv4Blacklist"
@@ -317,8 +328,10 @@ export interface AdminApiOptions {
     | "searchWithoutApiSessionKeywordLimit"
     | "searchWithoutApiSessionKeywordLimitRandom"
     | "searchWithoutApiRandomizeKeywordOrder"
+    | "searchWithoutApiAutoIgnoreAlert"
+    | "searchWithoutApiMaxRetries"
+    | "searchWithoutApiAutoRestartDelaySeconds"
     | "searchWithoutApiRequestsBeforePauseMin"
-    | "searchWithoutApiRequestsBeforePauseMax"
     | "searchWithoutApiPauseMinMinutes"
     | "searchWithoutApiPauseMaxMinutes"
     | "searchWithoutApiScrollsMin"
@@ -344,10 +357,13 @@ export interface AdminApiOptions {
     | "staleKeywordUserMaxRetries"
     | "staleKeywordUserAutoRestartDelaySeconds"
     | "rawTimelineEnabled"
-    | "dockerX11ForwardEnabled"
-    | "dockerX11Host"
-    | "dockerX11Port"
-    | "dockerXauthority"
+    | "xLoginNovncPort"
+    | "xLoginScreen"
+    | "xLoginServiceMaxSeconds"
+    | "xLoginBrowser"
+    | "xLoginSaveMode"
+    | "xLoginStartUrl"
+    | "xLoginReuseBrowserProfile"
     | "xLoginSkipNetworkPrecheck"
     | "vpnNetnsName"
     | "vpnHostIface"
@@ -439,8 +455,79 @@ interface StaleKeywordUserPruneJob {
   error: string | null;
 }
 
+interface ImportedXBrowserStorageState {
+  cookies: Array<Record<string, unknown>>;
+  origins: unknown[];
+  [key: string]: unknown;
+}
+
+function parseImportedXBrowserStorageState(content: string): ImportedXBrowserStorageState {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new Error("Imported session must be valid JSON.");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Imported session must be a Playwright storageState object.");
+  }
+
+  const state = parsed as Record<string, unknown>;
+  if (!Array.isArray(state.cookies)) {
+    throw new Error("Imported session must contain a cookies array.");
+  }
+  if (state.origins !== undefined && !Array.isArray(state.origins)) {
+    throw new Error("Imported session origins must be an array.");
+  }
+
+  const cookies = state.cookies.map((cookieValue, index) => {
+    if (!cookieValue || typeof cookieValue !== "object" || Array.isArray(cookieValue)) {
+      throw new Error(`Imported session cookie #${index + 1} is invalid.`);
+    }
+    const cookieRecord = cookieValue as Record<string, unknown>;
+    for (const key of ["name", "value", "domain", "path"]) {
+      if (typeof cookieRecord[key] !== "string") {
+        throw new Error(`Imported session cookie #${index + 1} is missing ${key}.`);
+      }
+    }
+    return cookieRecord;
+  });
+
+  const hasXAuthToken = cookies.some((cookieRecord) => {
+    const name = String(cookieRecord.name);
+    const domain = String(cookieRecord.domain).replace(/^\./, "").toLowerCase();
+    return name === "auth_token" && (domain === "x.com" || domain.endsWith(".x.com") || domain === "twitter.com" || domain.endsWith(".twitter.com"));
+  });
+  if (!hasXAuthToken) {
+    throw new Error("Imported session must contain an X auth_token cookie.");
+  }
+
+  return {
+    ...state,
+    cookies,
+    origins: Array.isArray(state.origins) ? state.origins : []
+  };
+}
+
+function xBrowserSessionFilename(account: XBrowserAccountRecord): string {
+  const safeIdentifier =
+    account.xIdentifier
+      .trim()
+      .replace(/^@/, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "x-browser-account";
+  return `${safeIdentifier}-x-session.json`;
+}
+
 export function createAdminApi(options: AdminApiOptions): FastifyInstance {
-  const app = Fastify({ logger: options.logger ?? false, bodyLimit: 50 * 1024 * 1024 });
+  const app = Fastify({
+    logger: options.logger ?? false,
+    bodyLimit: 50 * 1024 * 1024,
+    trustProxy: options.config.adminTrustProxy
+  });
   const lists = new ListService(options.database);
   const runs = new RunService(options.database);
   const importer = new LegacyImporter(options.database);
@@ -461,6 +548,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   let activeCrawlerRunId: string | null = null;
   let activeWithoutApiWorker: ChildProcess | null = null;
   let activeWithoutApiWorkerRunId: string | null = null;
+  let withoutApiAlertRestartTimer: NodeJS.Timeout | null = null;
   let mediaCacheFetchQueue: Promise<void> = Promise.resolve();
   let staleKeywordUserPruneJob: StaleKeywordUserPruneJob | null = null;
   let staleKeywordUserPruneStartInProgress = false;
@@ -1178,7 +1266,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
           account,
           commands,
           message:
-            "Docker VPN mode does not mount the Docker socket in admin. Run the x-login command from an SSH X-forwarded shell on the host."
+            "Docker VPN mode does not mount the Docker socket in admin. Run the x-login noVNC command from the host shell, then open the noVNC URL."
         };
       }
 
@@ -1280,6 +1368,70 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return { account };
     } catch (error) {
       reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to save X browser account" });
+    }
+  });
+
+  app.get("/admin/x-browser-accounts/:accountId/session", async (request, reply) => {
+    const { accountId } = xBrowserAccountParamSchema.parse(request.params);
+    const account = xBrowserAccounts.findById(accountId);
+    if (!account) {
+      reply.code(404).send({ error: "Unknown X browser account" });
+      return;
+    }
+    if (!account.storageStateExists) {
+      reply.code(404).send({ error: "No X browser session file exists for this account." });
+      return;
+    }
+
+    const storageStatePath = path.resolve(process.cwd(), account.storageStatePath);
+    try {
+      const content = await fs.readFile(storageStatePath, "utf8");
+      reply
+        .header("content-disposition", `attachment; filename="${xBrowserSessionFilename(account)}"`)
+        .type("application/json; charset=utf-8")
+        .send(content);
+    } catch (error) {
+      reply.code(404).send({ error: error instanceof Error ? error.message : "Unable to read X browser session file" });
+    }
+  });
+
+  app.post("/admin/x-browser-accounts/:accountId/session", async (request, reply) => {
+    try {
+      const { accountId } = xBrowserAccountParamSchema.parse(request.params);
+      const body = xBrowserSessionImportSchema.parse(request.body ?? {});
+      const account = xBrowserAccounts.findById(accountId);
+      if (!account) {
+        reply.code(404).send({ error: "Unknown X browser account" });
+        return;
+      }
+
+      const storageState = parseImportedXBrowserStorageState(body.content);
+      const storageStatePath = path.resolve(process.cwd(), account.storageStatePath);
+      const relativeStorageStatePath = path.relative(process.cwd(), storageStatePath);
+      if (relativeStorageStatePath.startsWith("..") || path.isAbsolute(relativeStorageStatePath)) {
+        reply.code(400).send({ error: "X browser session path must stay inside the RedqueenX project." });
+        return;
+      }
+
+      await fs.mkdir(path.dirname(storageStatePath), { recursive: true });
+      await fs.writeFile(storageStatePath, `${JSON.stringify(storageState, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      await fs.chmod(storageStatePath, 0o600).catch(() => undefined);
+      const updatedAccount = xBrowserAccounts.markLogin(account.id, null);
+      await recordSession("info", "x_browser_account.session_imported", "X browser session imported by admin", {
+        accountId: account.id,
+        xIdentifier: account.xIdentifier,
+        storageStatePath: account.storageStatePath,
+        filename: body.filename ? path.basename(body.filename) : null,
+        cookieCount: storageState.cookies.length
+      });
+      return {
+        account: updatedAccount,
+        imported: true,
+        cookieCount: storageState.cookies.length,
+        filename: body.filename ? path.basename(body.filename) : null
+      };
+    } catch (error) {
+      reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to import X browser session" });
     }
   });
 
@@ -1537,10 +1689,45 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     };
   });
 
-  app.patch("/admin/settings/x-api", async (request) => {
+  app.patch("/admin/settings/x-api", async (request, reply) => {
     const body = xApiUpdateSchema.parse(request.body ?? {});
     const previousConfig = getXApiConfig();
-    const config = settings.updateXApiConfig(xApiEnvValuesToConfig(body.values, previousConfig), previousConfig);
+    const requestedConfig = xApiEnvValuesToConfig(body.values, previousConfig);
+    if (
+      requestedConfig.searchWithoutApiIsolation === "docker_vpn" &&
+      previousConfig.searchWithoutApiIsolation !== "docker_vpn"
+    ) {
+      const legacyNetnsCheck = await checkLegacyNetnsHostVeth();
+      if (legacyNetnsCheck.present) {
+        await recordSession(
+          "prob",
+          "docker_vpn.legacy_host_netns_present",
+          `Docker VPN isolation blocked because ${legacyNetnsHostVethName} still exists`,
+          {
+            previousIsolation: previousConfig.searchWithoutApiIsolation,
+            requestedIsolation: "docker_vpn",
+            legacyNetns: legacyNetnsCheck
+          }
+        );
+        return reply.code(409).send({
+          error: `Cannot switch to Docker VPN isolation while legacy host netns interface ${legacyNetnsHostVethName} still exists. Tear down the old host namespace first, then retry.`,
+          legacyNetns: legacyNetnsCheck
+        });
+      }
+      if (!legacyNetnsCheck.checked) {
+        await recordSession(
+          "prob",
+          "docker_vpn.legacy_host_netns_check_failed",
+          `Could not verify whether ${legacyNetnsHostVethName} still exists before switching to Docker VPN isolation`,
+          {
+            previousIsolation: previousConfig.searchWithoutApiIsolation,
+            requestedIsolation: "docker_vpn",
+            legacyNetns: legacyNetnsCheck
+          }
+        );
+      }
+    }
+    const config = settings.updateXApiConfig(requestedConfig, previousConfig);
     const values = xApiConfigToEnvValues(config);
     await env.update(values);
     if (!config.xApiEnabled) {
@@ -2098,6 +2285,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return;
     }
     clearApiResumeTimer(run.id);
+    if (isWithoutApiRun(run)) {
+      clearWithoutApiAlertAutoRestart();
+    }
     const stopped = runs.stop(run.id);
     stopWithoutApiWorker("admin_stop");
     await recordSession("info", "run.stopped", "Run stopped", { runId: stopped.id, status: stopped.status });
@@ -2152,6 +2342,10 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     try {
       const id = getIdParam(request.params);
       clearApiResumeTimer(id);
+      const existing = runs.get(id);
+      if (existing && isWithoutApiRun(existing)) {
+        clearWithoutApiAlertAutoRestart();
+      }
       const run = runs.stop(id);
       stopWithoutApiWorker("admin_stop");
       await recordSession("info", "run.stopped", "Run stopped", { runId: run.id, status: run.status });
@@ -2336,8 +2530,10 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       searchWithoutApiSessionKeywordLimit: options.config.searchWithoutApiSessionKeywordLimit,
       searchWithoutApiSessionKeywordLimitRandom: options.config.searchWithoutApiSessionKeywordLimitRandom,
       searchWithoutApiRandomizeKeywordOrder: options.config.searchWithoutApiRandomizeKeywordOrder,
+      searchWithoutApiAutoIgnoreAlert: options.config.searchWithoutApiAutoIgnoreAlert,
+      searchWithoutApiMaxRetries: options.config.searchWithoutApiMaxRetries,
+      searchWithoutApiAutoRestartDelaySeconds: options.config.searchWithoutApiAutoRestartDelaySeconds,
       searchWithoutApiRequestsBeforePauseMin: options.config.searchWithoutApiRequestsBeforePauseMin,
-      searchWithoutApiRequestsBeforePauseMax: options.config.searchWithoutApiRequestsBeforePauseMax,
       searchWithoutApiPauseMinMinutes: options.config.searchWithoutApiPauseMinMinutes,
       searchWithoutApiPauseMaxMinutes: options.config.searchWithoutApiPauseMaxMinutes,
       searchWithoutApiScrollsMin: options.config.searchWithoutApiScrollsMin,
@@ -2363,10 +2559,13 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       staleKeywordUserMaxRetries: options.config.staleKeywordUserMaxRetries,
       staleKeywordUserAutoRestartDelaySeconds: options.config.staleKeywordUserAutoRestartDelaySeconds,
       rawTimelineEnabled: options.config.rawTimelineEnabled,
-      dockerX11ForwardEnabled: options.config.dockerX11ForwardEnabled,
-      dockerX11Host: options.config.dockerX11Host,
-      dockerX11Port: options.config.dockerX11Port,
-      dockerXauthority: options.config.dockerXauthority,
+      xLoginNovncPort: options.config.xLoginNovncPort,
+      xLoginScreen: options.config.xLoginScreen,
+      xLoginServiceMaxSeconds: options.config.xLoginServiceMaxSeconds,
+      xLoginBrowser: options.config.xLoginBrowser,
+      xLoginSaveMode: options.config.xLoginSaveMode,
+      xLoginStartUrl: options.config.xLoginStartUrl,
+      xLoginReuseBrowserProfile: options.config.xLoginReuseBrowserProfile,
       xLoginSkipNetworkPrecheck: options.config.xLoginSkipNetworkPrecheck,
       vpnNetnsName: options.config.vpnNetnsName,
       vpnHostIface: options.config.vpnHostIface,
@@ -2536,7 +2735,6 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       randomizeKeywordOrder: xApiConfig.searchWithoutApiRandomizeKeywordOrder,
       searchedKeywords: availability.searchTermsUsedEntries,
       requestsBeforePauseMin: xApiConfig.searchWithoutApiRequestsBeforePauseMin,
-      requestsBeforePauseMax: xApiConfig.searchWithoutApiRequestsBeforePauseMax,
       pauseMinMinutes: xApiConfig.searchWithoutApiPauseMinMinutes,
       pauseMaxMinutes: xApiConfig.searchWithoutApiPauseMaxMinutes,
       scrollsMin: xApiConfig.searchWithoutApiScrollsMin,
@@ -2600,6 +2798,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   async function stopRunForFreshStart(run: RunRecord, mode: "without_api" | "x_api"): Promise<void> {
     clearApiResumeTimer(run.id);
+    if (mode === "without_api") {
+      clearWithoutApiAlertAutoRestart();
+    }
     await blockCurrentKeywordFromAbandonedRun(run, mode);
     runs.updateStats(run.id, { currentKeyword: null });
     const stopped = runs.stop(run.id);
@@ -2638,6 +2839,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
 
     clearApiResumeTimer(currentRun.id);
+    if (isWithoutApiRun(currentRun)) {
+      clearWithoutApiAlertAutoRestart();
+    }
     runs.updateStats(currentRun.id, { currentKeyword: null });
     const stopped = runs.stop(currentRun.id);
     stopWithoutApiWorker("vpn_shutdown");
@@ -4267,19 +4471,24 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   function xLoginCommand(accountId: number, config = getXApiConfig()): string {
     return usesDockerVpnIsolation(config)
-      ? `docker compose run --rm x-login --account-id ${accountId}`
+      ? `docker compose run --rm --service-ports x-login --account-id ${accountId}`
       : `npm run netns:x-login -- --account-id ${accountId}`;
   }
 
   function xAlertManualLoginCommands(accountId: number) {
     const runtimeConfig = getXApiConfig();
     const autoSaveLogin = usesDockerVpnIsolation(runtimeConfig)
-      ? `docker compose run --rm x-login --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`
+      ? `docker compose run --rm --service-ports x-login --account-id ${accountId} --resolve-alert`
       : `npm run netns:x-login -- --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`;
     return {
-      setup: usesDockerVpnIsolation(runtimeConfig) ? "ops/docker/x11-bridge.sh" : "npm run setup:local",
+      setup: usesDockerVpnIsolation(runtimeConfig)
+        ? `Open http://127.0.0.1:${runtimeConfig.xLoginNovncPort}/vnc.html?autoconnect=1&resize=scale after starting x-login`
+        : "npm run setup:local",
       manualLogin: autoSaveLogin,
       webLaunch: autoSaveLogin,
+      noVncUrl: usesDockerVpnIsolation(runtimeConfig)
+        ? `http://127.0.0.1:${runtimeConfig.xLoginNovncPort}/vnc.html?autoconnect=1&resize=scale`
+        : null,
       diagnose: usesDockerVpnIsolation(runtimeConfig) ? "docker compose exec worker npm run diagnose:vpn" : "npm run netns:diagnose",
       worker: usesDockerVpnIsolation(runtimeConfig) ? "docker compose up -d worker" : "npm run netns:worker"
     };
@@ -4664,6 +4873,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
 
     const runtimeConfig = getXApiConfig();
+    const completedKeywordsAtStart = parseRunStats(runs.get(run.id)?.statsJson ?? run.statsJson).completedKeywords;
     const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
       ...xApiConfigToEnvValues(runtimeConfig),
@@ -4708,9 +4918,198 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         activeWithoutApiWorkerRunId = null;
       }
       if (code === 0) {
+        resetWithoutApiAlertRetryCount(run.id, "worker_completed");
         void maybeStartNextChainedRun(run.id, "without_api");
+      } else if (code === 2) {
+        void handleWithoutApiAlertWorkerExit(run.id, completedKeywordsAtStart).catch((error) => {
+          void recordSession("prob", "browser.search.auto_restart_failed", "Search without API auto-restart after X alert failed", {
+            runId: run.id,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
       }
     });
+  }
+
+  function resetWithoutApiAlertRetryCount(runId: string, source: string): void {
+    const run = runs.get(runId);
+    if (!run) {
+      return;
+    }
+    const stats = parseRunStats(run.statsJson);
+    if ((stats.browserAlertRetryCount ?? 0) <= 0 && !stats.browserAlertAutoRestartAt) {
+      return;
+    }
+    runs.updateStats(runId, {
+      browserAlertRetryCount: 0,
+      browserAlertAutoRestartAt: null,
+      browserAlertLastCompletedKeywords: stats.completedKeywords,
+      nextApiResetAt: stats.nextApiResetAt === stats.browserAlertAutoRestartAt ? null : stats.nextApiResetAt
+    });
+    void recordSession("info", "browser.search.alert_retry_reset", "Search without API alert retry count reset", {
+      runId,
+      source,
+      completedKeywords: stats.completedKeywords
+    });
+  }
+
+  async function handleWithoutApiAlertWorkerExit(runId: string, completedKeywordsAtStart: number): Promise<boolean> {
+    const runtimeConfig = getXApiConfig();
+    if (!runtimeConfig.searchWithoutApiEnabled || usesDockerVpnIsolation(runtimeConfig)) {
+      return false;
+    }
+    const run = runs.get(runId);
+    if (!run || run.status !== "paused") {
+      return false;
+    }
+    const account = xBrowserAccounts.findByVpnProfilePath(runtimeConfig.vpnConfig);
+    const alert = account ? xSessionAlerts.openForAccount(account.id) : xSessionAlerts.openAlerts()[0] ?? null;
+    if (!alert) {
+      return false;
+    }
+
+    await recordSession("prob", "browser.search.waiting_alert_resolution", "Search without API is waiting for X session alert resolution", {
+      runId,
+      alertId: alert.id,
+      accountId: alert.accountId,
+      xIdentifier: alert.xIdentifier,
+      autoIgnoreAlert: runtimeConfig.searchWithoutApiAutoIgnoreAlert,
+      maxRetries: runtimeConfig.searchWithoutApiMaxRetries,
+      autoRestartDelaySeconds: runtimeConfig.searchWithoutApiAutoRestartDelaySeconds,
+      restartStrategy: "resume_same_run"
+    });
+
+    if (!runtimeConfig.searchWithoutApiAutoIgnoreAlert) {
+      return false;
+    }
+
+    const stats = parseRunStats(run.statsJson);
+    const lastAlertCompleted = stats.browserAlertLastCompletedKeywords ?? completedKeywordsAtStart;
+    const progressedSinceLastAlert = stats.completedKeywords > lastAlertCompleted;
+    const previousRetryCount = progressedSinceLastAlert ? 0 : Math.max(0, Math.floor(stats.browserAlertRetryCount ?? 0));
+    const maxRetries = Math.max(0, Math.floor(runtimeConfig.searchWithoutApiMaxRetries ?? 0));
+    if (previousRetryCount >= maxRetries) {
+      runs.updateStats(runId, {
+        browserAlertAutoIgnore: true,
+        browserAlertRetryCount: previousRetryCount,
+        browserAlertMaxRetries: maxRetries,
+        browserAlertAutoRestartDelaySeconds: runtimeConfig.searchWithoutApiAutoRestartDelaySeconds,
+        browserAlertAutoRestartAt: null,
+        browserAlertLastCompletedKeywords: stats.completedKeywords
+      });
+      await recordSession("prob", "browser.search.auto_ignore_limit", "Search without API auto-ignore limit reached", {
+        runId,
+        alertId: alert.id,
+        retryCount: previousRetryCount,
+        maxRetries
+      });
+      return false;
+    }
+
+    const closedAlert = xSessionAlerts.ignore(alert.id);
+    markIgnoredAlertAccountReady(closedAlert);
+    const nextRetryCount = previousRetryCount + 1;
+    const delayMs = withoutApiAlertRestartDelayMs(runtimeConfig.searchWithoutApiAutoRestartDelaySeconds);
+    const restartAt = new Date(Date.now() + delayMs).toISOString();
+    runs.updateStats(runId, {
+      browserAlertAutoIgnore: true,
+      browserAlertRetryCount: nextRetryCount,
+      browserAlertMaxRetries: maxRetries,
+      browserAlertAutoRestartDelaySeconds: runtimeConfig.searchWithoutApiAutoRestartDelaySeconds,
+      browserAlertAutoRestartAt: restartAt,
+      browserAlertLastCompletedKeywords: stats.completedKeywords,
+      nextApiResetAt: restartAt
+    });
+    await recordSession("prob", "browser.search.alert_auto_ignored", "X session alert auto-ignored for Search without API", {
+      runId,
+      alertId: closedAlert.id,
+      accountId: closedAlert.accountId,
+      xIdentifier: closedAlert.xIdentifier,
+      retryCount: nextRetryCount,
+      maxRetries,
+      autoRestartDelaySeconds: runtimeConfig.searchWithoutApiAutoRestartDelaySeconds
+    });
+    await recordSession("info", "browser.search.auto_restart_wait", "Waiting before resuming Search without API after X session alert", {
+      runId,
+      alertId: closedAlert.id,
+      retryCount: nextRetryCount,
+      maxRetries,
+      restartAt,
+      delayMs
+    });
+
+    scheduleWithoutApiRestartAfterAlert(runId, closedAlert.id, "auto_ignored", delayMs);
+    return true;
+  }
+
+  function withoutApiAlertRestartDelayMs(seconds: number): number {
+    if (process.env.VITEST === "true" || process.env.NODE_ENV === "test") {
+      return 0;
+    }
+    return Math.max(0, Math.floor(seconds)) * 1000;
+  }
+
+  function clearWithoutApiAlertAutoRestart(): void {
+    if (withoutApiAlertRestartTimer) {
+      clearTimeout(withoutApiAlertRestartTimer);
+      withoutApiAlertRestartTimer = null;
+    }
+  }
+
+  function scheduleWithoutApiRestartAfterAlert(
+    runId: string,
+    alertId: number,
+    source: "resolved" | "ignored" | "auto_ignored",
+    delayMs: number
+  ): void {
+    clearWithoutApiAlertAutoRestart();
+    withoutApiAlertRestartTimer = setTimeout(() => {
+      withoutApiAlertRestartTimer = null;
+      void performWithoutApiRestartAfterAlert(runId, alertId, source).catch((error) => {
+        void recordSession("prob", "browser.search.auto_restart_failed", "Search without API auto-restart after X alert failed", {
+          runId,
+          alertId,
+          source,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }, delayMs);
+  }
+
+  async function performWithoutApiRestartAfterAlert(
+    runId: string,
+    alertId: number,
+    source: "resolved" | "ignored" | "auto_ignored"
+  ): Promise<RunRecord | null> {
+    const run = runs.get(runId);
+    if (!run || run.status !== "paused") {
+      return null;
+    }
+    const startCheck = await checkWithoutApiRunStart();
+    if (!startCheck.ok) {
+      await recordSession("prob", "browser.search.auto_restart_blocked", "Search without API could not restart after X session alert", {
+        runId,
+        alertId,
+        source,
+        reason: startCheck.reason,
+        error: startCheck.payload.error
+      });
+      return null;
+    }
+    runs.updateStats(runId, {
+      browserAlertAutoRestartAt: null,
+      nextApiResetAt: null
+    });
+    const resumed = runs.resume(runId);
+    await recordSession("info", "browser.search.auto_restarted", "Search without API restarted after X session alert", {
+      runId,
+      alertId,
+      source,
+      accountId: startCheck.account.id,
+      xIdentifier: startCheck.account.xIdentifier
+    });
+    await startWithoutApiExecution(resumed);
+    return resumed;
   }
 
   function stopWithoutApiWorker(reason: string): void {
@@ -6029,8 +6428,10 @@ function createInitialRunStats(
         | "searchWithoutApiSessionKeywordLimit"
         | "searchWithoutApiSessionKeywordLimitRandom"
         | "searchWithoutApiRandomizeKeywordOrder"
+        | "searchWithoutApiAutoIgnoreAlert"
+        | "searchWithoutApiMaxRetries"
+        | "searchWithoutApiAutoRestartDelaySeconds"
         | "searchWithoutApiRequestsBeforePauseMin"
-        | "searchWithoutApiRequestsBeforePauseMax"
         | "searchWithoutApiPauseMinMinutes"
         | "searchWithoutApiPauseMaxMinutes"
         | "runChainCount"
@@ -6064,6 +6465,12 @@ function createInitialRunStats(
     apiCallsRemaining: apiCallLimit,
     apiWindowMinutes,
     nextApiResetAt: null,
+    browserAlertAutoIgnore: config.searchWithoutApiEnabled ? config.searchWithoutApiAutoIgnoreAlert ?? false : false,
+    browserAlertRetryCount: 0,
+    browserAlertMaxRetries: config.searchWithoutApiEnabled ? config.searchWithoutApiMaxRetries ?? 0 : 0,
+    browserAlertAutoRestartDelaySeconds: config.searchWithoutApiEnabled ? config.searchWithoutApiAutoRestartDelaySeconds ?? 0 : 0,
+    browserAlertAutoRestartAt: null,
+    browserAlertLastCompletedKeywords: null,
     acceptedTweets: 0,
     rejectedTweets: 0,
     lastScore: null,
@@ -6073,20 +6480,23 @@ function createInitialRunStats(
 
 function searchesBeforePauseForKeywords(
   remainingKeywords: number,
-  config: { searchWithoutApiRequestsBeforePauseMax?: number }
+  config: { searchWithoutApiRequestsBeforePauseMin?: number }
 ): number {
   const remaining = Math.max(0, Math.floor(remainingKeywords));
   if (remaining <= 0) {
     return 0;
   }
-  const automaticLimit = Math.ceil(remaining / 2);
-  const manualMax = Math.max(1, Math.floor(config.searchWithoutApiRequestsBeforePauseMax ?? 180));
-  return Math.max(1, Math.min(remaining, automaticLimit, manualMax));
+  const manualMin = Math.max(1, Math.floor(config.searchWithoutApiRequestsBeforePauseMin ?? 1));
+  return Math.min(remaining, manualMin);
 }
 
 function apiSearchesBeforePauseForKeywords(
   remainingKeywords: number,
-  config: { searchWithoutApiRequestsBeforePauseMax?: number; xKeywordsPerQuery?: number; xSearchApiCallLimit?: number }
+  config: {
+    searchWithoutApiRequestsBeforePauseMin?: number;
+    xKeywordsPerQuery?: number;
+    xSearchApiCallLimit?: number;
+  }
 ): number {
   const keywordLimit = searchesBeforePauseForKeywords(remainingKeywords, config);
   const keywordsPerSearch = Math.max(1, Math.floor(config.xKeywordsPerQuery ?? 1));
@@ -6231,11 +6641,12 @@ function xApiEnvValuesToConfig(
       configKey === "searchWithoutApiShowBrowserLocal" ||
       configKey === "searchWithoutApiSessionKeywordLimitRandom" ||
       configKey === "searchWithoutApiRandomizeKeywordOrder" ||
+      configKey === "searchWithoutApiAutoIgnoreAlert" ||
       configKey === "searchWithoutApiSaveSnapshots" ||
       configKey === "searchWithoutApiMediaCacheEnabled" ||
       configKey === "staleKeywordUserAutoIgnoreAlert" ||
       configKey === "rawTimelineEnabled" ||
-      configKey === "dockerX11ForwardEnabled" ||
+      configKey === "xLoginReuseBrowserProfile" ||
       configKey === "xLoginSkipNetworkPrecheck" ||
       configKey === "xCountFirstMode" ||
       configKey === "vpnCheckHostIpv4Leak" ||
@@ -6249,14 +6660,18 @@ function xApiEnvValuesToConfig(
       config[configKey] = z.enum(["smooth1", "smooth2", "smooth3"]).parse(value);
     } else if (configKey === "searchWithoutApiIsolation") {
       config[configKey] = z.enum(["host_netns", "docker_vpn"]).parse(value);
+    } else if (configKey === "xLoginSaveMode") {
+      config[configKey] = z.enum(["auto", "cdp", "profile"]).parse(value);
+    } else if (configKey === "xLoginBrowser") {
+      config[configKey] = z.enum(["chrome", "firefox"]).parse(value);
     } else if (configKey === "vpnRemoteProto") {
       config[configKey] = z.enum(["udp", "tcp"]).parse(value);
     } else if (
       configKey === "searchWithoutApiProfileDir" ||
       configKey === "searchWithoutApiStartUrl" ||
       configKey === "searchWithoutApiMediaCacheDir" ||
-      configKey === "dockerX11Host" ||
-      configKey === "dockerXauthority" ||
+      configKey === "xLoginStartUrl" ||
+      configKey === "xLoginScreen" ||
       configKey === "vpnNetnsName" ||
       configKey === "vpnHostIface" ||
       configKey === "vpnNetnsCidr" ||
@@ -6489,6 +6904,50 @@ async function isNetworkNamespacePresent(namespace: string): Promise<boolean> {
   }
 }
 
+async function checkLegacyNetnsHostVeth(): Promise<{
+  interfaceName: string;
+  checked: boolean;
+  present: boolean;
+  error?: string;
+}> {
+  try {
+    await execFileAsync("ip", ["link", "show", legacyNetnsHostVethName], {
+      timeout: 2_000,
+      maxBuffer: 100_000
+    });
+    return { interfaceName: legacyNetnsHostVethName, checked: true, present: true };
+  } catch (error) {
+    if (isMissingNetworkDeviceError(error)) {
+      return { interfaceName: legacyNetnsHostVethName, checked: true, present: false };
+    }
+    return {
+      interfaceName: legacyNetnsHostVethName,
+      checked: false,
+      present: false,
+      error: commandErrorSummary(error)
+    };
+  }
+}
+
+function isMissingNetworkDeviceError(error: unknown): boolean {
+  const output = commandErrorOutput(error).toLowerCase();
+  return output.includes("does not exist") || output.includes("cannot find device") || output.includes("device not found");
+}
+
+function commandErrorSummary(error: unknown): string {
+  return firstLine(commandErrorOutput(error)).slice(0, 500);
+}
+
+function commandErrorOutput(error: unknown): string {
+  const commandError = error as { stdout?: unknown; stderr?: unknown; message?: unknown; code?: unknown };
+  const stderr = typeof commandError.stderr === "string" ? commandError.stderr : "";
+  const stdout = typeof commandError.stdout === "string" ? commandError.stdout : "";
+  const message =
+    typeof commandError.message === "string" ? commandError.message : error instanceof Error ? error.message : String(error);
+  const code = typeof commandError.code === "string" ? commandError.code : "";
+  return [stderr, stdout, message, code].filter(Boolean).join("\n");
+}
+
 async function waitForProcessesToExit(pids: number[], timeoutMs: number): Promise<number[]> {
   const deadline = Date.now() + timeoutMs;
   let stillRunning = pids.filter(isProcessRunning);
@@ -6596,8 +7055,10 @@ type XApiEnvKey =
   | "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT"
   | "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM"
   | "SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER"
+  | "SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT"
+  | "SEARCH_WITHOUT_API_MAX_RETRIES"
+  | "SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS"
   | "SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN"
-  | "SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX"
   | "SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES"
   | "SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES"
   | "SEARCH_WITHOUT_API_SCROLLS_MIN"
@@ -6623,10 +7084,13 @@ type XApiEnvKey =
   | "STALE_KEYWORD_USER_MAX_RETRIES"
   | "STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS"
   | "RAW_TIMELINE_ENABLED"
-  | "DOCKER_X11_FORWARD_ENABLED"
-  | "DOCKER_X11_HOST"
-  | "DOCKER_X11_PORT"
-  | "DOCKER_XAUTHORITY"
+  | "X_LOGIN_NOVNC_PORT"
+  | "X_LOGIN_SCREEN"
+  | "X_LOGIN_SERVICE_MAX_SECONDS"
+  | "X_LOGIN_BROWSER"
+  | "X_LOGIN_SAVE_MODE"
+  | "X_LOGIN_START_URL"
+  | "X_LOGIN_REUSE_BROWSER_PROFILE"
   | "X_LOGIN_SKIP_NETWORK_PRECHECK"
   | "VPN_NETNS_NAME"
   | "VPN_HOST_IFACE"
@@ -6679,8 +7143,10 @@ const xApiEnvMap: Array<[XApiEnvKey, keyof XApiRuntimeConfig]> = [
   ["SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT", "searchWithoutApiSessionKeywordLimit"],
   ["SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM", "searchWithoutApiSessionKeywordLimitRandom"],
   ["SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER", "searchWithoutApiRandomizeKeywordOrder"],
+  ["SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT", "searchWithoutApiAutoIgnoreAlert"],
+  ["SEARCH_WITHOUT_API_MAX_RETRIES", "searchWithoutApiMaxRetries"],
+  ["SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS", "searchWithoutApiAutoRestartDelaySeconds"],
   ["SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN", "searchWithoutApiRequestsBeforePauseMin"],
-  ["SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MAX", "searchWithoutApiRequestsBeforePauseMax"],
   ["SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES", "searchWithoutApiPauseMinMinutes"],
   ["SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES", "searchWithoutApiPauseMaxMinutes"],
   ["SEARCH_WITHOUT_API_SCROLLS_MIN", "searchWithoutApiScrollsMin"],
@@ -6706,10 +7172,13 @@ const xApiEnvMap: Array<[XApiEnvKey, keyof XApiRuntimeConfig]> = [
   ["STALE_KEYWORD_USER_MAX_RETRIES", "staleKeywordUserMaxRetries"],
   ["STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS", "staleKeywordUserAutoRestartDelaySeconds"],
   ["RAW_TIMELINE_ENABLED", "rawTimelineEnabled"],
-  ["DOCKER_X11_FORWARD_ENABLED", "dockerX11ForwardEnabled"],
-  ["DOCKER_X11_HOST", "dockerX11Host"],
-  ["DOCKER_X11_PORT", "dockerX11Port"],
-  ["DOCKER_XAUTHORITY", "dockerXauthority"],
+  ["X_LOGIN_NOVNC_PORT", "xLoginNovncPort"],
+  ["X_LOGIN_SCREEN", "xLoginScreen"],
+  ["X_LOGIN_SERVICE_MAX_SECONDS", "xLoginServiceMaxSeconds"],
+  ["X_LOGIN_BROWSER", "xLoginBrowser"],
+  ["X_LOGIN_SAVE_MODE", "xLoginSaveMode"],
+  ["X_LOGIN_START_URL", "xLoginStartUrl"],
+  ["X_LOGIN_REUSE_BROWSER_PROFILE", "xLoginReuseBrowserProfile"],
   ["X_LOGIN_SKIP_NETWORK_PRECHECK", "xLoginSkipNetworkPrecheck"],
   ["VPN_NETNS_NAME", "vpnNetnsName"],
   ["VPN_HOST_IFACE", "vpnHostIface"],

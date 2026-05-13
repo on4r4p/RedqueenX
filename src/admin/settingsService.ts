@@ -114,8 +114,10 @@ export const xApiConfigSchema = z.object({
     if (value === "false") return false;
     return value;
   }, z.boolean()),
+  searchWithoutApiAutoIgnoreAlert: booleanSettingSchema,
+  searchWithoutApiMaxRetries: z.coerce.number().int().min(0).max(20),
+  searchWithoutApiAutoRestartDelaySeconds: z.coerce.number().int().min(0).max(3600),
   searchWithoutApiRequestsBeforePauseMin: z.coerce.number().int().min(1),
-  searchWithoutApiRequestsBeforePauseMax: z.coerce.number().int().min(1),
   searchWithoutApiPauseMinMinutes: z.coerce.number().int().min(0),
   searchWithoutApiPauseMaxMinutes: z.coerce.number().int().min(0),
   searchWithoutApiScrollsMin: z.coerce.number().int().min(0),
@@ -149,14 +151,13 @@ export const xApiConfigSchema = z.object({
   staleKeywordUserMaxRetries: z.coerce.number().int().min(0).max(20),
   staleKeywordUserAutoRestartDelaySeconds: z.coerce.number().int().min(0).max(3600),
   rawTimelineEnabled: booleanSettingSchema,
-  dockerX11ForwardEnabled: z.preprocess((value) => {
-    if (value === "true") return true;
-    if (value === "false") return false;
-    return value;
-  }, z.boolean()),
-  dockerX11Host: z.string(),
-  dockerX11Port: z.coerce.number().int().min(1).max(65535),
-  dockerXauthority: z.string(),
+  xLoginNovncPort: z.coerce.number().int().min(1).max(65535),
+  xLoginScreen: z.string().min(5).max(40),
+  xLoginServiceMaxSeconds: z.coerce.number().int().min(60).max(86400),
+  xLoginBrowser: z.enum(["chrome", "firefox"]),
+  xLoginSaveMode: z.enum(["auto", "cdp", "profile"]),
+  xLoginStartUrl: z.string().url(),
+  xLoginReuseBrowserProfile: booleanSettingSchema,
   xLoginSkipNetworkPrecheck: z.preprocess((value) => {
     if (value === "true") return true;
     if (value === "false") return false;

@@ -150,10 +150,10 @@ async function runPlaywrightDiagnostics() {
 
 function findChromiumExecutable(): string | undefined {
   return [
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome-stable",
     "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable"
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser"
   ].find((candidate) => fsSync.existsSync(candidate));
 }
 

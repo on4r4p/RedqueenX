@@ -63,6 +63,12 @@ export interface RunStats {
   apiCallsRemaining: number;
   apiWindowMinutes: number;
   nextApiResetAt: string | null;
+  browserAlertAutoIgnore?: boolean;
+  browserAlertRetryCount?: number;
+  browserAlertMaxRetries?: number;
+  browserAlertAutoRestartDelaySeconds?: number;
+  browserAlertAutoRestartAt?: string | null;
+  browserAlertLastCompletedKeywords?: number | null;
   acceptedTweets: number;
   rejectedTweets: number;
   lastScore: number | null;
