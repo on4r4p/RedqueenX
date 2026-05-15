@@ -37,12 +37,25 @@ compose() {
   fi
 }
 
+has_local_tracked_changes() {
+  ! git diff --quiet || ! git diff --cached --quiet
+}
+
+log_local_tracked_changes() {
+  log "Local tracked changes are present; skipping git update and deploying with the current checkout."
+  git status --short --untracked-files=no 2>&1 | tee -a "$log_file"
+}
+
 log "Starting RedqueenX deploy in $deploy_dir using $compose_file."
 cd "$deploy_dir"
 
 run git fetch --prune origin "$branch"
-run git checkout "$branch"
-run git pull --ff-only origin "$branch"
+if has_local_tracked_changes; then
+  log_local_tracked_changes
+else
+  run git checkout "$branch"
+  run git pull --ff-only origin "$branch"
+fi
 
 compose -f "$compose_file" pull
 compose -f "$compose_file" up -d --remove-orphans
