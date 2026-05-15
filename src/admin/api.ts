@@ -2662,11 +2662,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         await stopRunForFreshStart(existing, "without_api");
       }
 
-      const run = runs.start(createInitialRunStats(lists, runtimeConfig));
+      const keywords = plannedKeywords(lists, runtimeConfig);
+      const run = runs.start(createInitialRunStats(lists, runtimeConfig, keywords));
+      runs.replaceKeywords(run.id, keywords);
       await recordSession("info", "run.started", "Fresh run started from start action", {
         runId: run.id,
         status: run.status,
         mode: "without_api",
+        plannedKeywords: keywords.length,
         accountId: blocked.account.id,
         xIdentifier: blocked.account.xIdentifier,
         vpnProfilePath: runtimeConfig.vpnConfig

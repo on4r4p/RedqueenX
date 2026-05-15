@@ -266,8 +266,7 @@ const metricDefinitions = [
   ["tweet_sent", "Tweets.Sent"],
   ["update_status_call", "UpdateStatus.Call"],
   ["text_sent", "Text.Sent"],
-  ["total_api_call", "TotalApi.Call"],
-  ["current_session", "Current.Session", "raw"]
+  ["total_api_call", "TotalApi.Call"]
 ];
 
 const scoringNumberFields = [
@@ -1445,10 +1444,7 @@ async function runDatabaseMaintenance(action) {
 }
 
 async function refreshStats() {
-  const [data, currentSession] = await Promise.all([
-    jsonFetch("/admin/stats"),
-    jsonFetch("/admin/lists/current_session?limit=1")
-  ]);
+  const data = await jsonFetch("/admin/stats");
   if (!data) return;
   currentRuntimeModes = data.runtimeModes || {};
   applyAdminAuthModeUi();
@@ -1458,22 +1454,22 @@ async function refreshStats() {
 
   const listCounts = data.lists || {};
   metrics.innerHTML = metricDefinitions
-    .map(([kind, label, display]) => {
-      const value =
-        display === "raw"
-          ? currentSession?.entries?.[0]?.rawValue
-          : listCounts[kind] || 0;
-      const renderedValue =
-        display === "raw"
-          ? `<strong>${escapeHtml(value === undefined ? "No session" : value || "(empty line)")}</strong>`
-          : `<strong>${value}</strong>`;
-      return `<div class="metric"><span>${label}</span>${renderedValue}</div>`;
+    .map(([kind, label]) => {
+      const value = listCounts[kind] || 0;
+      return `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
     })
-    .join("") + renderXBudgetMetrics(data.xBudget, data.runtimeModes) + renderSearchWithoutApiMetrics(data.searchWithoutApi);
+    .join("") + renderRunCounterMetric(data.currentRun) + renderXBudgetMetrics(data.xBudget, data.runtimeModes) + renderSearchWithoutApiMetrics(data.searchWithoutApi);
   if (countersUpdatedAt) {
     countersUpdatedAt.textContent = `Updated ${new Date().toLocaleString()}`;
   }
   renderRunStatus(data.currentRun, data.staleKeywordUserPrune);
+}
+
+function renderRunCounterMetric(run) {
+  if (!run) {
+    return '<div class="metric"><span>Current run</span><strong class="metric-text">No active run</strong></div>';
+  }
+  return `<div class="metric"><span>Current run</span><strong class="metric-text">${escapeHtml(run.status)} - ${escapeHtml(run.id)}</strong></div>`;
 }
 
 function renderXBudgetMetrics(budget, runtimeModes = {}) {
@@ -3001,9 +2997,13 @@ async function refreshSessionKeywords() {
     sessionKeywordsList.innerHTML = '<div class="empty-state">Start a run to load a keyword plan.</div>';
     return;
   }
-  sessionKeywordsSummary.textContent = `${data.loaded} shown / ${data.total} planned - run ${data.run.id}`;
+  const loadedLabel = data.loaded > 0 ? `${data.loaded} shown` : "0 persisted";
+  sessionKeywordsSummary.textContent = `${loadedLabel} / ${data.total} planned - run ${data.run.id}`;
   if (!data.keywords.length) {
-    sessionKeywordsList.innerHTML = '<div class="empty-state">No keywords have been persisted for this run yet.</div>';
+    sessionKeywordsList.innerHTML =
+      data.total > 0
+        ? '<div class="empty-state">Keyword plan is queued but no keyword rows have been written yet. Refresh after the Docker worker starts.</div>'
+        : '<div class="empty-state">No keywords are planned for this run.</div>';
     return;
   }
   sessionKeywordsList.innerHTML = data.keywords

@@ -9,24 +9,10 @@ The project supports two operating modes:
 
 ## Screenshots
 
-Screenshots are optional, but useful if you want the README to show the UI.
-Put them here:
-
-```text
-docs/screenshots/timeline.png
-docs/screenshots/admin-lists.png
-docs/screenshots/session-alerts.png
-docs/screenshots/settings.png
-```
-
-Then add the images in this section, for example:
-
-```md
-![Timeline](docs/screenshots/timeline.png)
-![Admin lists](docs/screenshots/admin-lists.png)
-![Session alerts](docs/screenshots/session-alerts.png)
-![Settings](docs/screenshots/settings.png)
-```
+![Timeline](https://i.ibb.co/ymL2G2Vw/Screenshot-From-2026-05-16-00-09-51.png)
+![Admin lists](https://i.ibb.co/5XvTx0yd/Screenshot-From-2026-05-16-00-11-23.png)
+![Session alerts](https://i.ibb.co/7tnhVgJK/Screenshot-From-2026-05-16-00-12-08.png)
+![Settings](https://i.ibb.co/S73SBynp/Screenshot-From-2026-05-16-00-13-00.png)
 
 ## Local Installation
 
