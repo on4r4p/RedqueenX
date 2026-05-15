@@ -14,6 +14,17 @@ import { clearStaleChromiumProfileLocks } from "../src/worker/chromiumProfileLoc
 import { shouldDisableChromiumSandbox } from "../src/worker/chromiumSandbox";
 import { sanitizeXLoginChromeArgs, summarizeXLoginApiError, x11SocketPath } from "../src/worker/xLogin";
 
+function authHeadersFromSetCookie(setCookie: string | string[] | number | undefined): Record<string, string> {
+  const values = Array.isArray(setCookie) ? setCookie : setCookie === undefined ? [] : [String(setCookie)];
+  const cookiePairs = values.map((value) => value.split(";")[0]).filter(Boolean);
+  const csrfPair = cookiePairs.find((value) => value.startsWith("redqueen_csrf="));
+  const csrfToken = csrfPair?.slice("redqueen_csrf=".length);
+  return {
+    cookie: cookiePairs.join("; "),
+    ...(csrfToken ? { "x-redqueenx-csrf": decodeURIComponent(csrfToken) } : {})
+  };
+}
+
 describe("docker_vpn isolation", () => {
   it("keeps host_netns as the default isolation backend", () => {
     expect(loadConfig({}).searchWithoutApiIsolation).toBe("host_netns");
@@ -61,10 +72,10 @@ exit 1
     process.env.PATH = `${fakeBinDir}${path.delimiter}${originalPath ?? ""}`;
 
     try {
-      const login = await app.inject({ method: "POST", url: "/admin/login", payload: { password: "secret" } });
+      const login = await app.inject({ method: "POST", url: "/admin/login", payload: { username: "admin", password: "secret" } });
       expect(login.statusCode).toBe(200);
       const cookie = login.headers["set-cookie"];
-      const authHeaders = { cookie: Array.isArray(cookie) ? cookie[0] : String(cookie) };
+      const authHeaders = authHeadersFromSetCookie(cookie);
 
       const response = await app.inject({
         method: "PATCH",
@@ -163,7 +174,7 @@ exit 1
     expect(fs.lstatSync(path.join(tmp, "SingletonLock")).isSymbolicLink()).toBe(true);
   });
 
-  it("queues admin media cache reloads instead of launching host netns scripts", async () => {
+  it("queues media cache reloads instead of launching host netns scripts", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-docker-vpn-"));
     const currentSessionFile = path.join(tmp, "current-session.log");
     const envPath = path.join(tmp, ".env");
@@ -183,6 +194,7 @@ exit 1
     const database = openMemoryDatabase();
     const timeline = new TimelineTweetService(database);
     timeline.saveAcceptedFromTest("cloudflare", testTweet(), testDecision());
+    timeline.saveAcceptedFromTest("timeline", { ...testTweet(), id: "2050000000000000003" }, testDecision());
     timeline.saveAcceptedFromTest("hashflag", absTwimgTweet(), testDecision());
     const mediaCache = new MediaCacheService(database, {
       enabled: true,
@@ -201,10 +213,25 @@ exit 1
       restartDelayMs: 0
     });
 
-    const login = await app.inject({ method: "POST", url: "/admin/login", payload: { password: "secret" } });
+    const login = await app.inject({ method: "POST", url: "/admin/login", payload: { username: "admin", password: "secret" } });
     expect(login.statusCode).toBe(200);
     const cookie = login.headers["set-cookie"];
-    const authHeaders = { cookie: Array.isArray(cookie) ? cookie[0] : String(cookie) };
+    const authHeaders = authHeadersFromSetCookie(cookie);
+    const createTimelineUser = await app.inject({
+      method: "POST",
+      url: "/admin/timeline-users",
+      headers: authHeaders,
+      payload: { username: "viewer", password: "viewer-password" }
+    });
+    expect(createTimelineUser.statusCode).toBe(200);
+    const timelineLogin = await app.inject({
+      method: "POST",
+      url: "/timeline/login",
+      payload: { username: "viewer", password: "viewer-password" }
+    });
+    expect(timelineLogin.statusCode).toBe(200);
+    const timelineCookie = timelineLogin.headers["set-cookie"];
+    const timelineHeaders = authHeadersFromSetCookie(timelineCookie);
 
     const reload = await app.inject({
       method: "POST",
@@ -230,6 +257,38 @@ exit 1
     const sessionLog = fs.readFileSync(currentSessionFile, "utf8");
     expect(sessionLog).toContain("media_cache.reload.queued");
     expect(sessionLog).not.toContain("netns:media-cache:fetch");
+
+    const timelineReload = await app.inject({
+      method: "POST",
+      url: "/timeline/tweets/2050000000000000003/media-cache/reload",
+      headers: timelineHeaders
+    });
+    expect(timelineReload.statusCode).toBe(200);
+    expect(timelineReload.json()).toMatchObject({ ok: true, queued: true, sourceCount: 2 });
+    const timelineJobStatus = await app.inject({
+      method: "GET",
+      url: `/timeline/media-cache/jobs/${timelineReload.json().jobId}`,
+      headers: timelineHeaders
+    });
+    expect(timelineJobStatus.statusCode).toBe(200);
+    expect(timelineJobStatus.json().job).toMatchObject({
+      tweetId: "2050000000000000003",
+      status: "pending"
+    });
+    const timelineJobs = database
+      .prepare("SELECT tweet_id, status, source FROM media_cache_jobs WHERE source = 'timeline_reload'")
+      .all() as Array<{
+        tweet_id: string;
+        status: string;
+        source: string;
+      }>;
+    expect(timelineJobs).toEqual([
+      {
+        tweet_id: "2050000000000000003",
+        status: "pending",
+        source: "timeline_reload"
+      }
+    ]);
 
     const retry = await app.inject({
       method: "POST",
@@ -298,10 +357,10 @@ exit 1
     let initialJob: { id: string; reportPath: string; resumeStatePath: string } | null = null;
     let restartedJob: { id: string; reportPath: string; resumeStatePath: string } | null = null;
     try {
-      const login = await app.inject({ method: "POST", url: "/admin/login", payload: { password: "secret" } });
+      const login = await app.inject({ method: "POST", url: "/admin/login", payload: { username: "admin", password: "secret" } });
       expect(login.statusCode).toBe(200);
       const cookie = login.headers["set-cookie"];
-      const authHeaders = { cookie: Array.isArray(cookie) ? cookie[0] : String(cookie) };
+      const authHeaders = authHeadersFromSetCookie(cookie);
 
       const start = await app.inject({
         method: "POST",
@@ -507,10 +566,10 @@ exit 1
 
     let job: { id: string; reportPath: string; resumeStatePath: string } | null = null;
     try {
-      const login = await app.inject({ method: "POST", url: "/admin/login", payload: { password: "secret" } });
+      const login = await app.inject({ method: "POST", url: "/admin/login", payload: { username: "admin", password: "secret" } });
       expect(login.statusCode).toBe(200);
       const cookie = login.headers["set-cookie"];
-      const authHeaders = { cookie: Array.isArray(cookie) ? cookie[0] : String(cookie) };
+      const authHeaders = authHeadersFromSetCookie(cookie);
 
       const start = await app.inject({
         method: "POST",
@@ -611,10 +670,10 @@ exit 1
 
     let job: { id: string; reportPath: string; resumeStatePath: string } | null = null;
     try {
-      const login = await app.inject({ method: "POST", url: "/admin/login", payload: { password: "secret" } });
+      const login = await app.inject({ method: "POST", url: "/admin/login", payload: { username: "admin", password: "secret" } });
       expect(login.statusCode).toBe(200);
       const cookie = login.headers["set-cookie"];
-      const authHeaders = { cookie: Array.isArray(cookie) ? cookie[0] : String(cookie) };
+      const authHeaders = authHeadersFromSetCookie(cookie);
 
       const start = await app.inject({
         method: "POST",

@@ -47,6 +47,7 @@ services:
       ADMIN_PORT: ${ADMIN_PORT:-3005}
       ADMIN_TRUST_PROXY: "true"
       ADMIN_AUTH_MODE: ${ADMIN_AUTH_MODE:-password}
+      ADMIN_MTLS_PROXY_SECRET: ${ADMIN_MTLS_PROXY_SECRET:-}
       ADMIN_PUBLIC_URL: ${ADMIN_PUBLIC_URL:-}
       ADMIN_IPV4_WHITELIST: ${ADMIN_IPV4_WHITELIST:-127.0.0.1,172.16.0.0/12}
       ADMIN_IPV4_BLACKLIST: ${ADMIN_IPV4_BLACKLIST:-}
@@ -89,8 +90,6 @@ services:
     image: on4r4p/redqueenx-worker:latest
     restart: unless-stopped
     user: "${REDQUEENX_UID:-1000}:${REDQUEENX_GID:-1000}"
-    security_opt:
-      - seccomp=unconfined
     command: ["npm", "run", "worker:docker-vpn"]
     network_mode: service:vpn
     depends_on:

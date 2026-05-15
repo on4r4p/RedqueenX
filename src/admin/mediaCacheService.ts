@@ -237,7 +237,7 @@ export class MediaCacheService {
       .all(nowIso) as MediaCacheRow[];
     let expired = 0;
     for (const row of expiredRows) {
-      await removeFileIfExists(row.local_path);
+      await removeCacheFileIfExists(row.local_path, this.rootDir);
       this.database.prepare("DELETE FROM media_cache_entries WHERE cache_id = ?").run(row.cache_id);
       expired += 1;
     }
@@ -248,7 +248,7 @@ export class MediaCacheService {
     let overQuota = 0;
     while (this.config.maxBytes > 0 && total > this.config.maxBytes && rows.length > 0) {
       const row = rows.shift()!;
-      await removeFileIfExists(row.local_path);
+      await removeCacheFileIfExists(row.local_path, this.rootDir);
       this.database.prepare("DELETE FROM media_cache_entries WHERE cache_id = ?").run(row.cache_id);
       total -= row.size_bytes;
       overQuota += 1;
@@ -300,18 +300,31 @@ export class MediaCacheService {
     if (entry.lastError) {
       return { cacheId, cacheStatus: "error", cachedUrl: null, lastError: entry.lastError, hasRemoteSource: true };
     }
-    if (this.isEntryExpired(entry) || !fsSync.existsSync(entry.localPath)) {
+    if (this.isEntryExpired(entry) || !this.isCacheFile(entry.localPath)) {
       return { cacheId, cacheStatus: "expired", cachedUrl: null, hasRemoteSource: true };
     }
     return { cacheId, cacheStatus: "cached", cachedUrl: this.publicUrl(cacheId), hasRemoteSource: true };
   }
 
   private isEntryUsable(entry: MediaCacheEntry): boolean {
-    return !entry.lastError && !this.isEntryExpired(entry) && fsSync.existsSync(entry.localPath);
+    return !entry.lastError && !this.isEntryExpired(entry) && this.isCacheFile(entry.localPath);
   }
 
   private isEntryExpired(entry: MediaCacheEntry): boolean {
     return Boolean(entry.expiresAt && new Date(entry.expiresAt).getTime() <= Date.now());
+  }
+
+  private isCacheFile(filePath: string): boolean {
+    const resolved = path.resolve(filePath);
+    const rootPrefix = `${this.rootDir}${path.sep}`;
+    if (!resolved.startsWith(rootPrefix)) {
+      return false;
+    }
+    try {
+      return fsSync.statSync(resolved).isFile();
+    } catch {
+      return false;
+    }
   }
 
   private cachedRows(): MediaCacheRow[] {
@@ -348,9 +361,13 @@ function mapRow(row: MediaCacheRow): MediaCacheEntry {
   };
 }
 
-async function removeFileIfExists(filePath: string): Promise<void> {
+async function removeCacheFileIfExists(filePath: string, rootDir: string): Promise<void> {
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(`${rootDir}${path.sep}`)) {
+    return;
+  }
   try {
-    await fs.unlink(filePath);
+    await fs.unlink(resolved);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw error;

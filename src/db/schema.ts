@@ -78,6 +78,19 @@ export function migrate(database: Database): void {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS timeline_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL,
+      username_normalized TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      session_version INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_timeline_users_username
+      ON timeline_users(username_normalized);
+
     CREATE TABLE IF NOT EXISTS timeline_tweets (
       tweet_id TEXT PRIMARY KEY,
       text TEXT NOT NULL,
@@ -248,9 +261,19 @@ export function migrate(database: Database): void {
       FROM x_browser_accounts;
   `);
 
-  ensureListEntryUniqueness(database);
-  ensureRawTimelineDecisionColumns(database);
-  ensureXSessionAlertDetailColumns(database);
+	  ensureListEntryUniqueness(database);
+	  ensureTimelineUserSessionColumns(database);
+	  ensureRawTimelineDecisionColumns(database);
+	  ensureXSessionAlertDetailColumns(database);
+	}
+
+function ensureTimelineUserSessionColumns(database: Database): void {
+  const columns = new Set(
+    (database.prepare("PRAGMA table_info(timeline_users)").all() as Array<{ name: string }>).map((column) => column.name)
+  );
+  if (!columns.has("session_version")) {
+    database.exec("ALTER TABLE timeline_users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1");
+  }
 }
 
 function ensureListEntryUniqueness(database: Database): void {

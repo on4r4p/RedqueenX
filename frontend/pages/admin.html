@@ -243,10 +243,6 @@
                 <strong id="session-keyword-progress" class="metric-text">0 / 0</strong>
               </div>
               <div class="metric">
-                <span>Inactive users check</span>
-                <strong id="session-stale-prune-status" class="metric-text">-</strong>
-              </div>
-              <div class="metric">
                 <span id="session-api-left-label">API before pause</span>
                 <strong id="session-api-left" class="metric-text">-</strong>
               </div>
@@ -607,6 +603,28 @@
                 <div class="settings-subsection-actions">
                   <button type="submit" data-settings-section>Save timeline display</button>
                 </div>
+              </fieldset>
+              <fieldset class="settings-subsection">
+                <legend>Users allowed in timelines</legend>
+                <div id="timeline-users-list" class="list-content compact-list"></div>
+                <input id="timeline-user-id" type="hidden" />
+                <div class="settings-grid">
+                  <label>
+                    <span>Username</span>
+                    <input id="timeline-user-username" type="text" autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>Password</span>
+                    <input id="timeline-user-password" type="password" autocomplete="new-password"
+                      placeholder="Leave empty when editing" />
+                  </label>
+                </div>
+                <div class="settings-subsection-actions">
+                  <button id="timeline-user-save" type="button" class="secondary-button">Save timeline user</button>
+                  <button id="timeline-user-clear" type="button" class="secondary-button">Clear selection</button>
+                  <button id="timeline-user-delete" type="button" class="danger-button" disabled>Delete user</button>
+                </div>
+                <p id="timeline-users-status" class="muted"></p>
               </fieldset>
               <fieldset class="settings-subsection">
                 <legend>Run chaining</legend>
@@ -1249,8 +1267,20 @@
                   </select>
                 </label>
                 <label>
+                  <span>ADMIN_MTLS_PROXY_SECRET</span>
+                  <input name="ADMIN_MTLS_PROXY_SECRET" type="password" autocomplete="off" data-secret-field />
+                </label>
+                <label>
                   <span>ADMIN_PUBLIC_URL</span>
                   <input name="ADMIN_PUBLIC_URL" type="url" autocomplete="off" placeholder="https://admin.example.com" />
+                </label>
+                <label>
+                  <span>ADMIN_USERNAME</span>
+                  <input name="ADMIN_USERNAME" type="text" autocomplete="off" placeholder="admin" />
+                </label>
+                <label>
+                  <span>ADMIN_PASSWORD_HASH</span>
+                  <input name="ADMIN_PASSWORD_HASH" type="password" autocomplete="off" data-secret-field />
                 </label>
                 <label>
                   <span>DATABASE_URL</span>

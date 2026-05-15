@@ -1,8 +1,8 @@
 [
   {
     "id": "redqueenx-deploy",
-    "execute-command": "/opt/redqueenx/ops/webhook/redqueenx-deploy.sh",
-    "command-working-directory": "/opt/redqueenx",
+    "execute-command": "/opt/RedqueenX/ops/webhook/redqueenx-deploy.sh",
+    "command-working-directory": "/opt/RedqueenX",
     "response-message": "RedqueenX deploy started.\n",
     "trigger-rule": {
       "and": [

@@ -44,6 +44,14 @@ const serverAccessCurrentIp = document.getElementById("server-access-current-ip"
 const serverAccessDisabledNote = document.getElementById("server-access-disabled-note");
 const scoringForm = document.getElementById("scoring-form");
 const generalSettingsForm = document.getElementById("general-settings-form");
+const timelineUsersList = document.getElementById("timeline-users-list");
+const timelineUserId = document.getElementById("timeline-user-id");
+const timelineUserUsername = document.getElementById("timeline-user-username");
+const timelineUserPassword = document.getElementById("timeline-user-password");
+const timelineUserSave = document.getElementById("timeline-user-save");
+const timelineUserClear = document.getElementById("timeline-user-clear");
+const timelineUserDelete = document.getElementById("timeline-user-delete");
+const timelineUsersStatus = document.getElementById("timeline-users-status");
 const staleKeywordUserDays = document.getElementById("stale-keyword-user-days");
 const staleKeywordUserStartIndex = document.getElementById("stale-keyword-user-start-index");
 const staleKeywordUserSpeedPreset = document.getElementById("stale-keyword-user-speed-preset");
@@ -183,6 +191,7 @@ let pathPickerState = { input: null, mode: "file", cwd: "", parent: null };
 let openVpnProfiles = [];
 let openVpnAuthProfilePath = "";
 let xBrowserAccounts = [];
+let timelineUsers = [];
 let latestListCounts = {};
 let browserSnapshotRuns = [];
 let selectedBrowserSnapshot = null;
@@ -412,8 +421,11 @@ const envFields = [
   "ADMIN_PORT",
   "ADMIN_TRUST_PROXY",
   "ADMIN_AUTH_MODE",
+  "ADMIN_MTLS_PROXY_SECRET",
   "ADMIN_PUBLIC_URL",
+  "ADMIN_USERNAME",
   "ADMIN_PASSWORD",
+  "ADMIN_PASSWORD_HASH",
   "SESSION_SECRET",
   "DATABASE_URL",
   "CURRENT_SESSION_FILE",
@@ -465,6 +477,7 @@ const adminTooltipByName = {
     "Enable only when RedqueenX is behind a trusted local reverse proxy such as Caddy, so the whitelist uses the real client IP from X-Forwarded-For.",
   ADMIN_AUTH_MODE:
     "password keeps the local admin login page. mtls_proxy trusts a local reverse proxy that already required a valid client certificate.",
+  ADMIN_MTLS_PROXY_SECRET: "Shared secret expected from the trusted mTLS reverse proxy before RedqueenX accepts certificate-mode admin requests.",
   ADMIN_PUBLIC_URL: "External admin URL used by public timeline navigation, for example https://admin.example.com.",
   allowedLanguages: "Comma-separated language codes accepted by the tweet scoring rules.",
   enableAllowedLanguages: "Enable or disable the allowed-language rejection check.",
@@ -708,12 +721,36 @@ const adminTooltipByRunAction = {
   stop: "Stop the current run and clear active execution."
 };
 
+function cookieValue(name) {
+  const prefix = `${name}=`;
+  return document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix))
+    ?.slice(prefix.length);
+}
+
+function csrfToken() {
+  const value = cookieValue("redqueen_csrf");
+  return value ? decodeURIComponent(value) : "";
+}
+
+function isMutationMethod(method) {
+  return ["DELETE", "PATCH", "POST", "PUT"].includes(String(method || "GET").toUpperCase());
+}
+
 async function jsonFetch(url, options = {}) {
   const headers = { ...(options.headers || {}) };
   const hasBody = options.body !== undefined;
   const hasContentType = Object.keys(headers).some((key) => key.toLowerCase() === "content-type");
   if (hasBody && !hasContentType && !(options.body instanceof FormData)) {
     headers["content-type"] = "application/json";
+  }
+  if (isMutationMethod(options.method)) {
+    const token = csrfToken();
+    if (token) {
+      headers["x-redqueenx-csrf"] = token;
+    }
   }
 
   const response = await fetch(url, {
@@ -3269,6 +3306,88 @@ async function refreshScoringSettings() {
   applyScoringCheckUi();
 }
 
+async function refreshTimelineUsers() {
+  if (!timelineUsersList) return;
+  const data = await jsonFetch("/admin/timeline-users");
+  if (!data) return;
+  timelineUsers = Array.isArray(data.users) ? data.users : [];
+  renderTimelineUsers();
+}
+
+function renderTimelineUsers() {
+  if (!timelineUsersList) return;
+  const selectedId = Number(timelineUserId?.value || 0);
+  timelineUsersList.innerHTML = timelineUsers.length
+    ? timelineUsers
+      .map((user) => {
+        const selected = selectedId === user.id ? " is-selected" : "";
+        return `<button type="button" class="list-entry-row${selected}" data-timeline-user-id="${user.id}">
+          <span>${escapeHtml(user.username)}</span>
+          <small>${escapeHtml(user.updatedAt || user.createdAt || "")}</small>
+        </button>`;
+      })
+      .join("")
+    : '<p class="muted">No timeline user yet.</p>';
+}
+
+function clearTimelineUserForm() {
+  if (timelineUserId) timelineUserId.value = "";
+  if (timelineUserUsername) timelineUserUsername.value = "";
+  if (timelineUserPassword) timelineUserPassword.value = "";
+  if (timelineUserDelete) timelineUserDelete.disabled = true;
+  renderTimelineUsers();
+}
+
+function selectTimelineUser(userId) {
+  const user = timelineUsers.find((item) => item.id === Number(userId));
+  if (!user) {
+    clearTimelineUserForm();
+    return;
+  }
+  if (timelineUserId) timelineUserId.value = String(user.id);
+  if (timelineUserUsername) timelineUserUsername.value = user.username;
+  if (timelineUserPassword) timelineUserPassword.value = "";
+  if (timelineUserDelete) timelineUserDelete.disabled = false;
+  if (timelineUsersStatus) timelineUsersStatus.textContent = `Editing ${user.username}.`;
+  renderTimelineUsers();
+}
+
+async function saveTimelineUser() {
+  const id = Number(timelineUserId?.value || 0);
+  const username = timelineUserUsername?.value?.trim() || "";
+  const password = timelineUserPassword?.value || "";
+  if (!username) {
+    if (timelineUsersStatus) timelineUsersStatus.textContent = "Username is required.";
+    return;
+  }
+  if (!id && password.length < 8) {
+    if (timelineUsersStatus) timelineUsersStatus.textContent = "Password must contain at least 8 characters.";
+    return;
+  }
+  const result = await jsonFetch(id ? `/admin/timeline-users/${id}` : "/admin/timeline-users", {
+    method: id ? "PATCH" : "POST",
+    body: JSON.stringify(id ? { username, password } : { username, password })
+  });
+  if (!result) return;
+  if (timelineUsersStatus) timelineUsersStatus.textContent = `Saved ${result.user.username}.`;
+  clearTimelineUserForm();
+  await refreshTimelineUsers();
+}
+
+async function deleteTimelineUser() {
+  const id = Number(timelineUserId?.value || 0);
+  if (!id) return;
+  const username = timelineUserUsername?.value || "this user";
+  if (!window.confirm(`Delete timeline access for ${username}?`)) {
+    return;
+  }
+  const result = await jsonFetch(`/admin/timeline-users/${id}`, { method: "DELETE" });
+  if (!result) return;
+  if (timelineUsersStatus) timelineUsersStatus.textContent = `Deleted ${username}.`;
+  clearTimelineUserForm();
+  await refreshTimelineUsers();
+}
+
 function applyScoringCheckUi() {
   for (const [toggleField, targetField] of Object.entries(scoringCheckTargets)) {
     const toggle = scoringForm.elements[toggleField];
@@ -3295,7 +3414,7 @@ async function refreshEnvSettings() {
   const data = await jsonFetch("/admin/env");
   if (!data) return;
 
-  writeEnvForm(data.values);
+  writeEnvForm(data.values, data.redactedKeys);
   applyAdminAuthModeUi();
 }
 
@@ -3303,7 +3422,7 @@ async function refreshXApiSettings() {
   const data = await jsonFetch("/admin/settings/x-api");
   if (!data) return;
 
-  writeXApiForm(data.values);
+  writeXApiForm(data.values, data.redactedKeys);
   writeGeneralSettingsForm(data.values);
   writeSearchWithoutApiForm(data.values);
   applyRuntimeModeUi();
@@ -3311,26 +3430,38 @@ async function refreshXApiSettings() {
   await refreshOpenVpnProfiles(data.values?.VPN_CONFIG);
 }
 
-function writeEnvForm(values) {
+function writeEnvForm(values, redactedKeys = []) {
+  const redacted = new Set(redactedKeys || []);
   for (const field of envFields) {
-    if (envForm.elements[field]) {
-      if (envForm.elements[field].type === "checkbox") {
-        envForm.elements[field].checked = values[field] === "true";
+    const input = envForm.elements[field];
+    if (input) {
+      input.dataset.redacted = redacted.has(field) ? "true" : "";
+      if (input.type === "checkbox") {
+        input.checked = values[field] === "true";
       } else {
-        envForm.elements[field].value = values[field] ?? "";
+        input.value = values[field] ?? "";
+        if (redacted.has(field)) {
+          input.placeholder = "Stored secret (leave blank to keep)";
+        }
       }
     }
   }
   applyAdminAuthModeUi();
 }
 
-function writeXApiForm(values) {
+function writeXApiForm(values, redactedKeys = []) {
+  const redacted = new Set(redactedKeys || []);
   for (const field of xApiFields) {
-    if (xApiForm.elements[field]) {
-      if (xApiForm.elements[field].type === "checkbox") {
-        xApiForm.elements[field].checked = values[field] === "true";
+    const input = xApiForm.elements[field];
+    if (input) {
+      input.dataset.redacted = redacted.has(field) ? "true" : "";
+      if (input.type === "checkbox") {
+        input.checked = values[field] === "true";
       } else {
-        xApiForm.elements[field].value = values[field] ?? "";
+        input.value = values[field] ?? "";
+        if (redacted.has(field)) {
+          input.placeholder = "Stored secret (leave blank to keep)";
+        }
       }
     }
   }
@@ -3524,11 +3655,15 @@ function readServerAccessForm() {
 function readEnvForm() {
   const values = {};
   for (const field of envFields) {
-    if (envForm.elements[field]) {
+    const input = envForm.elements[field];
+    if (input) {
+      if (input.dataset.redacted === "true" && input.type !== "checkbox" && input.value === "") {
+        continue;
+      }
       values[field] =
-        envForm.elements[field].type === "checkbox"
-          ? String(envForm.elements[field].checked)
-          : envForm.elements[field].value;
+        input.type === "checkbox"
+          ? String(input.checked)
+          : input.value;
     }
   }
   return { values };
@@ -3548,11 +3683,12 @@ function scopedSettingsFields(form, fields, submitter) {
 function readSettingsValues(form, fields, submitter) {
   const values = {};
   for (const field of scopedSettingsFields(form, fields, submitter)) {
-    if (form.elements[field]) {
-      values[field] =
-        form.elements[field].type === "checkbox"
-          ? String(form.elements[field].checked)
-          : form.elements[field].value;
+    const input = form.elements[field];
+    if (input) {
+      if (input.dataset.redacted === "true" && input.type !== "checkbox" && input.value === "") {
+        continue;
+      }
+      values[field] = input.type === "checkbox" ? String(input.checked) : input.value;
     }
   }
   return values;
@@ -3635,7 +3771,7 @@ async function saveRuntimeModeSettings(values, statusMessage, feedbackTarget = n
     body: JSON.stringify({ values })
   });
   if (!result) return null;
-  writeXApiForm(result.values ?? {});
+  writeXApiForm(result.values ?? {}, result.redactedKeys ?? []);
   writeGeneralSettingsForm(result.values ?? {});
   writeSearchWithoutApiForm(result.values ?? {});
   applyRuntimeModeUi();
@@ -4455,7 +4591,7 @@ envForm.addEventListener("submit", async (event) => {
     body: JSON.stringify(readEnvForm())
   });
   if (!result) return;
-  writeEnvForm(result.values ?? {});
+  writeEnvForm(result.values ?? {}, result.redactedKeys ?? []);
   showButtonFeedback(submitter, "Saved.");
   if (result.restartScheduled) {
     setStatus("Automatic restart in progress...");
@@ -4569,7 +4705,7 @@ document.querySelectorAll("[data-admin-section-target]").forEach((button) => {
       refreshXSessionAlerts().catch((error) => setStatus(error.message));
     }
     if (section === "settings") {
-      Promise.all([refreshServerAccessSettings(), refreshScoringSettings(), refreshXApiSettings()]).catch((error) =>
+      Promise.all([refreshServerAccessSettings(), refreshScoringSettings(), refreshTimelineUsers(), refreshXApiSettings()]).catch((error) =>
         setStatus(error.message)
       );
     }
@@ -4580,6 +4716,22 @@ document.querySelectorAll("[data-admin-section-target]").forEach((button) => {
       refreshEnvSettings().catch((error) => setStatus(error.message));
     }
     updateSessionPolling();
+  });
+});
+timelineUsersList?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-timeline-user-id]");
+  if (!button) return;
+  selectTimelineUser(button.dataset.timelineUserId);
+});
+timelineUserSave?.addEventListener("click", () => {
+  saveTimelineUser().catch((error) => {
+    if (timelineUsersStatus) timelineUsersStatus.textContent = error.message || "Unable to save timeline user.";
+  });
+});
+timelineUserClear?.addEventListener("click", clearTimelineUserForm);
+timelineUserDelete?.addEventListener("click", () => {
+  deleteTimelineUser().catch((error) => {
+    if (timelineUsersStatus) timelineUsersStatus.textContent = error.message || "Unable to delete timeline user.";
   });
 });
 document.querySelectorAll("[data-run-action]").forEach((button) => {
@@ -4821,6 +4973,7 @@ if (initialAdminSection && document.getElementById(`admin-section-${initialAdmin
 refreshStats()
   .then(refreshServerAccessSettings)
   .then(refreshScoringSettings)
+  .then(refreshTimelineUsers)
   .then(refreshXApiSettings)
   .then(refreshStaleKeywordUserPruneStatus)
   .then(refreshEnvSettings)

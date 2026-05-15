@@ -15,6 +15,24 @@ const timelineState = {
   hasMore: false
 };
 
+function cookieValue(name) {
+  const prefix = `${name}=`;
+  return document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix))
+    ?.slice(prefix.length);
+}
+
+function csrfHeaders(headers = {}) {
+  const token = cookieValue("redqueen_csrf");
+  return token ? { ...headers, "x-redqueenx-csrf": decodeURIComponent(token) } : headers;
+}
+
+function csrfFetch(url, options = {}) {
+  return fetch(url, { ...options, headers: csrfHeaders(options.headers || {}) });
+}
+
 async function applyPublicConfig() {
   if (adminLinks.length === 0) return;
   try {
@@ -168,6 +186,39 @@ function setTweetInlineStatus(sourceElement, message, tone = "info") {
   status.textContent = message;
 }
 
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function waitForMediaCacheJob(jobId, tweetId, sourceElement) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await wait(attempt === 0 ? 1200 : 2000);
+    const response = await fetch(`/timeline/media-cache/jobs/${encodeURIComponent(jobId)}`);
+    if (response.status === 401) {
+      location.href = "/timeline/login";
+      return false;
+    }
+    const result = await response.json().catch(() => ({ error: "Media job status failed" }));
+    if (!response.ok) {
+      throw new Error(result.error || "Media job status failed.");
+    }
+    const status = result.job?.status;
+    if (status === "completed") {
+      setTweetInlineStatus(sourceElement, "Media cache updated. Refreshing timeline...", "success");
+      timelineStatus.textContent = "Media loaded through VPN cache.";
+      return true;
+    }
+    if (status === "failed") {
+      throw new Error(result.job?.lastError || "Media cache worker failed.");
+    }
+    setTweetInlineStatus(sourceElement, `Media job ${status || "pending"}...`, "info");
+    timelineStatus.textContent = `Loading media for tweet ${tweetId} through Docker VPN worker...`;
+  }
+  setTweetInlineStatus(sourceElement, "Media job is still running. Refresh again in a moment.", "info");
+  timelineStatus.textContent = "Media job is still running in the Docker VPN worker.";
+  return false;
+}
+
 function renderTweetButtons(item, actionsEnabled) {
   if (!actionsEnabled) return "";
   if (!item.tweetId) return "";
@@ -249,6 +300,10 @@ async function refreshTimeline() {
     params.set("limit", String(timelineState.limit));
   }
   const response = await fetch(`/timeline/data?${params.toString()}`);
+  if (response.status === 401) {
+    location.href = "/timeline/login";
+    return;
+  }
   const data = await response.json();
   applyRawTimelineLinkState(data.rawTimelineEnabled);
   const items = Array.isArray(data.items) ? data.items : [];
@@ -568,14 +623,14 @@ async function mutateList(kind, action, value, button) {
   button.disabled = true;
   timelineStatus.textContent = action === "delete" ? `Removing ${normalizedValue} from ${kind}...` : `Adding ${normalizedValue} to ${kind}...`;
   setListButtonFeedback(button, action === "delete" ? "Removing..." : wasReadd ? "Rebanning..." : "Banning...");
-  const response = await fetch(`/admin/lists/${encodeURIComponent(kind)}`, {
+  const response = await csrfFetch(`/timeline/lists/${encodeURIComponent(kind)}`, {
     method: action === "delete" ? "DELETE" : "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ value: normalizedValue })
   });
   if (response.status === 401) {
     button.disabled = false;
-    timelineStatus.textContent = "Admin login required before editing lists.";
+    timelineStatus.textContent = "Timeline login required before editing lists.";
     setListButtonFeedback(button, "Login required.", "error");
     return;
   }
@@ -612,14 +667,14 @@ async function mutateListBatch(kind, action, values, button) {
   timelineStatus.textContent = action === "delete" ? `Removing ${normalizedValues.length} values from ${kind}...` : `Adding ${normalizedValues.length} values to ${kind}...`;
   setListButtonFeedback(button, action === "delete" ? "Removing..." : "Banning...");
   for (const value of normalizedValues) {
-    const response = await fetch(`/admin/lists/${encodeURIComponent(kind)}`, {
+    const response = await csrfFetch(`/timeline/lists/${encodeURIComponent(kind)}`, {
       method: action === "delete" ? "DELETE" : "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ value })
     });
     if (response.status === 401) {
       button.disabled = false;
-      timelineStatus.textContent = "Admin login required before editing lists.";
+      timelineStatus.textContent = "Timeline login required before editing lists.";
       setListButtonFeedback(button, "Login required.", "error");
       return;
     }
@@ -678,7 +733,7 @@ retryAbsTwimgFailures?.addEventListener("click", () => {
   retryAbsTwimgFailures.disabled = true;
   retryAbsTwimgFailures.textContent = "Retrying...";
   timelineStatus.textContent = "Queueing failed media retries...";
-  fetch("/admin/media-cache/retry-abs-twimg-failures", { method: "POST" })
+  csrfFetch("/admin/media-cache/retry-abs-twimg-failures", { method: "POST" })
     .then(async (response) => {
       if (response.status === 401) {
         timelineStatus.textContent = "Admin login required before retrying failed media.";
@@ -729,23 +784,39 @@ timeline.addEventListener("click", async (event) => {
     setMediaReloadLoading(tweetId, true);
     setTweetInlineStatus(mediaButton, "Loading media through VPN cache...");
     timelineStatus.textContent = "Loading media through VPN namespace...";
-    const response = await fetch(`/admin/tweets/${encodeURIComponent(tweetId)}/media-cache/reload`, { method: "POST" });
-    if (response.status === 401) {
+    try {
+      const response = await csrfFetch(`/timeline/tweets/${encodeURIComponent(tweetId)}/media-cache/reload`, { method: "POST" });
+      if (response.status === 401) {
+        setTweetInlineStatus(mediaButton, "Timeline login required before loading media.", "error");
+        timelineStatus.textContent = "Timeline login required before media can be fetched through VPN.";
+        location.href = "/timeline/login";
+        return;
+      }
+      const result = await response.json().catch(() => ({ error: "Media reload failed" }));
+      if (!response.ok) {
+        setTweetInlineStatus(mediaButton, result.error || "Media reload failed.", "error");
+        timelineStatus.textContent = result.error || "Media reload failed.";
+        return;
+      }
+      if (result.queued && result.jobId) {
+        setTweetInlineStatus(mediaButton, "Media job queued in Docker VPN worker...", "info");
+        timelineStatus.textContent = "Media job queued in Docker VPN worker.";
+        const completed = await waitForMediaCacheJob(result.jobId, tweetId, mediaButton);
+        if (completed) {
+          await refreshTimeline();
+        }
+      } else {
+        setTweetInlineStatus(mediaButton, "Media cache updated. Refreshing timeline...", "success");
+        timelineStatus.textContent = "Media loaded through VPN cache.";
+        await refreshTimeline();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Media reload failed.";
+      setTweetInlineStatus(mediaButton, message, "error");
+      timelineStatus.textContent = message;
+    } finally {
       setMediaReloadLoading(tweetId, false);
-      setTweetInlineStatus(mediaButton, "Admin login required before loading media. Log in from Admin, then retry.", "error");
-      timelineStatus.textContent = "Admin login required before media can be fetched through VPN.";
-      return;
     }
-    if (!response.ok) {
-      setMediaReloadLoading(tweetId, false);
-      const error = await response.json().catch(() => ({ error: "Media reload failed" }));
-      setTweetInlineStatus(mediaButton, error.error || "Media reload failed.", "error");
-      timelineStatus.textContent = error.error || "Media reload failed.";
-      return;
-    }
-    setTweetInlineStatus(mediaButton, "Media cache updated. Refreshing timeline...", "success");
-    timelineStatus.textContent = "Media loaded through VPN cache.";
-    await refreshTimeline();
     return;
   }
 
@@ -785,7 +856,7 @@ timeline.addEventListener("click", async (event) => {
   const tweetId = button.dataset.tweetId;
   button.disabled = true;
   timelineStatus.textContent = `${action === "like" ? "Favorite" : "Retweet"} in progress...`;
-  const response = await fetch(`/admin/tweets/${encodeURIComponent(tweetId)}/${action}`, { method: "POST" });
+  const response = await csrfFetch(`/admin/tweets/${encodeURIComponent(tweetId)}/${action}`, { method: "POST" });
   if (response.status === 401) {
     button.disabled = false;
     timelineStatus.textContent = "Admin action required: log in to Admin.";

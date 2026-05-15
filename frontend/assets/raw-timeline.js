@@ -18,6 +18,24 @@ const rawTimelineState = {
   hasMore: false
 };
 
+function cookieValue(name) {
+  const prefix = `${name}=`;
+  return document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix))
+    ?.slice(prefix.length);
+}
+
+function csrfHeaders(headers = {}) {
+  const token = cookieValue("redqueen_csrf");
+  return token ? { ...headers, "x-redqueenx-csrf": decodeURIComponent(token) } : headers;
+}
+
+function csrfFetch(url, options = {}) {
+  return fetch(url, { ...options, headers: csrfHeaders(options.headers || {}) });
+}
+
 async function applyPublicConfig() {
   if (adminLinks.length === 0) return;
   try {
@@ -227,13 +245,13 @@ async function acceptRejectedTweet(button) {
   button.textContent = "Accepting...";
   rawTimelineStatus.textContent = `Accepting ${tweetId} into Timeline...`;
   try {
-    const response = await fetch("/admin/rejected-timeline/accept", {
+    const response = await csrfFetch("/timeline/rejected-timeline/accept", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ runId, tweetId })
     });
     if (response.status === 401) {
-      rawTimelineStatus.textContent = "Admin login required before accepting a rejected tweet.";
+      rawTimelineStatus.textContent = "Timeline login required before accepting a rejected tweet.";
       return;
     }
     const result = await response.json().catch(() => ({ error: "Accept rejected tweet failed." }));
@@ -266,6 +284,10 @@ async function refreshRawTimeline() {
     params.append("reasonGroup", reasonGroup);
   }
   const response = await fetch(`/rejected-timeline/data?${params.toString()}`);
+  if (response.status === 401) {
+    location.href = "/timeline/login";
+    return;
+  }
   const data = await response.json();
   const items = Array.isArray(data.items) ? data.items : [];
   rawTimelineState.reasons = data.selectedRejectionReasons || rawTimelineState.reasons;
@@ -657,14 +679,14 @@ async function mutateList(kind, action, value, button) {
   button.disabled = true;
   rawTimelineStatus.textContent = action === "delete" ? `Removing ${normalizedValue} from ${kind}...` : `Adding ${normalizedValue} to ${kind}...`;
   setRawListButtonFeedback(button, action === "delete" ? "Removing..." : wasReadd ? "Rebanning..." : "Banning...");
-  const response = await fetch(`/admin/lists/${encodeURIComponent(kind)}`, {
+  const response = await csrfFetch(`/timeline/lists/${encodeURIComponent(kind)}`, {
     method: action === "delete" ? "DELETE" : "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ value: normalizedValue })
   });
   if (response.status === 401) {
     button.disabled = false;
-    rawTimelineStatus.textContent = "Admin login required before editing lists.";
+    rawTimelineStatus.textContent = "Timeline login required before editing lists.";
     setRawListButtonFeedback(button, "Login required.", "error");
     return;
   }
@@ -701,14 +723,14 @@ async function mutateListBatch(kind, action, values, button) {
   rawTimelineStatus.textContent = action === "delete" ? `Removing ${normalizedValues.length} values from ${kind}...` : `Adding ${normalizedValues.length} values to ${kind}...`;
   setRawListButtonFeedback(button, action === "delete" ? "Removing..." : "Banning...");
   for (const value of normalizedValues) {
-    const response = await fetch(`/admin/lists/${encodeURIComponent(kind)}`, {
+    const response = await csrfFetch(`/timeline/lists/${encodeURIComponent(kind)}`, {
       method: action === "delete" ? "DELETE" : "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ value })
     });
     if (response.status === 401) {
       button.disabled = false;
-      rawTimelineStatus.textContent = "Admin login required before editing lists.";
+      rawTimelineStatus.textContent = "Timeline login required before editing lists.";
       setRawListButtonFeedback(button, "Login required.", "error");
       return;
     }
@@ -788,7 +810,7 @@ rejectedTimelineClearAll?.addEventListener("click", () => {
   rejectedTimelineClearAll.disabled = true;
   rejectedTimelineClearAll.textContent = "Clearing...";
   rawTimelineStatus.textContent = "Clearing rejected timeline...";
-  fetch("/admin/rejected-timeline", { method: "DELETE" })
+  csrfFetch("/admin/rejected-timeline", { method: "DELETE" })
     .then(async (response) => {
       if (response.status === 401) {
         rawTimelineStatus.textContent = "Admin login required before clearing rejected timeline.";

@@ -10,10 +10,12 @@ const envSchema = z.object({
     .default("false")
     .transform((value) => value === "true"),
   ADMIN_AUTH_MODE: z.enum(["password", "mtls_proxy"]).default("password"),
+  ADMIN_MTLS_PROXY_SECRET: z.string().default(""),
   ADMIN_PUBLIC_URL: z
     .string()
     .default("")
     .transform((value) => value.trim()),
+  ADMIN_USERNAME: z.string().default("admin"),
   ADMIN_PASSWORD: z.string().optional(),
   ADMIN_PASSWORD_HASH: z.string().optional(),
   SESSION_SECRET: z.string().default("redqueenx-dev-session-secret"),
@@ -196,7 +198,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     adminPort: parsed.ADMIN_PORT,
     adminTrustProxy: parsed.ADMIN_TRUST_PROXY,
     adminAuthMode: parsed.ADMIN_AUTH_MODE,
+    adminMtlsProxySecret: parsed.ADMIN_MTLS_PROXY_SECRET,
     adminPublicUrl: parsed.ADMIN_PUBLIC_URL,
+    adminUsername: parsed.ADMIN_USERNAME,
     adminPassword: parsed.ADMIN_PASSWORD,
     adminPasswordHash: parsed.ADMIN_PASSWORD_HASH,
     sessionSecret: parsed.SESSION_SECRET,

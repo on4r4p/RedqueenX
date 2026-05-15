@@ -43,10 +43,14 @@ admin.example.com {
 
   handle / {
     rewrite * /admin
-    reverse_proxy 127.0.0.1:3005
+    reverse_proxy 127.0.0.1:3005 {
+      header_up X-RedqueenX-MTLS-Proxy-Secret {$REDQUEENX_ADMIN_MTLS_PROXY_SECRET}
+    }
   }
 
   handle {
-    reverse_proxy 127.0.0.1:3005
+    reverse_proxy 127.0.0.1:3005 {
+      header_up X-RedqueenX-MTLS-Proxy-Secret {$REDQUEENX_ADMIN_MTLS_PROXY_SECRET}
+    }
   }
 }

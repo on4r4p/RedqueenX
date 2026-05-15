@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-deploy_dir="${REDQUEENX_DEPLOY_DIR:-/opt/RedqueenX}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+default_deploy_dir="$(cd "$script_dir/../.." && pwd)"
+deploy_dir="${REDQUEENX_DEPLOY_DIR:-$default_deploy_dir}"
 compose_file="${REDQUEENX_COMPOSE_FILE:-compose.prod.yaml}"
 branch="${REDQUEENX_DEPLOY_BRANCH:-main}"
 log_file="${REDQUEENX_DEPLOY_LOG:-/var/log/redqueenx-deploy.log}"

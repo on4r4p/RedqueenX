@@ -386,9 +386,10 @@ async function runBrowserSearchLoop(input: {
 }) {
   const pacing = browserPacingConfig(input.config);
   let previousMouseProfile: MouseProfile | null = null;
-  let completedKeywords = parseRunStats(input.runs.get(input.runId)?.statsJson ?? "{}").completedKeywords;
-  let acceptedTotal = 0;
-  let rejectedTotal = 0;
+  const initialStats = parseRunStats(input.runs.get(input.runId)?.statsJson ?? "{}");
+  let completedKeywords = initialStats.completedKeywords;
+  let acceptedTotal = Math.max(0, Math.floor(Number(initialStats.acceptedTweets) || 0));
+  let rejectedTotal = Math.max(0, Math.floor(Number(initialStats.rejectedTweets) || 0));
   let searchesInWindow = 0;
   const keywordSummaries: BrowserKeywordSummary[] = [];
   let searchesBeforePause = searchesBeforePauseForKeywords(input.keywords.length - completedKeywords, input.config);

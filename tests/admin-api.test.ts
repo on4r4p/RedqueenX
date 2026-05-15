@@ -10,11 +10,23 @@ import { XBrowserAccountService } from "../src/admin/xBrowserAccountService";
 import { XSessionAlertService } from "../src/admin/xSessionAlertService";
 import { loadConfig } from "../src/config";
 
+function authHeadersFromSetCookie(setCookie: string | string[] | number | undefined): Record<string, string> {
+  const values = Array.isArray(setCookie) ? setCookie : setCookie === undefined ? [] : [String(setCookie)];
+  const cookiePairs = values.map((value) => value.split(";")[0]).filter(Boolean);
+  const csrfPair = cookiePairs.find((value) => value.startsWith("redqueen_csrf="));
+  const csrfToken = csrfPair?.slice("redqueen_csrf=".length);
+  return {
+    cookie: cookiePairs.join("; "),
+    ...(csrfToken ? { "x-redqueenx-csrf": decodeURIComponent(csrfToken) } : {})
+  };
+}
+
 describe("admin api", () => {
   it("trusts client-certificate proxy auth without exposing admin login", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-api-mtls-"));
     const config = loadConfig({
       ADMIN_AUTH_MODE: "mtls_proxy",
+      ADMIN_MTLS_PROXY_SECRET: "proxy-secret",
       ADMIN_TRUST_PROXY: "true",
       SESSION_SECRET: "test-session-secret",
       DATABASE_URL: path.join(tmp, "redqueenx.sqlite"),
@@ -29,10 +41,17 @@ describe("admin api", () => {
       currentSessionFilePath: path.join(tmp, "current-session.log")
     });
 
-    const adminPage = await app.inject({
+    const adminDenied = await app.inject({
       method: "GET",
       url: "/admin",
       headers: { accept: "text/html" }
+    });
+    expect(adminDenied.statusCode).toBe(403);
+
+    const adminPage = await app.inject({
+      method: "GET",
+      url: "/admin",
+      headers: { accept: "text/html", "x-redqueenx-mtls-proxy-secret": "proxy-secret" }
     });
     expect(adminPage.statusCode).toBe(200);
 
@@ -42,11 +61,15 @@ describe("admin api", () => {
     const loginPost = await app.inject({
       method: "POST",
       url: "/admin/login",
-      payload: { password: "secret" }
+      payload: { username: "admin", password: "secret" }
     });
     expect(loginPost.statusCode).toBe(404);
 
-    const serverAccess = await app.inject({ method: "GET", url: "/admin/settings/server-access" });
+    const serverAccess = await app.inject({
+      method: "GET",
+      url: "/admin/settings/server-access",
+      headers: { "x-redqueenx-mtls-proxy-secret": "proxy-secret" }
+    });
     expect(serverAccess.statusCode).toBe(200);
     expect(serverAccess.json().disabled).toBe(true);
 
@@ -188,18 +211,16 @@ describe("admin api", () => {
     const denied = await app.inject({ method: "GET", url: "/admin/stats" });
     expect(denied.statusCode).toBe(401);
 
-    const publicTimeline = await app.inject({ method: "GET", url: "/timeline" });
-    expect(publicTimeline.statusCode).toBe(200);
-    expect(publicTimeline.headers["content-type"]).toContain("text/html");
-    expect(publicTimeline.body).toContain("/assets/timeline.js");
-    const rawTimeline = await app.inject({ method: "GET", url: "/raw-timeline" });
-    expect(rawTimeline.statusCode).toBe(200);
-    expect(rawTimeline.body).toContain("/assets/raw-timeline.js");
-    const rejectedTimeline = await app.inject({ method: "GET", url: "/rejected-timeline" });
-    expect(rejectedTimeline.statusCode).toBe(200);
-    expect(rejectedTimeline.body).toContain("Rejected Timeline");
-    expect(rejectedTimeline.body).toContain('id="rejected-timeline-clear-all"');
-    expect(rejectedTimeline.body).toContain("/assets/raw-timeline.js");
+    const timelineLoginRedirect = await app.inject({
+      method: "GET",
+      url: "/timeline",
+      headers: { accept: "text/html" }
+    });
+    expect(timelineLoginRedirect.statusCode).toBe(302);
+    expect(timelineLoginRedirect.headers.location).toBe("/timeline/login");
+
+    const publicTimelineDataDenied = await app.inject({ method: "GET", url: "/timeline/data" });
+    expect(publicTimelineDataDenied.statusCode).toBe(401);
 
     const stylesheet = await app.inject({ method: "GET", url: "/assets/styles.css" });
     expect(stylesheet.statusCode).toBe(200);
@@ -214,26 +235,6 @@ describe("admin api", () => {
     expect(trinityIcon.statusCode).toBe(200);
     expect(trinityIcon.headers["content-type"]).toContain("image/x-icon");
 
-    const publicTimelineData = await app.inject({ method: "GET", url: "/timeline/data" });
-    expect(publicTimelineData.statusCode).toBe(200);
-    expect(publicTimelineData.json()).toEqual({
-      items: [],
-      pagination: { total: 0, limit: 50, offset: 0, hasMore: false },
-      rawTimelineEnabled: true,
-      actionsEnabled: false
-    });
-    const rawTimelineData = await app.inject({ method: "GET", url: "/raw-timeline/data" });
-    expect(rawTimelineData.statusCode).toBe(200);
-    expect(rawTimelineData.json()).toEqual({
-      enabled: true,
-      items: [],
-      availableRejectionReasons: [],
-      availableRejectionReasonGroups: [],
-      selectedRejectionReasons: [],
-      selectedRejectionReasonGroups: [],
-      pagination: { total: 0, limit: 50, offset: 0, hasMore: false }
-    });
-
     const adminPageDenied = await app.inject({
       method: "GET",
       url: "/admin",
@@ -245,13 +246,113 @@ describe("admin api", () => {
     const login = await app.inject({
       method: "POST",
       url: "/admin/login",
-      payload: { password: "secret" }
+      payload: { username: "admin", password: "secret" }
     });
     expect(login.statusCode).toBe(200);
     const cookie = login.headers["set-cookie"];
     expect(cookie).toBeDefined();
 
-    const authHeaders = { cookie: Array.isArray(cookie) ? cookie[0] : String(cookie) };
+    const authHeaders = authHeadersFromSetCookie(cookie);
+    const persistedEnv = fs.readFileSync(envPath, "utf8");
+    expect(persistedEnv).toContain("ADMIN_PASSWORD_HASH=");
+    expect(persistedEnv).not.toContain("ADMIN_PASSWORD=secret");
+
+    const mutationWithoutCsrf = await app.inject({
+      method: "POST",
+      url: "/admin/lists/keyword",
+      headers: { cookie: authHeaders.cookie },
+      payload: { value: "blocked-without-csrf" }
+    });
+    expect(mutationWithoutCsrf.statusCode).toBe(403);
+
+    const publicTimeline = await app.inject({ method: "GET", url: "/timeline", headers: authHeaders });
+    expect(publicTimeline.statusCode).toBe(200);
+    expect(publicTimeline.headers["content-type"]).toContain("text/html");
+    expect(publicTimeline.body).toContain("/assets/timeline.js");
+    const rawTimeline = await app.inject({ method: "GET", url: "/raw-timeline", headers: authHeaders });
+    expect(rawTimeline.statusCode).toBe(200);
+    expect(rawTimeline.body).toContain("/assets/raw-timeline.js");
+    const rejectedTimeline = await app.inject({ method: "GET", url: "/rejected-timeline", headers: authHeaders });
+    expect(rejectedTimeline.statusCode).toBe(200);
+    expect(rejectedTimeline.body).toContain("Rejected Timeline");
+    expect(rejectedTimeline.body).toContain('id="rejected-timeline-clear-all"');
+    expect(rejectedTimeline.body).toContain("/assets/raw-timeline.js");
+
+    const publicTimelineData = await app.inject({ method: "GET", url: "/timeline/data", headers: authHeaders });
+    expect(publicTimelineData.statusCode).toBe(200);
+    expect(publicTimelineData.json()).toEqual({
+      items: [],
+      pagination: { total: 0, limit: 50, offset: 0, hasMore: false },
+      rawTimelineEnabled: true,
+      actionsEnabled: false
+    });
+    const rawTimelineData = await app.inject({ method: "GET", url: "/raw-timeline/data", headers: authHeaders });
+    expect(rawTimelineData.statusCode).toBe(200);
+    expect(rawTimelineData.json()).toEqual({
+      enabled: true,
+      items: [],
+      availableRejectionReasons: [],
+      availableRejectionReasonGroups: [],
+      selectedRejectionReasons: [],
+      selectedRejectionReasonGroups: [],
+      pagination: { total: 0, limit: 50, offset: 0, hasMore: false }
+    });
+
+    const createTimelineUser = await app.inject({
+      method: "POST",
+      url: "/admin/timeline-users",
+      headers: authHeaders,
+      payload: { username: "viewer", password: "viewer-password" }
+    });
+    expect(createTimelineUser.statusCode).toBe(200);
+    expect(createTimelineUser.json().user).toMatchObject({ username: "viewer" });
+    expect(createTimelineUser.json().user.passwordHash).toBeUndefined();
+
+    const timelineUsers = await app.inject({ method: "GET", url: "/admin/timeline-users", headers: authHeaders });
+    expect(timelineUsers.statusCode).toBe(200);
+    expect(timelineUsers.json().users).toHaveLength(1);
+
+    const badTimelineLogin = await app.inject({
+      method: "POST",
+      url: "/timeline/login",
+      payload: { username: "viewer", password: "bad-password" }
+    });
+    expect(badTimelineLogin.statusCode).toBe(401);
+
+    const timelineLogin = await app.inject({
+      method: "POST",
+      url: "/timeline/login",
+      payload: { username: "viewer", password: "viewer-password" }
+    });
+    expect(timelineLogin.statusCode).toBe(200);
+    const timelineCookie = timelineLogin.headers["set-cookie"];
+    const timelineHeaders = authHeadersFromSetCookie(timelineCookie);
+
+    const timelineUserData = await app.inject({ method: "GET", url: "/timeline/data", headers: timelineHeaders });
+    expect(timelineUserData.statusCode).toBe(200);
+
+    const timelineUserAdminDenied = await app.inject({ method: "GET", url: "/admin/stats", headers: timelineHeaders });
+    expect(timelineUserAdminDenied.statusCode).toBe(401);
+
+    const timelineUserBansWord = await app.inject({
+      method: "POST",
+      url: "/timeline/lists/banned_word",
+      headers: timelineHeaders,
+      payload: { value: "timeline-user-ban" }
+    });
+    expect(timelineUserBansWord.statusCode).toBe(200);
+    expect(
+      database.prepare("SELECT raw_value FROM list_entries WHERE kind = 'banned_word' AND raw_value = ? AND is_deleted = 0").get(
+        "timeline-user-ban"
+      )
+    ).toEqual({ raw_value: "timeline-user-ban" });
+
+    const timelineUserAdminDeleteDenied = await app.inject({
+      method: "DELETE",
+      url: "/admin/rejected-timeline",
+      headers: timelineHeaders
+    });
+    expect(timelineUserAdminDeleteDenied.statusCode).toBe(401);
 
     database.prepare("INSERT INTO runs (id, status, started_at, updated_at, stats_json) VALUES (?, ?, ?, ?, ?)").run(
       "run-clear-rejected",
@@ -320,6 +421,66 @@ describe("admin api", () => {
         19,
         JSON.stringify(["score_too_low"])
       );
+    database
+      .prepare(
+        `INSERT INTO raw_timeline_tweets (
+          run_id,
+          tweet_id,
+          source_keyword,
+          text,
+          author_handle,
+          author_name,
+          tweet_url,
+          tweet_created_at,
+          retweet_count,
+          favorite_count,
+          decision_status,
+          score,
+          rejection_reasons_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        "run-clear-rejected",
+        "tweet-timeline-accept",
+        "timeline-keyword",
+        "timeline rejected tweet",
+        "@timeline",
+        "Timeline User",
+        "https://twitter.com/i/web/status/tweet-timeline-accept",
+        "2026-05-07T10:45:00.000Z",
+        7,
+        11,
+        "rejected",
+        13,
+        JSON.stringify(["score_too_low"])
+      );
+    const timelineAcceptRejectedTweet = await app.inject({
+      method: "POST",
+      url: "/timeline/rejected-timeline/accept",
+      headers: timelineHeaders,
+      payload: {
+        runId: "run-clear-rejected",
+        tweetId: "tweet-timeline-accept"
+      }
+    });
+    expect(timelineAcceptRejectedTweet.statusCode).toBe(200);
+    expect(timelineAcceptRejectedTweet.json()).toEqual({
+      ok: true,
+      tweetId: "tweet-timeline-accept",
+      runId: "run-clear-rejected"
+    });
+
+    const updateTimelineUserPassword = await app.inject({
+      method: "PATCH",
+      url: `/admin/timeline-users/${createTimelineUser.json().user.id}`,
+      headers: authHeaders,
+      payload: { username: "viewer", password: "viewer-password-2" }
+    });
+    expect(updateTimelineUserPassword.statusCode).toBe(200);
+    const oldTimelineCookieDenied = await app.inject({ method: "GET", url: "/timeline/data", headers: timelineHeaders });
+    expect(oldTimelineCookieDenied.statusCode).toBe(401);
+
     const acceptRejectedTweet = await app.inject({
       method: "POST",
       url: "/admin/rejected-timeline/accept",
@@ -372,7 +533,7 @@ describe("admin api", () => {
       total: 0
     });
     expect(database.prepare("SELECT COUNT(*) AS total FROM raw_timeline_tweets WHERE decision_status = 'accepted'").get()).toEqual({
-      total: 2
+      total: 3
     });
 
     const adminPage = await app.inject({
@@ -647,7 +808,7 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="reset-x-budget-button"');
     expect(adminPage.body).toContain('id="env-form"');
     expect(adminPage.body).toContain('id="session-log"');
-    expect(adminPage.body).toContain('id="session-stale-prune-status"');
+    expect(adminPage.body).not.toContain('id="session-stale-prune-status"');
     expect(adminPage.body).toContain('data-session-level="info"');
     expect(adminPage.body).toContain('data-session-level="prob"');
     expect(adminPage.body).toContain('data-session-level="debug"');
@@ -1214,14 +1375,14 @@ describe("admin api", () => {
     });
     expect(timelinePageSizeUpdate.statusCode).toBe(200);
     expect(timelinePageSizeUpdate.json().values.TIMELINE_DEFAULT_PAGE_SIZE).toBe("75");
-    const timelineDefaultPageSize = await app.inject({ method: "GET", url: "/timeline/data" });
+    const timelineDefaultPageSize = await app.inject({ method: "GET", url: "/timeline/data", headers: authHeaders });
     expect(timelineDefaultPageSize.statusCode).toBe(200);
     expect(timelineDefaultPageSize.json().pagination.limit).toBe(75);
-    const rawTimelineDefaultPageSize = await app.inject({ method: "GET", url: "/raw-timeline/data" });
+    const rawTimelineDefaultPageSize = await app.inject({ method: "GET", url: "/raw-timeline/data", headers: authHeaders });
     expect(rawTimelineDefaultPageSize.statusCode).toBe(200);
     expect(rawTimelineDefaultPageSize.json().pagination.limit).toBe(75);
     expect(rawTimelineDefaultPageSize.json().enabled).toBe(true);
-    const timelineExplicitPageSize = await app.inject({ method: "GET", url: "/timeline/data?limit=3" });
+    const timelineExplicitPageSize = await app.inject({ method: "GET", url: "/timeline/data?limit=3", headers: authHeaders });
     expect(timelineExplicitPageSize.statusCode).toBe(200);
     expect(timelineExplicitPageSize.json().pagination.limit).toBe(3);
     const rawTimelineDisable = await app.inject({
@@ -1236,10 +1397,10 @@ describe("admin api", () => {
     });
     expect(rawTimelineDisable.statusCode).toBe(200);
     expect(rawTimelineDisable.json().values.RAW_TIMELINE_ENABLED).toBe("false");
-    const timelineWithRawDisabled = await app.inject({ method: "GET", url: "/timeline/data" });
+    const timelineWithRawDisabled = await app.inject({ method: "GET", url: "/timeline/data", headers: authHeaders });
     expect(timelineWithRawDisabled.statusCode).toBe(200);
     expect(timelineWithRawDisabled.json().rawTimelineEnabled).toBe(false);
-    const rawTimelineDisabledData = await app.inject({ method: "GET", url: "/raw-timeline/data?offset=50" });
+    const rawTimelineDisabledData = await app.inject({ method: "GET", url: "/raw-timeline/data?offset=50", headers: authHeaders });
     expect(rawTimelineDisabledData.statusCode).toBe(200);
     expect(rawTimelineDisabledData.json()).toEqual({
       enabled: false,
@@ -2376,7 +2537,7 @@ describe("admin api", () => {
         url: "/admin/login",
         remoteAddress: "127.0.0.1",
         headers: { "x-forwarded-for": "203.0.113.5" },
-        payload: { password: "secret" }
+        payload: { username: "admin", password: "secret" }
       });
       expect(allowed.statusCode).toBe(200);
 
@@ -2385,7 +2546,7 @@ describe("admin api", () => {
         url: "/admin/login",
         remoteAddress: "127.0.0.1",
         headers: { "x-forwarded-for": "198.51.100.7" },
-        payload: { password: "secret" }
+        payload: { username: "admin", password: "secret" }
       });
       expect(blocked.statusCode).toBe(403);
       expect(blocked.json()).toEqual({ error: "Forbidden by RedqueenX access policy" });

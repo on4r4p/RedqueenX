@@ -68,6 +68,33 @@ describe("media cache", () => {
     expect(mediaCache.getServeableEntry(mediaCache.cacheIdForUrl(sourceUrl))).not.toBeNull();
   });
 
+  it("refuses to serve cache entries whose local path escapes the cache directory", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-media-cache-"));
+    const outside = path.join(os.tmpdir(), `redqueen-outside-${Date.now()}.jpg`);
+    const database = openMemoryDatabase();
+    const timeline = new TimelineTweetService(database);
+    const mediaCache = new MediaCacheService(database, {
+      enabled: true,
+      cacheDir: tmp,
+      ttlHours: 24,
+      maxBytes: 10 * 1024 * 1024,
+      maxFileBytes: 1024 * 1024
+    });
+
+    timeline.saveAcceptedFromTest("cloudflare", testTweet(), testDecision());
+    const raw = timeline.find("2050000000000000001")!;
+    const sourceUrl = testTweet().entities!.media![0].url!;
+    fs.writeFileSync(outside, "image-bytes");
+    mediaCache.upsertSuccess(sourceUrl, outside, "image/jpeg", 11);
+
+    const decorated = mediaCache.decorateTimelineItem(raw);
+    expect(decorated.media[0].cacheStatus).toBe("expired");
+    expect(decorated.media[0].cachedUrl).toBeNull();
+    expect(mediaCache.getServeableEntry(mediaCache.cacheIdForUrl(sourceUrl))).toBeNull();
+
+    fs.rmSync(outside, { force: true });
+  });
+
   it("marks expired or failed media without serving a stale remote URL", () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-media-cache-"));
     const database = openMemoryDatabase();

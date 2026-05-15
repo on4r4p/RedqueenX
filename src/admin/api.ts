@@ -16,7 +16,8 @@ import { isListKind, ListService } from "./listService";
 import { parseRunStats, RunService } from "./runService";
 import { LEGACY_FILE_MAPPINGS, LegacyImporter } from "../legacy/importer";
 import { executeAdminCommand } from "./commandParser";
-import { verifyAdminPassword } from "./auth";
+import { hashPassword, verifyAdminPassword, verifyPassword } from "./auth";
+import { signAuthToken, verifyAuthToken, type AuthTokenPayload } from "./authToken";
 import { LegacyTimelineService } from "./legacyTimeline";
 import { LIST_KINDS } from "../types";
 import {
@@ -37,7 +38,7 @@ import {
   type ServerAccessConfig
 } from "./serverAccess";
 import { normalizeHandle, normalizeValue } from "../text";
-import type { RunRecord, RunStats, TweetCandidate } from "../types";
+import type { ListKind, RunRecord, RunStats, TweetCandidate } from "../types";
 import { Crawler } from "../crawler";
 import { XApiClient } from "../x-client";
 import { XActionClient } from "../x-actions";
@@ -50,6 +51,7 @@ import { XBudgetExceededError, XBudgetService } from "../x-budget";
 import { looksLikeXApiCreditsDepleted, xApiCreditsDepletedMessage } from "../xApiErrors";
 import { XBrowserAccountService, type XBrowserAccountRecord } from "./xBrowserAccountService";
 import { XSessionAlertService, type XSessionAlertRecord } from "./xSessionAlertService";
+import { cleanTimelineUsername, TimelineUserService } from "./timelineUserService";
 import type { KeywordUserPruneMode, StaleKeywordUserPruneReport } from "../worker/staleKeywordUserPruner";
 
 const execFileAsync = promisify(execFile);
@@ -70,7 +72,41 @@ const maxListValueLength = 5_000;
 const maxCommandLength = 5_000;
 const maxImportContentLength = 10 * 1024 * 1024;
 const maxEnvValueLength = 10_000;
-const loginSchema = z.object({ password: z.string().max(1_000) });
+const csrfCookieName = "redqueen_csrf";
+const csrfHeaderName = "x-redqueenx-csrf";
+const mtlsProxySecretHeaderName = "x-redqueenx-mtls-proxy-secret";
+const loginRateLimitWindowMs = 15 * 60 * 1000;
+const loginRateLimitBlockMs = 15 * 60 * 1000;
+const loginRateLimitMaxAttempts = 8;
+const redactedEnvValue = "";
+const envSecretKeys = new Set([
+  "ADMIN_PASSWORD",
+  "ADMIN_PASSWORD_HASH",
+  "ADMIN_MTLS_PROXY_SECRET",
+  "SESSION_SECRET",
+  "X_BEARER_TOKEN",
+  "X_API_KEY",
+  "X_API_SECRET",
+  "X_ACCESS_TOKEN",
+  "X_ACCESS_SECRET",
+  "X_CLIENT_SECRET"
+]);
+const loginSchema = z.object({
+  username: z.string().min(1).max(120),
+  password: z.string().max(1_000)
+});
+const timelineUserCredentialSchema = z.object({
+  username: z.string().min(1).max(120),
+  password: z.string().min(1).max(1_000)
+});
+const timelineUserCreateSchema = z.object({
+  username: z.string().min(1).max(120),
+  password: z.string().min(8).max(1_000)
+});
+const timelineUserUpdateSchema = z.object({
+  username: z.string().min(1).max(120),
+  password: z.string().max(1_000).optional()
+});
 const listMutationSchema = z.object({ value: z.string().max(maxListValueLength) });
 const listUpdateSchema = z.object({ value: z.string().max(maxListValueLength) });
 const commandSchema = z.object({ command: z.string().min(1).max(maxCommandLength) });
@@ -400,7 +436,7 @@ export interface AdminApiOptions {
     | "enableXWrite"
     | "x"
   > &
-    Partial<Pick<AppConfig, "adminAuthMode" | "adminPublicUrl">>;
+    Partial<Pick<AppConfig, "adminAuthMode" | "adminMtlsProxySecret" | "adminPublicUrl" | "adminUsername">>;
   envPath?: string;
   restartSignalPath?: string;
   restartDelayMs?: number;
@@ -541,14 +577,18 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   const databaseAdmin = new DatabaseAdminService(options.database);
   const xBrowserAccounts = new XBrowserAccountService(options.database);
   const xSessionAlerts = new XSessionAlertService(options.database);
+  const timelineUsers = new TimelineUserService(options.database);
   const currentSession = new CurrentSessionService(options.currentSessionFilePath ?? options.config.currentSessionFile);
   const xBudget = new XBudgetService(options.database, () => getXApiConfig());
-  const sessions = new Set<string>();
   const requestStartTimes = new WeakMap<object, number>();
   const hostname = os.hostname();
   const adminAuthMode = options.config.adminAuthMode ?? "password";
   const adminPublicUrl = normalizePublicAdminUrl(options.config.adminPublicUrl);
+  const adminUsername = cleanTimelineUsername(options.config.adminUsername ?? "admin") || "admin";
+  let runtimeAdminPassword = options.config.adminPassword;
+  let runtimeAdminPasswordHash = options.config.adminPasswordHash;
   const usesProxyClientCertificateAuth = adminAuthMode === "mtls_proxy";
+  const loginRateLimits = new Map<string, { attempts: number; windowStartedAt: number; blockedUntil: number }>();
   let activeCrawlerRunId: string | null = null;
   let activeWithoutApiWorker: ChildProcess | null = null;
   let activeWithoutApiWorkerRunId: string | null = null;
@@ -572,6 +612,129 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       storedConfig ?? settings.getServerAccessConfig(DEFAULT_SERVER_ACCESS_CONFIG),
       serverAccessEnvConfig
     );
+
+  function readAdminAuth(request: FastifyRequest): AuthTokenPayload | null {
+    const token = verifyAuthToken(request.cookies.redqueen_admin, options.config.sessionSecret);
+    return token?.role === "admin" && token.sessionVersion === currentAdminSessionVersion() ? token : null;
+  }
+
+  function readTimelineAuth(request: FastifyRequest): AuthTokenPayload | null {
+    const adminToken = readAdminAuth(request);
+    if (adminToken) {
+      return adminToken;
+    }
+    const timelineToken = verifyAuthToken(request.cookies.redqueen_timeline, options.config.sessionSecret);
+    if (timelineToken?.role !== "timeline") {
+      return null;
+    }
+    const userId = timelineUserIdFromSubject(timelineToken.sub);
+    if (!userId) {
+      return null;
+    }
+    const user = timelineUsers.findById(userId);
+    if (!user || String(user.sessionVersion) !== timelineToken.sessionVersion) {
+      return null;
+    }
+    return { ...timelineToken, username: user.username };
+  }
+
+  function setAuthCookie(reply: FastifyReply, request: FastifyRequest, name: "redqueen_admin" | "redqueen_timeline", token: string): void {
+    reply.setCookie(name, token, {
+      httpOnly: true,
+      sameSite: "strict",
+      path: "/",
+      secure: isHttpsRequest(request)
+    });
+  }
+
+  function setCsrfCookie(reply: FastifyReply, request: FastifyRequest): string {
+    const token = crypto.randomBytes(32).toString("base64url");
+    reply.setCookie(csrfCookieName, token, {
+      httpOnly: false,
+      sameSite: "strict",
+      path: "/",
+      secure: isHttpsRequest(request)
+    });
+    return token;
+  }
+
+  function clearAuthCookie(reply: FastifyReply, name: "redqueen_admin" | "redqueen_timeline"): void {
+    reply.clearCookie(name, { path: "/" });
+  }
+
+  function currentAdminSessionVersion(): string {
+    return crypto
+      .createHash("sha256")
+      .update(adminUsername)
+      .update("\0")
+      .update(runtimeAdminPasswordHash ?? runtimeAdminPassword ?? "")
+      .digest("base64url")
+      .slice(0, 32);
+  }
+
+  function timelineUserIdFromSubject(subject: string): number | null {
+    const match = /^timeline:(\d+)$/.exec(subject);
+    if (!match) {
+      return null;
+    }
+    const id = Number(match[1]);
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+  }
+
+  function loginRateLimitKey(scope: "admin" | "timeline", request: FastifyRequest, username: string): string {
+    return `${scope}:${request.ip}:${cleanTimelineUsername(username).toLowerCase() || "unknown"}`;
+  }
+
+  function checkLoginRateLimit(
+    scope: "admin" | "timeline",
+    request: FastifyRequest,
+    username: string
+  ): { allowed: true } | { allowed: false; retryAfterSeconds: number } {
+    const now = Date.now();
+    const key = loginRateLimitKey(scope, request, username);
+    const existing = loginRateLimits.get(key);
+    if (existing?.blockedUntil && existing.blockedUntil > now) {
+      return { allowed: false, retryAfterSeconds: Math.ceil((existing.blockedUntil - now) / 1000) };
+    }
+
+    const entry =
+      existing && now - existing.windowStartedAt <= loginRateLimitWindowMs
+        ? existing
+        : { attempts: 0, windowStartedAt: now, blockedUntil: 0 };
+    entry.attempts += 1;
+    if (entry.attempts > loginRateLimitMaxAttempts) {
+      entry.blockedUntil = now + loginRateLimitBlockMs;
+      loginRateLimits.set(key, entry);
+      return { allowed: false, retryAfterSeconds: Math.ceil(loginRateLimitBlockMs / 1000) };
+    }
+
+    loginRateLimits.set(key, entry);
+    return { allowed: true };
+  }
+
+  function clearLoginRateLimit(scope: "admin" | "timeline", request: FastifyRequest, username: string): void {
+    loginRateLimits.delete(loginRateLimitKey(scope, request, username));
+  }
+
+  async function requireSameOriginMutation(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    scope: "admin" | "timeline"
+  ): Promise<boolean> {
+    if (isSameOriginMutationRequest(request) && hasValidCsrfToken(request)) {
+      return true;
+    }
+    await recordSession("prob", "security.csrf_blocked", `Blocked ${scope} mutation from a non-RedqueenX origin`, {
+      method: request.method,
+      path: safePath(request.url),
+      origin: headerValue(request.headers.origin) ?? null,
+      referer: headerValue(request.headers.referer) ?? null,
+      fetchSite: headerValue(request.headers["sec-fetch-site"]) ?? null,
+      csrfHeaderPresent: Boolean(headerValue(request.headers[csrfHeaderName]))
+    });
+    reply.code(403).send({ error: `Forbidden: ${scope} mutations require the RedqueenX origin and CSRF token.` });
+    return false;
+  }
 
   app.register(cookie, {
     secret: options.config.sessionSecret
@@ -649,45 +812,53 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.addHook("preHandler", async (request, reply) => {
-    if (!request.url.startsWith("/admin")) {
-      return;
-    }
+    const pathName = safePath(request.url);
 
-    if (isAdminLoginRoute(request.url)) {
-      return;
-    }
+    if (pathName.startsWith("/admin")) {
+      if (isAdminLoginRoute(request.url)) {
+        return;
+      }
 
-    if (usesProxyClientCertificateAuth) {
-      if (isAdminMutationRequest(request) && !isSameOriginMutationRequest(request)) {
-        await recordSession("prob", "security.csrf_blocked", "Blocked admin mutation from a non-admin origin", {
-          method: request.method,
-          path: safePath(request.url),
-          origin: headerValue(request.headers.origin) ?? null,
-          referer: headerValue(request.headers.referer) ?? null,
-          fetchSite: headerValue(request.headers["sec-fetch-site"]) ?? null
-        });
-        return reply.code(403).send({ error: "Forbidden: admin mutations require the RedqueenX origin." });
+      if (usesProxyClientCertificateAuth) {
+        if (!isTrustedMtlsProxyRequest(request, options.config.adminMtlsProxySecret)) {
+          await recordSession("prob", "security.mtls_proxy_header_missing", "Blocked admin request without trusted mTLS proxy header", {
+            method: request.method,
+            path: pathName
+          });
+          return reply.code(403).send({ error: "Forbidden: trusted client certificate proxy required." });
+        }
+        if (isAdminMutationRequest(request) && !(await requireSameOriginMutation(request, reply, "admin"))) {
+          return;
+        }
+        return;
+      }
+
+      if (!readAdminAuth(request)) {
+        if (request.method === "GET" && request.headers.accept?.includes("text/html")) {
+          return reply.redirect("/admin/login");
+        }
+        return reply.code(401).send({ error: "Admin authentication required" });
+      }
+
+      if (isAdminMutationRequest(request) && !(await requireSameOriginMutation(request, reply, "admin"))) {
+        return;
       }
       return;
     }
 
-    const sessionId = request.cookies.redqueen_session;
-    if (!sessionId || !sessions.has(sessionId)) {
+    if (!isTimelineProtectedPath(pathName)) {
+      return;
+    }
+
+    if (!readTimelineAuth(request)) {
       if (request.method === "GET" && request.headers.accept?.includes("text/html")) {
-        return reply.redirect("/admin/login");
+        return reply.redirect("/timeline/login");
       }
-      return reply.code(401).send({ error: "Authentication required" });
+      return reply.code(401).send({ error: "Timeline authentication required" });
     }
 
-    if (isAdminMutationRequest(request) && !isSameOriginMutationRequest(request)) {
-      await recordSession("prob", "security.csrf_blocked", "Blocked admin mutation from a non-admin origin", {
-        method: request.method,
-        path: safePath(request.url),
-        origin: headerValue(request.headers.origin) ?? null,
-        referer: headerValue(request.headers.referer) ?? null,
-        fetchSite: headerValue(request.headers["sec-fetch-site"]) ?? null
-      });
-      return reply.code(403).send({ error: "Forbidden: admin mutations require the RedqueenX origin." });
+    if (isTimelineMutationRequest(request) && !(await requireSameOriginMutation(request, reply, "timeline"))) {
+      return;
     }
   });
 
@@ -702,15 +873,75 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     reply.redirect("/timeline");
   });
 
-  app.get("/timeline", async (_request, reply) => {
+  app.get("/timeline/login", async (request, reply) => {
+    if (readTimelineAuth(request)) {
+      return reply.redirect("/timeline");
+    }
+    return sendFrontendPage(reply, pageRoot, "timeline-login.html");
+  });
+
+  app.post("/timeline/login", async (request, reply) => {
+    const parsed = timelineUserCredentialSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(401).send({ error: "Invalid timeline login" });
+      return;
+    }
+    const body = parsed.data;
+    const rateLimit = checkLoginRateLimit("timeline", request, body.username);
+    if (!rateLimit.allowed) {
+      await recordSession("prob", "timeline_auth.login.rate_limited", "Timeline login rate limit exceeded", {
+        username: cleanTimelineUsername(body.username),
+        retryAfterSeconds: rateLimit.retryAfterSeconds
+      });
+      reply.header("retry-after", String(rateLimit.retryAfterSeconds)).code(429).send({
+        error: "Too many login attempts. Try again later."
+      });
+      return;
+    }
+    const user = timelineUsers.findByUsername(body.username);
+    const valid = user ? await verifyPassword(body.password, user.passwordHash) : false;
+    if (!valid || !user) {
+      await recordSession("prob", "timeline_auth.login.failed", "Invalid timeline login attempt", {
+        username: cleanTimelineUsername(body.username)
+      });
+      reply.code(401).send({ error: "Invalid timeline login" });
+      return;
+    }
+
+    const token = signAuthToken(
+      { sub: `timeline:${user.id}`, role: "timeline", username: user.username, sessionVersion: user.sessionVersion },
+      options.config.sessionSecret
+    );
+    setAuthCookie(reply, request, "redqueen_timeline", token);
+    setCsrfCookie(reply, request);
+    clearLoginRateLimit("timeline", request, body.username);
+    await recordSession("info", "timeline_auth.login", "Timeline login accepted", { userId: user.id });
+    return { ok: true, user: { id: user.id, username: user.username } };
+  });
+
+  app.post("/timeline/logout", async (_request, reply) => {
+    clearAuthCookie(reply, "redqueen_timeline");
+    reply.clearCookie(csrfCookieName, { path: "/" });
+    return { ok: true };
+  });
+
+  app.get("/timeline/auth", async (request) => {
+    const token = readTimelineAuth(request);
+    return { ok: true, user: token ? { role: token.role, username: token.username } : null };
+  });
+
+  app.get("/timeline", async (request, reply) => {
+    setCsrfCookie(reply, request);
     return sendFrontendPage(reply, pageRoot, "timeline.html");
   });
 
-  app.get("/raw-timeline", async (_request, reply) => {
+  app.get("/raw-timeline", async (request, reply) => {
+    setCsrfCookie(reply, request);
     return sendFrontendPage(reply, pageRoot, "raw-timeline.html");
   });
 
-  app.get("/rejected-timeline", async (_request, reply) => {
+  app.get("/rejected-timeline", async (request, reply) => {
+    setCsrfCookie(reply, request);
     return sendFrontendPage(reply, pageRoot, "raw-timeline.html");
   });
 
@@ -760,45 +991,12 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   app.post("/admin/rejected-timeline/accept", async (request, reply) => {
     const body = rawTimelineAcceptSchema.parse(request.body ?? {});
-    const rawTweet = rawTimelineTweets.find(body.runId, body.tweetId);
-    if (!rawTweet) {
-      reply.code(404).send({ error: "Rejected timeline tweet not found." });
-      return;
-    }
-    if (rawTweet.decisionStatus !== "rejected") {
-      reply.code(409).send({ error: "Only rejected timeline tweets can be accepted manually." });
-      return;
-    }
+    return acceptRejectedTimelineTweet(body.runId, body.tweetId, reply, "admin");
+  });
 
-    options.database.transaction(() => {
-      timelineTweets.saveAcceptedManual({
-        keyword: rawTweet.keyword,
-        text: rawTweet.text,
-        tweetId: rawTweet.tweetId,
-        author: rawTweet.author,
-        authorName: rawTweet.authorName,
-        tweetUrl: rawTweet.tweetUrl,
-        tweetCreatedAt: rawTweet.tweetCreatedAt,
-        retweetCount: rawTweet.retweetCount,
-        favoriteCount: rawTweet.favoriteCount,
-        score: rawTweet.score,
-        reasons: ["manual_accept_from_rejected_timeline"]
-      });
-      rawTimelineTweets.markAccepted(body.runId, body.tweetId);
-    })();
-
-    await recordSession("info", "rejected_timeline.accepted", "Rejected timeline tweet accepted manually", {
-      runId: body.runId,
-      tweetId: body.tweetId,
-      keyword: rawTweet.keyword,
-      previousReasons: rawTweet.rejectionReasons,
-      score: rawTweet.score ?? 0
-    });
-    return {
-      ok: true,
-      tweetId: rawTweet.tweetId,
-      runId: rawTweet.runId
-    };
+  app.post("/timeline/rejected-timeline/accept", async (request, reply) => {
+    const body = rawTimelineAcceptSchema.parse(request.body ?? {});
+    return acceptRejectedTimelineTweet(body.runId, body.tweetId, reply, "timeline");
   });
 
   function rejectedTimelineDataResponse(rawQuery: unknown) {
@@ -859,7 +1057,31 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.post("/admin/tweets/:tweetId/media-cache/reload", async (request, reply) => {
-    const tweetId = getTweetIdParam(request.params);
+    return reloadTweetMediaCache(getTweetIdParam(request.params), "admin", reply);
+  });
+
+  app.post("/timeline/tweets/:tweetId/media-cache/reload", async (request, reply) => {
+    return reloadTweetMediaCache(getTweetIdParam(request.params), "timeline", reply);
+  });
+
+  app.get("/timeline/media-cache/jobs/:id", async (request, reply) => {
+    const job = mediaCacheJobs.find(getEntryIdParam(request.params));
+    if (!job) {
+      reply.code(404).send({ error: "Media cache job not found." });
+      return;
+    }
+    return {
+      job: {
+        id: job.id,
+        tweetId: job.tweetId,
+        status: job.status,
+        lastError: job.lastError,
+        updatedAt: job.updatedAt
+      }
+    };
+  });
+
+  async function reloadTweetMediaCache(tweetId: string, actor: "admin" | "timeline", reply: FastifyReply) {
     const xApiConfig = getXApiConfig();
     if (!xApiConfig.searchWithoutApiMediaCacheEnabled) {
       reply.code(403).send({ error: "Media cache download is disabled in Search without Api settings." });
@@ -875,17 +1097,19 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return { ok: true, sourceCount: 0, item: getMediaCache().decorateTimelineItem(tweet) };
     }
 
-    await recordSession("info", "media_cache.reload.requested", "Timeline media cache reload requested from admin", {
+    await recordSession("info", "media_cache.reload.requested", "Timeline media cache reload requested", {
       tweetId,
+      actor,
       sourceCount,
       viaVpnNamespace: xApiConfig.vpnNetnsName,
       isolation: xApiConfig.searchWithoutApiIsolation
     });
 
     if (usesDockerVpnIsolation(xApiConfig)) {
-      const job = mediaCacheJobs.enqueue(tweetId, "admin_reload");
+      const job = mediaCacheJobs.enqueue(tweetId, `${actor}_reload`);
       await recordSession("info", "media_cache.reload.queued", "Timeline media cache reload queued for Docker VPN worker", {
         tweetId,
+        actor,
         sourceCount,
         jobId: job.id
       });
@@ -918,10 +1142,10 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return { ok: true, sourceCount, item: updatedTweet ? getMediaCache().decorateTimelineItem(updatedTweet) : null };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to reload media through VPN.";
-      await recordSession("prob", "media_cache.reload.failed", message, { tweetId });
+      await recordSession("prob", "media_cache.reload.failed", message, { tweetId, actor });
       reply.code(502).send({ error: message });
     }
-  });
+  }
 
   app.post("/admin/media-cache/retry-abs-twimg-failures", async (request, reply) => {
     const xApiConfig = getXApiConfig();
@@ -1016,14 +1240,18 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
   });
 
-  app.get("/admin/login", async (_request, reply) => {
+  app.get("/admin/login", async (request, reply) => {
     if (usesProxyClientCertificateAuth) {
       return reply.code(404).type("text/plain").send("not found");
+    }
+    if (readAdminAuth(request)) {
+      return reply.redirect("/admin");
     }
     return sendFrontendPage(reply, pageRoot, "login.html");
   });
 
-  app.get("/admin", async (_request, reply) => {
+  app.get("/admin", async (request, reply) => {
+    setCsrfCookie(reply, request);
     return sendFrontendPage(reply, pageRoot, "admin.html");
   });
 
@@ -1042,40 +1270,114 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       reply.code(404).send({ error: "Admin password login is disabled when client certificate authentication is active." });
       return;
     }
-    const body = loginSchema.parse(request.body);
-    const valid = verifyAdminPassword(body.password, {
-      password: options.config.adminPassword,
-      passwordHash: options.config.adminPasswordHash
+    const parsed = loginSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(401).send({ error: "Invalid admin credentials" });
+      return;
+    }
+    const body = parsed.data;
+    const rateLimit = checkLoginRateLimit("admin", request, body.username);
+    if (!rateLimit.allowed) {
+      await recordSession("prob", "auth.login.rate_limited", "Admin login rate limit exceeded", {
+        username: cleanTimelineUsername(body.username),
+        retryAfterSeconds: rateLimit.retryAfterSeconds
+      });
+      reply.header("retry-after", String(rateLimit.retryAfterSeconds)).code(429).send({
+        error: "Too many login attempts. Try again later."
+      });
+      return;
+    }
+    const username = cleanTimelineUsername(body.username);
+    const validUsername = username.toLowerCase() === adminUsername.toLowerCase();
+    const validPassword = await verifyAdminPassword(body.password, {
+      password: runtimeAdminPassword,
+      passwordHash: runtimeAdminPasswordHash
     });
+    const valid = validUsername && validPassword;
 
     if (!valid) {
-      await recordSession("prob", "auth.login.failed", "Invalid admin login attempt");
-      reply.code(401).send({ error: "Invalid password" });
+      await recordSession("prob", "auth.login.failed", "Invalid admin login attempt", { username });
+      reply.code(401).send({ error: "Invalid admin credentials" });
       return;
     }
 
-    const sessionId = crypto.randomUUID();
-    sessions.add(sessionId);
-    reply.setCookie("redqueen_session", sessionId, {
-      httpOnly: true,
-      sameSite: "strict",
-      path: "/admin"
-    });
-    await recordSession("info", "auth.login", "Admin login accepted");
-    return { ok: true };
+    let passwordHashPersisted = Boolean(runtimeAdminPasswordHash);
+    if (!runtimeAdminPasswordHash && runtimeAdminPassword) {
+      const nextHash = await hashPassword(body.password);
+      runtimeAdminPasswordHash = nextHash;
+      runtimeAdminPassword = undefined;
+      try {
+        await env.update({ ADMIN_PASSWORD_HASH: nextHash, ADMIN_PASSWORD: "" });
+        passwordHashPersisted = true;
+      } catch (error) {
+        await recordSession("prob", "auth.password_hash_persist_failed", "Admin password hash could not be written to .env", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    const token = signAuthToken(
+      { sub: "admin", role: "admin", username: adminUsername, sessionVersion: currentAdminSessionVersion() },
+      options.config.sessionSecret
+    );
+    setAuthCookie(reply, request, "redqueen_admin", token);
+    setCsrfCookie(reply, request);
+    clearLoginRateLimit("admin", request, body.username);
+    reply.clearCookie("redqueen_session", { path: "/admin" });
+    await recordSession("info", "auth.login", "Admin login accepted", { passwordHashPersisted });
+    return { ok: true, passwordHashPersisted };
   });
 
   app.post("/admin/logout", async (request, reply) => {
     if (usesProxyClientCertificateAuth) {
+      reply.clearCookie(csrfCookieName, { path: "/" });
       return { ok: true, authMode: adminAuthMode };
     }
-    const sessionId = request.cookies.redqueen_session;
-    if (sessionId) {
-      sessions.delete(sessionId);
-    }
+    clearAuthCookie(reply, "redqueen_admin");
+    reply.clearCookie(csrfCookieName, { path: "/" });
     reply.clearCookie("redqueen_session", { path: "/admin" });
     await recordSession("info", "auth.logout", "Admin logout");
     return { ok: true };
+  });
+
+  app.get("/admin/timeline-users", async () => ({
+    users: timelineUsers.list()
+  }));
+
+  app.post("/admin/timeline-users", async (request, reply) => {
+    const body = timelineUserCreateSchema.parse(request.body ?? {});
+    try {
+      const user = timelineUsers.create({
+        username: body.username,
+        passwordHash: await hashPassword(body.password)
+      });
+      await recordSession("info", "timeline_user.created", "Timeline user created", { userId: user.id, username: user.username });
+      return { user };
+    } catch (error) {
+      reply.code(409).send({ error: error instanceof Error ? error.message : "Unable to create timeline user." });
+    }
+  });
+
+  app.patch("/admin/timeline-users/:id", async (request, reply) => {
+    const id = getEntryIdParam(request.params);
+    const body = timelineUserUpdateSchema.parse(request.body ?? {});
+    try {
+      const user = timelineUsers.update(id, {
+        username: body.username,
+        passwordHash: body.password && body.password.trim() ? await hashPassword(body.password) : undefined
+      });
+      await recordSession("info", "timeline_user.updated", "Timeline user updated", { userId: user.id, username: user.username });
+      return { user };
+    } catch (error) {
+      reply.code(404).send({ error: error instanceof Error ? error.message : "Unable to update timeline user." });
+    }
+  });
+
+  app.delete("/admin/timeline-users/:id", async (request) => {
+    const id = getEntryIdParam(request.params);
+    const deleted = timelineUsers.delete(id);
+    await recordSession("info", "timeline_user.deleted", "Timeline user deleted", { userId: id, deleted });
+    return { deleted };
   });
 
   app.get("/admin/stats", async () => {
@@ -1743,7 +2045,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const config = getXApiConfig();
     return {
       config,
-      values: xApiConfigToEnvValues(config)
+      values: redactEnvValues(xApiConfigToEnvValues(config)),
+      redactedKeys: Array.from(envSecretKeys)
     };
   });
 
@@ -1815,7 +2118,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     });
     return {
       config,
-      values,
+      values: redactEnvValues(values),
+      redactedKeys: Array.from(envSecretKeys),
       restartRequired: false,
       xApiModeShutdown,
       openVpn: {
@@ -2012,10 +2316,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.get("/admin/env", async () => ({
-    values: {
+    values: redactEnvValues({
       ...(await env.read()),
       ...xApiConfigToEnvValues(getXApiConfig())
-    }
+    }),
+    redactedKeys: Array.from(envSecretKeys)
   }));
 
   app.patch("/admin/env", async (request) => {
@@ -2027,7 +2332,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
     await recordSession("info", "env.updated", ".env updated", { restartScheduled });
     return {
-      values,
+      values: redactEnvValues(values),
+      redactedKeys: Array.from(envSecretKeys),
       restartRequired: true,
       restartScheduled
     };
@@ -2173,10 +2479,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return;
     }
     const body = listMutationSchema.parse(request.body);
-    const entry = lists.add(kind, body.value);
-    const removedKeywords = removeKeywordMatchingBannedWord(kind, body.value);
-    await recordSession("info", "list.add", "List entry added", { kind, entryId: entry.id, removedKeywords });
-    return { entry, removedKeywords };
+    return addListEntry(kind, body.value, "admin");
   });
 
   app.patch("/admin/lists/:kind/:id", async (request, reply) => {
@@ -2206,9 +2509,27 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return;
     }
     const body = listMutationSchema.parse(request.body);
-    const deleted = lists.markDeleted(kind, body.value);
-    await recordSession("info", "list.delete", "List entries deleted", { kind, deleted });
-    return { deleted };
+    return deleteListEntry(kind, body.value, "admin");
+  });
+
+  app.post("/timeline/lists/:kind", async (request, reply) => {
+    const kind = getTimelineListKindParam(request.params);
+    if (!kind) {
+      reply.code(404).send({ error: "Unknown timeline list action" });
+      return;
+    }
+    const body = listMutationSchema.parse(request.body);
+    return addListEntry(kind, body.value, "timeline");
+  });
+
+  app.delete("/timeline/lists/:kind", async (request, reply) => {
+    const kind = getTimelineListKindParam(request.params);
+    if (!kind) {
+      reply.code(404).send({ error: "Unknown timeline list action" });
+      return;
+    }
+    const body = listMutationSchema.parse(request.body);
+    return deleteListEntry(kind, body.value, "timeline");
   });
 
   app.delete("/admin/lists/:kind/:id", async (request, reply) => {
@@ -2228,6 +2549,67 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return 0;
     }
     return lists.markDeleted("keyword", value);
+  }
+
+  async function addListEntry(kind: ListKind, value: string, actor: "admin" | "timeline") {
+    const entry = lists.add(kind, value);
+    const removedKeywords = removeKeywordMatchingBannedWord(kind, value);
+    await recordSession("info", "list.add", "List entry added", { kind, entryId: entry.id, removedKeywords, actor });
+    return { entry, removedKeywords };
+  }
+
+  async function deleteListEntry(kind: ListKind, value: string, actor: "admin" | "timeline") {
+    const deleted = lists.markDeleted(kind, value);
+    await recordSession("info", "list.delete", "List entries deleted", { kind, deleted, actor });
+    return { deleted };
+  }
+
+  async function acceptRejectedTimelineTweet(
+    runId: string,
+    tweetId: string,
+    reply: FastifyReply,
+    actor: "admin" | "timeline"
+  ) {
+    const rawTweet = rawTimelineTweets.find(runId, tweetId);
+    if (!rawTweet) {
+      reply.code(404).send({ error: "Rejected timeline tweet not found." });
+      return;
+    }
+    if (rawTweet.decisionStatus !== "rejected") {
+      reply.code(409).send({ error: "Only rejected timeline tweets can be accepted manually." });
+      return;
+    }
+
+    options.database.transaction(() => {
+      timelineTweets.saveAcceptedManual({
+        keyword: rawTweet.keyword,
+        text: rawTweet.text,
+        tweetId: rawTweet.tweetId,
+        author: rawTweet.author,
+        authorName: rawTweet.authorName,
+        tweetUrl: rawTweet.tweetUrl,
+        tweetCreatedAt: rawTweet.tweetCreatedAt,
+        retweetCount: rawTweet.retweetCount,
+        favoriteCount: rawTweet.favoriteCount,
+        score: rawTweet.score,
+        reasons: ["manual_accept_from_rejected_timeline"]
+      });
+      rawTimelineTweets.markAccepted(runId, tweetId);
+    })();
+
+    await recordSession("info", "rejected_timeline.accepted", "Rejected timeline tweet accepted manually", {
+      runId,
+      tweetId,
+      keyword: rawTweet.keyword,
+      previousReasons: rawTweet.rejectionReasons,
+      score: rawTweet.score ?? 0,
+      actor
+    });
+    return {
+      ok: true,
+      tweetId: rawTweet.tweetId,
+      runId: rawTweet.runId
+    };
   }
 
   app.post("/admin/runs", async (_request, reply) => {
@@ -5743,6 +6125,31 @@ function isAdminMutationRequest(request: FastifyRequest): boolean {
   return request.url.startsWith("/admin") && ["DELETE", "PATCH", "POST", "PUT"].includes(request.method);
 }
 
+function isTimelineMutationRequest(request: FastifyRequest): boolean {
+  return isTimelineProtectedPath(safePath(request.url)) && ["DELETE", "PATCH", "POST", "PUT"].includes(request.method);
+}
+
+function isTimelineProtectedPath(pathName: string): boolean {
+  if (pathName === "/timeline/login") {
+    return false;
+  }
+  return (
+    pathName === "/timeline" ||
+    pathName === "/raw-timeline" ||
+    pathName === "/rejected-timeline" ||
+    pathName === "/timeline/data" ||
+    pathName === "/raw-timeline/data" ||
+    pathName === "/rejected-timeline/data" ||
+    pathName === "/timeline/auth" ||
+    pathName === "/timeline/logout" ||
+    pathName.startsWith("/timeline/lists/") ||
+    pathName.startsWith("/timeline/tweets/") ||
+    pathName.startsWith("/timeline/media-cache/jobs/") ||
+    pathName === "/timeline/rejected-timeline/accept" ||
+    pathName.startsWith("/media-cache/")
+  );
+}
+
 function isSameOriginMutationRequest(request: FastifyRequest): boolean {
   const fetchSite = headerValue(request.headers["sec-fetch-site"]);
   if (fetchSite === "cross-site") {
@@ -5769,6 +6176,41 @@ function isSameOriginMutationRequest(request: FastifyRequest): boolean {
   }
 
   return true;
+}
+
+function hasValidCsrfToken(request: FastifyRequest): boolean {
+  const cookieToken = request.cookies[csrfCookieName];
+  const headerToken = headerValue(request.headers[csrfHeaderName]);
+  if (!cookieToken || !headerToken) {
+    return false;
+  }
+  const cookieBuffer = Buffer.from(cookieToken);
+  const headerBuffer = Buffer.from(headerToken);
+  return cookieBuffer.length === headerBuffer.length && crypto.timingSafeEqual(cookieBuffer, headerBuffer);
+}
+
+function isTrustedMtlsProxyRequest(request: FastifyRequest, secret: string | undefined): boolean {
+  if (!secret) {
+    return true;
+  }
+  const actual = headerValue(request.headers[mtlsProxySecretHeaderName]);
+  if (!actual) {
+    return false;
+  }
+  const actualBuffer = Buffer.from(actual);
+  const expectedBuffer = Buffer.from(secret);
+  return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function redactEnvValues(values: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(values).map(([key, value]) => [key, envSecretKeys.has(key) && value ? redactedEnvValue : value])
+  );
+}
+
+function isHttpsRequest(request: FastifyRequest): boolean {
+  const forwardedProto = headerValue(request.headers["x-forwarded-proto"])?.split(",")[0]?.trim().toLowerCase();
+  return forwardedProto === "https" || Boolean((request.raw.socket as { encrypted?: boolean }).encrypted);
 }
 
 function originMatchesHost(origin: string, host: string): boolean {
@@ -7286,6 +7728,11 @@ const xApiEnvMap: Array<[XApiEnvKey, keyof XApiRuntimeConfig]> = [
 function getKindParam(params: unknown) {
   const kind = z.object({ kind: z.string() }).parse(params).kind;
   return isListKind(kind) ? kind : null;
+}
+
+function getTimelineListKindParam(params: unknown): ListKind | null {
+  const kind = getKindParam(params);
+  return kind === "banned_user" || kind === "banned_word" ? kind : null;
 }
 
 function getIdParam(params: unknown): string {

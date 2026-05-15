@@ -421,7 +421,13 @@ Docker admin service:
 ```env
 ADMIN_AUTH_MODE=mtls_proxy
 ADMIN_PUBLIC_URL=https://admin.example.com
+ADMIN_MTLS_PROXY_SECRET=<same-random-secret-as-caddy>
 ```
+
+Generate `ADMIN_MTLS_PROXY_SECRET` with `openssl rand -hex 32` and expose the
+same value to Caddy as `REDQUEENX_ADMIN_MTLS_PROXY_SECRET`. The example Caddyfile
+forwards that value in `X-RedqueenX-MTLS-Proxy-Secret`, so RedqueenX only trusts
+admin requests that actually came through the mTLS proxy.
 
 The public hostname serves the timeline and the deploy webhook. `/admin/*` on
 the public hostname redirects to the admin hostname. On the admin hostname,
