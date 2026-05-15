@@ -239,7 +239,23 @@ Docker is optional. For a normal local setup, start with the npm install above.
 Docker is mainly useful when RedqueenX runs on a separate machine and you want
 the browser worker, VPN, and admin service isolated into containers.
 
-To use Docker, set:
+On a server, the shortest path is:
+
+```bash
+./ops/vps-docker-up.sh
+```
+
+The script creates `.env` from `.env.example` if needed, adds the Docker defaults
+that are missing, pulls the published images, starts `admin`, `vpn`, and
+`worker`, then prints the local admin URL and SSH tunnel command.
+
+Before long runs, edit `.env` and set at least:
+
+- `ADMIN_PASSWORD` or `ADMIN_PASSWORD_HASH`
+- `SESSION_SECRET`
+- `VPN_CONFIG` and the matching OpenVPN auth file if your profile needs one
+
+To configure Docker manually instead, set:
 
 ```env
 SEARCH_WITHOUT_API_ISOLATION=docker_vpn
