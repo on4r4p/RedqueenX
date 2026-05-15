@@ -55,6 +55,15 @@ describe("admin api", () => {
     });
     expect(adminPage.statusCode).toBe(200);
 
+    const invalidRequest = await app.inject({
+      method: "GET",
+      url: "/admin/lists/keyword?limit=bad",
+      headers: { "x-redqueenx-mtls-proxy-secret": "proxy-secret" }
+    });
+    expect(invalidRequest.statusCode).toBe(400);
+    expect(invalidRequest.body).toContain("Invalid request payload.");
+    expect(invalidRequest.body).not.toContain("ZodError");
+
     const loginPage = await app.inject({ method: "GET", url: "/admin/login" });
     expect(loginPage.statusCode).toBe(404);
 
@@ -72,6 +81,43 @@ describe("admin api", () => {
     });
     expect(serverAccess.statusCode).toBe(200);
     expect(serverAccess.json().disabled).toBe(true);
+
+    await app.close();
+  });
+
+  it("blocks mTLS proxy auth without a shared secret from public remote addresses", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-api-mtls-source-"));
+    const config = loadConfig({
+      ADMIN_AUTH_MODE: "mtls_proxy",
+      ADMIN_TRUST_PROXY: "true",
+      SESSION_SECRET: "test-session-secret",
+      DATABASE_URL: path.join(tmp, "redqueenx.sqlite"),
+      CURRENT_SESSION_FILE: path.join(tmp, "current-session.log"),
+      X_API_ENABLED: "true"
+    });
+    const database = openMemoryDatabase();
+    const app = createAdminApi({
+      database,
+      config,
+      envPath: path.join(tmp, ".env"),
+      currentSessionFilePath: path.join(tmp, "current-session.log")
+    });
+
+    const publicRemote = await app.inject({
+      method: "GET",
+      url: "/admin",
+      headers: { accept: "text/html" },
+      remoteAddress: "203.0.113.10"
+    });
+    expect(publicRemote.statusCode).toBe(403);
+
+    const dockerBridgeRemote = await app.inject({
+      method: "GET",
+      url: "/admin",
+      headers: { accept: "text/html" },
+      remoteAddress: "172.18.0.1"
+    });
+    expect(dockerBridgeRemote.statusCode).toBe(200);
 
     await app.close();
   });
@@ -354,6 +400,29 @@ describe("admin api", () => {
     });
     expect(timelineUserAdminDeleteDenied.statusCode).toBe(401);
 
+    await app.inject({
+      method: "POST",
+      url: "/admin/lists/rss_feed",
+      headers: authHeaders,
+      payload: { value: "https://example.com/feed-a.xml" }
+    });
+    await app.inject({
+      method: "POST",
+      url: "/admin/lists/rss_feed",
+      headers: authHeaders,
+      payload: { value: "https://example.com/feed-b.xml" }
+    });
+    const deleteAllList = await app.inject({
+      method: "DELETE",
+      url: "/admin/lists/rss_feed/all",
+      headers: authHeaders
+    });
+    expect(deleteAllList.statusCode).toBe(200);
+    expect(deleteAllList.json()).toEqual({ kind: "rss_feed", deleted: 2 });
+    expect(database.prepare("SELECT COUNT(*) AS total FROM list_entries WHERE kind = 'rss_feed' AND is_deleted = 0").get()).toEqual({
+      total: 0
+    });
+
     database.prepare("INSERT INTO runs (id, status, started_at, updated_at, stats_json) VALUES (?, ?, ?, ?, ?)").run(
       "run-clear-rejected",
       "stopped",
@@ -562,6 +631,7 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="list-search"');
     expect(adminPage.body).toContain('id="download-list-button"');
     expect(adminPage.body).toContain('id="cleanup-lists-button"');
+    expect(adminPage.body).toContain('id="delete-all-list-button"');
     expect(adminPage.body).toContain('<option value="no_result">No.Result</option>');
     expect(adminPage.body).toContain('<option value="stale_keyword_user">Stale keyword users</option>');
     expect(adminPage.body).toContain('<option value="skipped_keyword_user">Skipped keyword users</option>');
@@ -646,9 +716,9 @@ describe("admin api", () => {
     expect(adminPage.body).not.toContain('id="openvpn-bulk-profile-auth-button"');
     expect(adminPage.body).toContain('id="openvpn-auth-modal"');
     expect(adminPage.body).toContain('id="openvpn-auth-form"');
-	    expect(adminPage.body).toContain('id="x-session-alert-header"');
-	    expect(adminPage.body).toContain('id="x-session-alert-resolve"');
-	    expect(adminPage.body).not.toContain('id="x-session-alert-ignore"');
+    expect(adminPage.body).toContain('id="x-session-alert-header"');
+    expect(adminPage.body).toContain('id="x-session-alert-resolve"');
+    expect(adminPage.body).toContain('id="x-session-alert-ignore"');
     expect(adminPage.body).toContain('id="x-browser-account-select"');
     expect(adminPage.body).toContain('id="x-browser-identifier"');
     expect(adminPage.body).toContain('id="x-browser-session-validation"');
@@ -675,9 +745,9 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="session-fullscreen-button"');
     expect(adminPage.body).not.toContain('id="session-grow-button"');
     expect(adminPage.body).not.toContain('id="session-shrink-button"');
-	    expect(adminPage.body).toContain('id="session-keywords-list"');
-	    expect(adminPage.body).toContain('id="toggle-inline-stale-keyword-users-button"');
-	    expect(adminPage.body).toContain('id="admin-section-tests"');
+    expect(adminPage.body).toContain('id="session-keywords-list"');
+    expect(adminPage.body).toContain('id="toggle-inline-stale-keyword-users-button"');
+    expect(adminPage.body).toContain('id="admin-section-tests"');
     expect(adminPage.body).toContain('data-admin-test="visible-x-login-vpn"');
     expect(adminPage.body).toContain('data-admin-test="media-cache"');
     expect(adminPage.body).toContain("Visible X login VPN preflight");
@@ -688,10 +758,10 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="x-session-alert-login"');
     expect(adminPage.body).toContain('id="x-session-alert-login-status"');
     expect(adminPage.body).toContain('id="x-session-alert-commands"');
-	    expect(adminPage.body).toContain('id="session-alert-detail-login"');
-	    expect(adminPage.body).toContain('id="session-alert-detail-login-status"');
-	    expect(adminPage.body).toContain('id="session-alert-detail-resolve"');
-	    expect(adminPage.body).not.toContain('id="session-alert-detail-ignore"');
+    expect(adminPage.body).toContain('id="session-alert-detail-login"');
+    expect(adminPage.body).toContain('id="session-alert-detail-login-status"');
+    expect(adminPage.body).toContain('id="session-alert-detail-resolve"');
+    expect(adminPage.body).toContain('id="session-alert-detail-ignore"');
     expect(adminPage.body).toContain('name="X_API_TOTAL_CREDIT_USED_USD"');
 
     const accountService = new XBrowserAccountService(database);
@@ -1529,6 +1599,7 @@ describe("admin api", () => {
           SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: "12",
           SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: "true",
           SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: "true",
+          SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN: "7",
           SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: "true",
           SEARCH_WITHOUT_API_MAX_RETRIES: "4",
           SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS: "30",
@@ -1553,6 +1624,7 @@ describe("admin api", () => {
       SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: "12",
       SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: "true",
       SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: "true",
+      SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN: "7",
       SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: "true",
       SEARCH_WITHOUT_API_MAX_RETRIES: "4",
       SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS: "30",
@@ -1572,6 +1644,7 @@ describe("admin api", () => {
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT=12");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM=true");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER=true");
+    expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN=7");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT=true");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_MAX_RETRIES=4");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS=30");

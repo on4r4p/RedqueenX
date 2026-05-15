@@ -127,25 +127,32 @@ function xLoginCommand(accountId: number, config: Pick<AppConfig, "searchWithout
     : `npm run netns:x-login -- --account-id ${accountId}`;
 }
 
-function manualVerificationRecommendation(accountId: number, config: Pick<AppConfig, "searchWithoutApiIsolation">): string {
+function manualVerificationRecommendation(accountId: number, config: Pick<AppConfig, "searchWithoutApiIsolation" | "xLoginNovncPort">): string {
   if (config.searchWithoutApiIsolation !== "docker_vpn") {
     return defaultManualVerificationRecommendation(accountId);
   }
+  const noVncUrl = dockerNoVncUrl(config.xLoginNovncPort);
+  const tunnelCommand = dockerNoVncTunnelCommand(config.xLoginNovncPort);
   return [
     "No more scraping or login will run for this X account until this alert is resolved.",
     "Log in manually from the usual IP/VPN profile used by this X account.",
     "Let the human solve CAPTCHA/2FA/challenge manually.",
     "The Docker visible login flow uses noVNC, so it works without host Wayland/X11 forwarding.",
+    `If RedqueenX runs on a VPS, keep x-login running on the VPS and run this tunnel from your local PC: ${tunnelCommand}.`,
+    `Then open ${noVncUrl} in your local browser.`,
     "Return here after the session is saved, then mark the alert as resolved with a note.",
     `Recommended Docker commands: docker compose run --rm --service-ports x-login --account-id ${accountId} --resolve-alert; open the noVNC URL printed by the command; press Enter in the terminal after X is visibly logged in; docker compose exec worker npm run diagnose:vpn.`
   ].join(" ");
 }
 
-function manualVerificationCommands(accountId: number, config: Pick<AppConfig, "searchWithoutApiIsolation">): string[] {
+function manualVerificationCommands(accountId: number, config: Pick<AppConfig, "searchWithoutApiIsolation" | "xLoginNovncPort">): string[] {
   return config.searchWithoutApiIsolation === "docker_vpn"
     ? [
         `docker compose run --rm --service-ports x-login --account-id ${accountId} --resolve-alert`,
-        "Open http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale, or tunnel that port from the VPS.",
+        `noVNC URL: ${dockerNoVncUrl(config.xLoginNovncPort)}`,
+        "If RedqueenX runs on a VPS, keep x-login running on the VPS and run this from your local PC:",
+        dockerNoVncTunnelCommand(config.xLoginNovncPort),
+        `Then open locally: ${dockerNoVncUrl(config.xLoginNovncPort)}`,
         "docker compose exec worker npm run diagnose:vpn",
         "docker compose up -d worker"
       ]
@@ -155,6 +162,14 @@ function manualVerificationCommands(accountId: number, config: Pick<AppConfig, "
         "npm run netns:diagnose",
         "npm run netns:worker"
       ];
+}
+
+function dockerNoVncUrl(port: number): string {
+  return `http://127.0.0.1:${port}/vnc.html?autoconnect=1&resize=scale`;
+}
+
+function dockerNoVncTunnelCommand(port: number): string {
+  return `ssh -L ${port}:127.0.0.1:${port} <user>@<vps-host>`;
 }
 
 async function main() {
@@ -225,12 +240,13 @@ async function main() {
 
     const existingStats = parseRunStats(run.statsJson);
     const existingKeywords = args.smoke ? [] : runs.keywords(run.id, 5_000).map((item) => item.keyword);
-    const canResumeExistingPlan =
+    const canReuseExistingPlan =
       existingKeywords.length > 0 &&
       existingStats.completedKeywords < existingKeywords.length &&
-      existingStats.remainingKeywords > 0;
-    const keywords = canResumeExistingPlan ? existingKeywords : keywordPlan.keywords;
-    if (!canResumeExistingPlan) {
+      existingStats.remainingKeywords > 0 &&
+      (existingStats.completedKeywords > 0 || browserRunPlanMatchesConfig(existingStats, config));
+    const keywords = canReuseExistingPlan ? existingKeywords : keywordPlan.keywords;
+    if (!canReuseExistingPlan) {
       runs.replaceKeywords(run.id, keywords);
       runs.updateStats(run.id, createBrowserRunStats(keywords.length, config, keywordPlan.availableKeywords, existingStats));
     } else {
@@ -238,25 +254,25 @@ async function main() {
     }
     await record(
       "info",
-      args.smoke ? "browser.search.smoke.plan" : canResumeExistingPlan ? "browser.search.plan.resumed" : "browser.search.plan",
+      args.smoke ? "browser.search.smoke.plan" : canReuseExistingPlan ? "browser.search.plan.resumed" : "browser.search.plan",
       args.smoke
         ? "Without-API smoke test plan prepared"
-        : canResumeExistingPlan
+        : canReuseExistingPlan
           ? "Without-API browser search resumed from existing keyword plan"
           : "Without-API browser search plan prepared",
       {
-      runId: run.id,
-      accountId: account.id,
-      xIdentifier: account.xIdentifier,
-      vpnProfilePath: config.vpnConfig,
-      totalKeywords: keywords.length,
-      completedKeywords: canResumeExistingPlan ? existingStats.completedKeywords : 0,
-      remainingKeywords: canResumeExistingPlan ? existingStats.remainingKeywords : keywords.length,
-      resumedExistingPlan: canResumeExistingPlan,
-      availableKeywords: canResumeExistingPlan ? existingStats.availableKeywords : keywordPlan.availableKeywords,
-      sessionKeywordLimit: canResumeExistingPlan ? existingStats.sessionKeywordLimit : keywordPlan.configuredLimit,
-      randomSessionKeywordLimit: canResumeExistingPlan ? existingStats.sessionKeywordLimitRandom : keywordPlan.randomized,
-      randomizeKeywordOrder: canResumeExistingPlan ? existingStats.randomizeKeywordOrder : keywordPlan.orderRandomized,
+        runId: run.id,
+        accountId: account.id,
+        xIdentifier: account.xIdentifier,
+        vpnProfilePath: config.vpnConfig,
+        totalKeywords: keywords.length,
+        completedKeywords: canReuseExistingPlan ? existingStats.completedKeywords : 0,
+        remainingKeywords: canReuseExistingPlan ? existingStats.remainingKeywords : keywords.length,
+        resumedExistingPlan: canReuseExistingPlan,
+        availableKeywords: canReuseExistingPlan ? existingStats.availableKeywords : keywordPlan.availableKeywords,
+        sessionKeywordLimit: canReuseExistingPlan ? existingStats.sessionKeywordLimit : keywordPlan.configuredLimit,
+        randomSessionKeywordLimit: canReuseExistingPlan ? existingStats.sessionKeywordLimitRandom : keywordPlan.randomized,
+        randomizeKeywordOrder: canReuseExistingPlan ? existingStats.randomizeKeywordOrder : keywordPlan.orderRandomized,
         oneKeywordPerSearch: true,
         smokeTest: Boolean(args.smoke),
         smokeKeywordPool: args.smoke ? SMOKE_KEYWORDS : undefined
@@ -1552,7 +1568,15 @@ function searchesBeforePauseForKeywords(remainingKeywords: number, config: Retur
     return 0;
   }
   const manualMin = Math.max(1, Math.floor(config.searchWithoutApiRequestsBeforePauseMin));
-  return Math.min(remaining, manualMin);
+  return manualMin;
+}
+
+function browserRunPlanMatchesConfig(stats: RunStats, config: ReturnType<typeof loadConfig>): boolean {
+  return (
+    stats.sessionKeywordLimit === config.searchWithoutApiSessionKeywordLimit &&
+    Boolean(stats.sessionKeywordLimitRandom) === Boolean(config.searchWithoutApiSessionKeywordLimitRandom) &&
+    Boolean(stats.randomizeKeywordOrder) === Boolean(config.searchWithoutApiRandomizeKeywordOrder)
+  );
 }
 
 function browserPacingConfig(config: ReturnType<typeof loadConfig>): HumanPacingConfig {

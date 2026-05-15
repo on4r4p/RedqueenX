@@ -7,11 +7,33 @@ The project supports two operating modes:
 - **X API mode**: uses official X API credentials and budget limits.
 - **Search without API mode**: uses Playwright through a Linux network namespace and OpenVPN so only the browser worker uses the VPN network.
 
+## Screenshots
+
+Screenshots are optional, but useful if you want the README to show the UI.
+Put them here:
+
+```text
+docs/screenshots/timeline.png
+docs/screenshots/admin-lists.png
+docs/screenshots/session-alerts.png
+docs/screenshots/settings.png
+```
+
+Then add the images in this section, for example:
+
+```md
+![Timeline](docs/screenshots/timeline.png)
+![Admin lists](docs/screenshots/admin-lists.png)
+![Session alerts](docs/screenshots/session-alerts.png)
+![Settings](docs/screenshots/settings.png)
+```
+
 ## Local Installation
 
 ```bash
 npm install
 cp .env.example .env
+npm run env:sync -- --dry-run
 ```
 
 Edit `.env` before starting:
@@ -211,9 +233,11 @@ runtime/netns-openvpn-autostart.log
 
 If a run is blocked by an X session alert, resolve the account manually from the usual VPN/IP profile first, then mark the alert as resolved in admin.
 
-## Docker Deployment Without VNC
+## Docker / Server Use
 
-Docker is optional. The local install above still uses the existing `host_netns` isolation backend by default.
+Docker is optional. For a normal local setup, start with the npm install above.
+Docker is mainly useful when RedqueenX runs on a separate machine and you want
+the browser worker, VPN, and admin service isolated into containers.
 
 To use Docker, set:
 
@@ -229,16 +253,15 @@ export REDQUEENX_GID=$(id -g)
 docker compose up -d admin vpn worker
 ```
 
-Docker services are split deliberately:
+The stack is split into a few services:
 
-- `admin`: non-privileged RedqueenX admin server exposed on `127.0.0.1:${ADMIN_PORT:-3005}` for a host reverse proxy; no Docker socket is mounted.
-- `caddy`: optional HTTPS reverse proxy to `admin:${ADMIN_PORT:-3005}`. It only starts with the `caddy` profile.
+- `admin`: RedqueenX admin server exposed on `127.0.0.1:${ADMIN_PORT:-3005}`.
 - `vpn`: the only service with `NET_ADMIN` and `/dev/net/tun`; it runs OpenVPN and applies an internal kill switch.
 - `worker`: shares `vpn` networking with `network_mode: service:vpn`; it picks up without-API runs and media-cache jobs from SQLite.
-- `x-login`: temporary service for visible X login only; it runs Chrome on Xvfb and exposes it through noVNC on localhost.
+- `x-login`: temporary service for visible X login only; it opens a browser through noVNC on localhost.
 - `init-runtime`: one-shot helper that creates persistent runtime directories and fixes ownership for the configured UID/GID.
 
-When Caddy is already installed on the host, point the host Caddy to the Docker admin port:
+If you put the admin UI behind a reverse proxy, proxy to the local Docker admin port:
 
 ```caddyfile
 your-domain.example {
@@ -252,7 +275,8 @@ For a self-contained local Docker stack with the bundled Caddy container, use:
 docker compose --profile caddy up -d admin vpn worker caddy
 ```
 
-In Docker mode, admin does not call `npm run netns:*`. `Load medias` records a media-cache job in SQLite, then the Docker worker downloads it through the VPN container. The full `.env` file is not injected into every service environment: `admin` mounts it read/write for settings, `worker` and `x-login` mount it read-only, and `vpn` receives only explicit VPN variables.
+In Docker mode, `Load medias` records a media-cache job in SQLite. The worker
+then downloads the media through the VPN container.
 
 For visible X login, launch the temporary noVNC service:
 
@@ -269,8 +293,10 @@ http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale
 If RedqueenX runs on a remote host, keep noVNC bound to `127.0.0.1` and use an SSH tunnel:
 
 ```bash
-ssh -L 6080:127.0.0.1:6080 user@example.com
+ssh -L 6080:127.0.0.1:6080 <user>@<server-host>
 ```
+
+Keep that SSH tunnel open on your local computer, keep the `x-login` command running on the remote host, then open the same `http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale` URL in your local browser.
 
 The noVNC port is controlled by `X_LOGIN_NOVNC_PORT`.
 Docker login can use Chrome or Firefox with `X_LOGIN_BROWSER`; Firefox is the recommended fallback when X rejects Chrome with onboarding code 399. In Firefox noVNC mode, close the Firefox window after X Home is visible; RedqueenX then extracts the cookies and saves the session, so no terminal Enter is required.
@@ -306,131 +332,6 @@ docker compose exec worker npm run diagnose:vpn
 
 The route check must show `dev tun...`. If OpenVPN is stopped or `tun+` disappears, the worker and media fetcher fail closed instead of using the host route.
 
-### Signed Webhook Deploy
-
-The repo includes a signed webhook config in `ops/webhook/hooks.json`.
-Do not commit the real secret. On the target server, replace
-the placeholder secret in `ops/webhook/hooks.json` with a long random value,
-then configure the same value in the webhook sender.
-
-Recommended server layout:
-
-```bash
-sudo mkdir -p /opt
-sudo git clone https://example.com/<owner>/<repo>.git /opt/RedqueenX
-cd /opt/RedqueenX
-cp .env.example .env
-openssl rand -hex 32
-# Put that generated value in the secret field in ops/webhook/hooks.json.
-sudo cp ops/webhook/redqueenx-webhook.service.example /etc/systemd/system/redqueenx-webhook.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now redqueenx-webhook
-```
-
-Edit host Caddy with the route from `ops/webhook/Caddyfile.redqueenx.example`,
-then reload Caddy:
-
-```bash
-sudo caddy validate --config /etc/caddy/Caddyfile
-sudo systemctl reload caddy
-```
-
-Configure the webhook sender with:
-
-- Payload URL: `https://example.com/hooks/redqueenx-deploy`
-- Content type: `application/json`
-- Secret: the same value placed in `ops/webhook/hooks.json` on the server
-- Event: the push event for the deployed branch
-- Active: enabled
-
-This webhook is separate from any CI or registry secrets. Registry credentials
-are only needed if another system builds or pushes Docker images.
-
-The distribution-provided `webhook.service` is not used by this setup. Use the
-project service named `redqueenx-webhook.service`; the generic service may stay
-inactive unless you intentionally manage `/etc/webhook.conf`.
-
-### Docker Publish Workflow
-
-`.github/workflows/docker-publish.yml` builds one Docker image from the repo and
-pushes it to the service tags used by `compose.prod.yaml`:
-
-- `redqueenx-admin`
-- `redqueenx-worker`
-- `redqueenx-vpn`
-- `redqueenx-init-runtime`
-- `redqueenx-x-login`
-
-Configure these repository secrets in the CI provider before enabling the
-workflow:
-
-- `DOCKERHUB_USERNAME`
-- `DOCKERHUB_TOKEN`
-- `REDQUEENX_DEPLOY_WEBHOOK_URL`, for example `https://example.com/hooks/redqueenx-deploy`
-- `REDQUEENX_DEPLOY_WEBHOOK_SECRET`, matching the HMAC secret in `ops/webhook/hooks.json`
-
-On a push to `main`, the workflow pushes `latest` and `sha-<commit>` tags, then
-calls the signed deploy webhook.
-
-### Admin Access Hardening
-
-The safest setup is to keep the admin UI off the public web and expose only the
-deploy webhook route. Use `ops/webhook/Caddyfile.redqueenx.private-admin.example`
-on the host, then open the admin panel through an SSH tunnel:
-
-```bash
-ssh -L 3005:127.0.0.1:3005 root@example.com
-```
-
-Then open `http://127.0.0.1:3005` locally. In this mode, the public domain only
-serves `/hooks/redqueenx-deploy`; the admin UI is reachable only through SSH.
-
-If public browser access is required, use mTLS on a separate hostname, for
-example `admin.example.com`, and keep `example.com` for the
-deploy webhook. Do not require mTLS on the webhook hostname unless the webhook
-sender can present the required client certificate.
-
-Generate a client CA and a browser-importable certificate on the host:
-
-```bash
-sudo mkdir -p /etc/caddy/redqueenx-client-auth
-cd /etc/caddy/redqueenx-client-auth
-
-sudo openssl genrsa -out redqueenx-client-ca.key 4096
-sudo openssl req -x509 -new -nodes -key redqueenx-client-ca.key -sha256 -days 3650 \
-  -out redqueenx-client-ca.crt -subj "/CN=RedqueenX Client CA"
-
-sudo openssl genrsa -out client.key 4096
-sudo openssl req -new -key client.key -out client.csr -subj "/CN=redqueenx-admin-client"
-sudo openssl x509 -req -in client.csr -CA redqueenx-client-ca.crt \
-  -CAkey redqueenx-client-ca.key -CAcreateserial -out client.crt -days 365 -sha256
-
-sudo openssl pkcs12 -export -inkey client.key -in client.crt \
-  -certfile redqueenx-client-ca.crt -out client.p12
-
-sudo chmod 600 *.key *.p12
-sudo chmod 644 *.crt
-```
-
-Import `client.p12` into the browser, then use
-`ops/webhook/Caddyfile.redqueenx.mtls-admin.example` as the Caddy route.
-
-For this mTLS layout, set these values in `.env` before restarting the
-Docker admin service:
-
-```env
-ADMIN_AUTH_MODE=mtls_proxy
-ADMIN_PUBLIC_URL=https://admin.example.com
-ADMIN_MTLS_PROXY_SECRET=<same-random-secret-as-caddy>
-```
-
-Generate `ADMIN_MTLS_PROXY_SECRET` with `openssl rand -hex 32` and expose the
-same value to Caddy as `REDQUEENX_ADMIN_MTLS_PROXY_SECRET`. The example Caddyfile
-forwards that value in `X-RedqueenX-MTLS-Proxy-Secret`, so RedqueenX only trusts
-admin requests that actually came through the mTLS proxy.
-
-The public hostname serves the timeline and the deploy webhook. `/admin/*` on
-the public hostname redirects to the admin hostname. On the admin hostname,
-Caddy requires the browser client certificate and `/admin/login` intentionally
-returns 404; local password login remains available only when
-`ADMIN_AUTH_MODE=password`.
+Keep the admin port bound to localhost when RedqueenX is on a server. Put your
+own reverse proxy or SSH tunnel in front of it depending on how you want to
+access the UI.

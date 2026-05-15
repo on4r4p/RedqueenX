@@ -11,6 +11,7 @@ const xSessionAlertCommands = document.getElementById("x-session-alert-commands"
 const xSessionAlertLogin = document.getElementById("x-session-alert-login");
 const xSessionAlertLoginStatus = document.getElementById("x-session-alert-login-status");
 const xSessionAlertNote = document.getElementById("x-session-alert-note");
+const xSessionAlertIgnore = document.getElementById("x-session-alert-ignore");
 const xSessionAlertResolve = document.getElementById("x-session-alert-resolve");
 const sessionAlertsRefreshButton = document.getElementById("session-alerts-refresh-button");
 const sessionAlertsSummary = document.getElementById("session-alerts-summary");
@@ -20,6 +21,7 @@ const sessionAlertDetail = document.getElementById("session-alert-detail");
 const sessionAlertDetailNote = document.getElementById("session-alert-detail-note");
 const sessionAlertDetailLogin = document.getElementById("session-alert-detail-login");
 const sessionAlertDetailLoginStatus = document.getElementById("session-alert-detail-login-status");
+const sessionAlertDetailIgnore = document.getElementById("session-alert-detail-ignore");
 const sessionAlertDetailResolve = document.getElementById("session-alert-detail-resolve");
 const editKind = document.getElementById("edit-kind");
 const entryValue = document.getElementById("entry-value");
@@ -29,6 +31,7 @@ const deleteSelectedButton = document.getElementById("delete-selected-button");
 const clearSelectionButton = document.getElementById("clear-selection-button");
 const downloadListButton = document.getElementById("download-list-button");
 const cleanupListsButton = document.getElementById("cleanup-lists-button");
+const deleteAllListButton = document.getElementById("delete-all-list-button");
 const activeListLabel = document.getElementById("active-list-label");
 const listSearch = document.getElementById("list-search");
 const listContent = document.getElementById("list-content");
@@ -623,7 +626,7 @@ const adminTooltipByName = {
   ADMIN_HOST: "Network address used by the admin HTTP server.",
   ADMIN_PORT: "Port used by the admin HTTP server.",
   ADMIN_PASSWORD: "Password required to access the admin interface.",
-  SESSION_SECRET: "Secret used to sign admin cookies.",
+  SESSION_SECRET: "Secret used to sign JWT cookies for admin and timeline sessions.",
   DATABASE_URL: "SQLite database file used by the TypeScript service.",
   CURRENT_SESSION_FILE: "Path to the live session log file.",
   RSS_FALLBACK_FEED_LIMIT: "Maximum number of RSS feeds used by legacy fallback logic.",
@@ -651,6 +654,7 @@ const adminTooltipById = {
   "download-list-button": "Download the currently selected list as a local file.",
   "delete-selected-button": "Delete the selected list entry from active use.",
   "clear-selection-button": "Clear the selected row and return to add mode.",
+  "delete-all-list-button": "Delete every active entry in the currently selected list after confirmation.",
   "cleanup-lists-button":
     "Clean editable lists: remove duplicates, empty rows, keywords blocked by bans, and stale/skipped user conflicts.",
   "stale-keyword-user-days": "Remove @keywords when the latest visible tweet from that user is older than this many days.",
@@ -1694,7 +1698,7 @@ function renderXBrowserAccountDetail(account, vpnProfilePath = currentVpnProfile
   const lock = account.openAlert ? ` LOCKED by alert #${account.openAlert.id}: ${account.openAlert.alertType}.` : "";
   const noVnc = currentSearchIsolation() === "docker_vpn" ? ` noVNC: ${xLoginNoVncUrl()}.` : "";
   xBrowserAccountDetail.textContent = `${account.sessionStatus} - ${session}.${linked}${lastLogin}${ip}${lock}${noVnc}`;
-  xBrowserLoginCommand.textContent = xLoginCommand(account.id);
+  xBrowserLoginCommand.textContent = xLoginCommandDisplay(account.id);
   renderXBrowserLoginHelp(account);
 }
 
@@ -1706,10 +1710,12 @@ function renderXBrowserLoginHelp(account) {
   }
   if (currentSearchIsolation() === "docker_vpn") {
     const noVncUrl = xLoginNoVncUrl();
+    const tunnelCommand = xLoginSshTunnelCommand();
     xBrowserLoginHelp.innerHTML =
-      `Docker login uses a browser-based noVNC window, not a local desktop window. ` +
-      `Run the command, open <a href="${escapeAttribute(noVncUrl)}" target="_blank" rel="noreferrer">${escapeHtml(noVncUrl)}</a>, ` +
-      `log in to X inside that page, then press Enter in the terminal to save the session. ` +
+      `Run the command on the machine running Docker. It opens X in noVNC, not in a local desktop window. ` +
+      `On a local machine, open <a href="${escapeAttribute(noVncUrl)}" target="_blank" rel="noreferrer">${escapeHtml(noVncUrl)}</a>. ` +
+      `On a VPS, keep the x-login terminal open on the VPS. From your local PC, open a second terminal and run <code>${escapeHtml(tunnelCommand)}</code>, replacing <code>&lt;user&gt;@&lt;vps-host&gt;</code> with your SSH login. Then open the same URL locally. ` +
+      `Log in to X inside noVNC, then press Enter in the x-login terminal to save the session. ` +
       `With Firefox, the session is saved automatically when X Home is visible. Use the noVNC side-panel clipboard if host paste does not sync.`;
     return;
   }
@@ -1718,8 +1724,16 @@ function renderXBrowserLoginHelp(account) {
 }
 
 function xLoginNoVncUrl() {
-  const noVncPort = searchWithoutApiForm.elements.X_LOGIN_NOVNC_PORT?.value || "6080";
-  return `http://127.0.0.1:${noVncPort}/vnc.html?autoconnect=1&resize=scale`;
+  return `http://127.0.0.1:${xLoginNoVncPort()}/vnc.html?autoconnect=1&resize=scale`;
+}
+
+function xLoginNoVncPort() {
+  return searchWithoutApiForm.elements.X_LOGIN_NOVNC_PORT?.value || "6080";
+}
+
+function xLoginSshTunnelCommand() {
+  const noVncPort = xLoginNoVncPort();
+  return `ssh -L ${noVncPort}:127.0.0.1:${noVncPort} <user>@<vps-host>`;
 }
 
 function currentSearchIsolation() {
@@ -1757,6 +1771,18 @@ function xLoginCommand(accountId, extraArgs = "") {
       ? `docker compose run --rm --service-ports x-login --account-id ${accountId}`
       : `npm run netns:x-login -- --account-id ${accountId}`;
   return extraArgs ? `${base} ${extraArgs}` : base;
+}
+
+function xLoginCommandDisplay(accountId, extraArgs = "") {
+  const command = xLoginCommand(accountId, extraArgs);
+  if (currentSearchIsolation() !== "docker_vpn") {
+    return command;
+  }
+  return [
+    command,
+    `# noVNC: ${xLoginNoVncUrl()}`,
+    `# VPS tunnel from your local PC: ${xLoginSshTunnelCommand()}`
+  ].join("\n");
 }
 
 function xLoginAlertArgs() {
@@ -2179,6 +2205,30 @@ async function cleanupLists() {
   }
 }
 
+async function deleteAllSelectedListEntries() {
+  const kind = editKind.value;
+  const label = editKind.selectedOptions?.[0]?.textContent?.trim() || kind;
+  const confirmed = window.confirm(
+    `Delete every active entry from ${label}?\n\nThis only marks entries as deleted, but the list will become empty in active use. Continue?`
+  );
+  if (!confirmed) {
+    setStatus("Delete all list cancelled.");
+    return;
+  }
+  if (deleteAllListButton) deleteAllListButton.disabled = true;
+  try {
+    const result = await jsonFetch(`/admin/lists/${encodeURIComponent(kind)}/all`, { method: "DELETE" });
+    if (!result) return;
+    setStatus(`Deleted ${result.deleted ?? 0} active entr${result.deleted === 1 ? "y" : "ies"} from ${label}.`);
+    showButtonFeedback(deleteAllListButton, "Deleted.");
+    clearSelection();
+    await refreshStats();
+    await refreshList();
+  } finally {
+    if (deleteAllListButton) deleteAllListButton.disabled = false;
+  }
+}
+
 function showAdminSection(sectionId) {
   document.querySelectorAll("[data-admin-section-target]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.adminSectionTarget === sectionId);
@@ -2286,6 +2336,10 @@ function renderXSessionAlertHeader() {
       xSessionAlertLogin.dataset.alertId = "";
       xSessionAlertLogin.disabled = true;
     }
+    if (xSessionAlertIgnore) {
+      xSessionAlertIgnore.dataset.alertId = "";
+      xSessionAlertIgnore.disabled = true;
+    }
     updateManualLoginStatus("", "");
     return;
   }
@@ -2310,6 +2364,10 @@ function renderXSessionAlertHeader() {
     xSessionAlertLogin.dataset.alertId = String(alert.id);
     xSessionAlertLogin.disabled = false;
   }
+  if (xSessionAlertIgnore) {
+    xSessionAlertIgnore.dataset.alertId = String(alert.id);
+    xSessionAlertIgnore.disabled = false;
+  }
   if (xSessionAlertResolve) {
     xSessionAlertResolve.dataset.alertId = String(alert.id);
   }
@@ -2321,10 +2379,16 @@ function renderXSessionAlertHeader() {
 function formatXSessionAlertCommands(alert) {
   if (!alert) return "";
   if (currentSearchIsolation() === "docker_vpn") {
+    const noVncUrl = xLoginNoVncUrl();
+    const tunnelCommand = xLoginSshTunnelCommand();
     return [
       "Terminal fallback:",
-      `  ${xLoginCommand(alert.accountId, xLoginAlertArgs())}`,
-      `  Open ${xLoginNoVncUrl()}`,
+      indentBlock(xLoginCommandDisplay(alert.accountId, xLoginAlertArgs()), "  "),
+      `  noVNC URL: ${noVncUrl}`,
+      "  If RedqueenX runs on a VPS, keep x-login running on the VPS. From your local PC, open a second terminal and run:",
+      `  ${tunnelCommand}`,
+      "  Replace <user>@<vps-host> with your real SSH login, for example root@your-server.",
+      `  Then open locally: ${noVncUrl}`,
       "  docker compose exec worker npm run diagnose:vpn",
       "  docker compose up -d worker",
       "",
@@ -2344,6 +2408,13 @@ function formatXSessionAlertCommands(alert) {
   ].join("\n");
 }
 
+function indentBlock(text, prefix) {
+  return String(text)
+    .split("\n")
+    .map((line) => `${prefix}${line}`)
+    .join("\n");
+}
+
 async function resolveCurrentXSessionAlert() {
   const alertId = xSessionAlertResolve?.dataset.alertId;
   const note = xSessionAlertNote?.value?.trim() || "";
@@ -2356,6 +2427,18 @@ async function resolveSelectedXSessionAlert() {
   const note = sessionAlertDetailNote?.value?.trim() || "";
   if (!alertId) return;
   await resolveXSessionAlert(alertId, note, sessionAlertDetailResolve, sessionAlertDetailNote);
+}
+
+async function ignoreCurrentXSessionAlert() {
+  const alertId = xSessionAlertIgnore?.dataset.alertId;
+  if (!alertId) return;
+  await ignoreXSessionAlert(alertId, xSessionAlertIgnore);
+}
+
+async function ignoreSelectedXSessionAlert() {
+  const alertId = selectedXSessionAlertId || sessionAlertDetailIgnore?.dataset.alertId;
+  if (!alertId) return;
+  await ignoreXSessionAlert(alertId, sessionAlertDetailIgnore);
 }
 
 async function resolveXSessionAlert(alertId, note, feedbackTarget, noteElement) {
@@ -2375,6 +2458,32 @@ async function resolveXSessionAlert(alertId, note, feedbackTarget, noteElement) 
   selectedXSessionAlertId = null;
   if (xSessionAlertNote) xSessionAlertNote.value = "";
   if (sessionAlertDetailNote) sessionAlertDetailNote.value = "";
+  await refreshXSessionAlerts();
+  await refreshXBrowserAccounts();
+  await maybeOfferResumeInterruptedRun({ afterXSessionAlert: true });
+}
+
+async function ignoreXSessionAlert(alertId, feedbackTarget) {
+  const alert = findXSessionAlert(alertId);
+  const label = alert?.xIdentifier || `alert #${alertId}`;
+  const confirmed = window.confirm(
+    [
+      `Ignore X session alert for ${label}?`,
+      "",
+      "This unlocks the X browser account without saving a fresh session.",
+      "Use it only when you are sure the alert is a false positive or the saved session is still usable."
+    ].join("\n")
+  );
+  if (!confirmed) return;
+
+  const result = await jsonFetch(`/admin/x-session-alerts/${encodeURIComponent(alertId)}/ignore`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+  if (!result) return;
+  showButtonFeedback(feedbackTarget, "Ignored.");
+  setStatus(`X session alert ignored for ${result.alert?.xIdentifier || label}.`);
+  selectedXSessionAlertId = null;
   await refreshXSessionAlerts();
   await refreshXBrowserAccounts();
   await maybeOfferResumeInterruptedRun({ afterXSessionAlert: true });
@@ -2580,6 +2689,10 @@ function renderSelectedSessionAlert(alert) {
       sessionAlertDetailLogin.disabled = true;
       sessionAlertDetailLogin.dataset.alertId = "";
     }
+    if (sessionAlertDetailIgnore) {
+      sessionAlertDetailIgnore.disabled = true;
+      sessionAlertDetailIgnore.dataset.alertId = "";
+    }
     if (sessionAlertDetailNote) sessionAlertDetailNote.value = "";
     updateManualLoginStatus("", "");
     return;
@@ -2612,6 +2725,10 @@ function renderSelectedSessionAlert(alert) {
   if (sessionAlertDetailLogin) {
     sessionAlertDetailLogin.dataset.alertId = String(alert.id);
     sessionAlertDetailLogin.disabled = resolved;
+  }
+  if (sessionAlertDetailIgnore) {
+    sessionAlertDetailIgnore.dataset.alertId = String(alert.id);
+    sessionAlertDetailIgnore.disabled = resolved;
   }
   if (sessionAlertDetailNote) {
     sessionAlertDetailNote.disabled = resolved;
@@ -3100,10 +3217,9 @@ function formatSearchesBeforePause(stats, runtimeModes = {}) {
   if (stats.browserAlertAutoRestartAt) {
     return `alert retry ${stats.browserAlertRetryCount ?? 0} / ${stats.browserAlertMaxRetries ?? 0}`;
   }
-  const remainingKeywords = Math.max(0, Number(stats.remainingKeywords ?? 0));
   const completedInWindow = Math.max(0, Number(stats.apiCallsUsed ?? 0));
-  const limit = Math.min(Math.max(0, Number(stats.apiCallLimit ?? 0)), remainingKeywords + completedInWindow);
-  const remaining = Math.min(Math.max(0, Number(stats.apiCallsRemaining ?? 0)), limit);
+  const limit = Math.max(0, Number(stats.apiCallLimit ?? 0));
+  const remaining = Math.max(0, Number(stats.apiCallsRemaining ?? Math.max(0, limit - completedInWindow)));
   if (remaining <= 0 && stats.nextApiResetAt) {
     const resetAt = Date.parse(stats.nextApiResetAt);
     if (Number.isFinite(resetAt)) {
@@ -4403,6 +4519,10 @@ cleanupListsButton?.addEventListener("click", () => {
   cleanupLists().catch((error) => setStatus(error.message));
 });
 
+deleteAllListButton?.addEventListener("click", () => {
+  deleteAllSelectedListEntries().catch((error) => setStatus(error.message));
+});
+
 scoringForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitter = event.submitter;
@@ -4745,6 +4865,9 @@ xSessionAlertResolve?.addEventListener("click", () => {
 xSessionAlertLogin?.addEventListener("click", () => {
   launchXSessionAlertLogin(xSessionAlertLogin.dataset.alertId, xSessionAlertLogin).catch((error) => setStatus(error.message));
 });
+xSessionAlertIgnore?.addEventListener("click", () => {
+  ignoreCurrentXSessionAlert().catch((error) => setStatus(error.message));
+});
 sessionAlertsRefreshButton?.addEventListener("click", () => {
   refreshXSessionAlerts().catch((error) => setStatus(error.message));
 });
@@ -4764,6 +4887,9 @@ sessionAlertDetailLogin?.addEventListener("click", () => {
   launchXSessionAlertLogin(sessionAlertDetailLogin.dataset.alertId, sessionAlertDetailLogin).catch((error) =>
     setStatus(error.message)
   );
+});
+sessionAlertDetailIgnore?.addEventListener("click", () => {
+  ignoreSelectedXSessionAlert().catch((error) => setStatus(error.message));
 });
 sessionAlertDetail?.addEventListener("click", (event) => {
   const button = event.target.closest("[data-alert-snapshot-id]");

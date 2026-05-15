@@ -747,7 +747,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   void recordSession("info", "server.started", "Admin API started", { pid: process.pid });
 
   app.addHook("onRequest", async (request, reply) => {
-    applySecurityHeaders(reply);
+    applySecurityHeaders(request, reply);
     requestStartTimes.set(request, performance.now());
     if (!usesProxyClientCertificateAuth) {
       const accessDecision = isServerAccessAllowed(getEffectiveServerAccessConfig(), request.ip);
@@ -803,12 +803,27 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   app.setErrorHandler((error, request, reply) => {
     const httpError = error as Error & { statusCode?: number };
-    void recordSession("prob", "http.error", httpError.message, {
+    const statusCode = httpError.statusCode ?? (error instanceof z.ZodError ? 400 : 500);
+    void recordSession(statusCode >= 500 ? "prob" : "debug", "http.error", httpError.message, {
       method: request.method,
       path: safePath(request.url),
-      statusCode: httpError.statusCode ?? 500
+      statusCode
     });
-    reply.send(error);
+    if (reply.sent) {
+      return;
+    }
+    if (error instanceof z.ZodError) {
+      reply.code(400).send({
+        error: "Invalid request payload.",
+        issues: error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
+      });
+      return;
+    }
+    if (statusCode >= 500) {
+      reply.code(500).send({ error: "Internal server error" });
+      return;
+    }
+    reply.code(statusCode).send({ error: httpError.message || "Request failed" });
   });
 
   app.addHook("preHandler", async (request, reply) => {
@@ -826,6 +841,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
             path: pathName
           });
           return reply.code(403).send({ error: "Forbidden: trusted client certificate proxy required." });
+        }
+        if (!options.config.adminMtlsProxySecret && !isTrustedMtlsProxySourceAddress(request.ip)) {
+          await recordSession("prob", "security.mtls_proxy_untrusted_source", "Blocked admin request from an untrusted proxy source", {
+            method: request.method,
+            path: pathName,
+            ip: request.ip
+          });
+          return reply.code(403).send({ error: "Forbidden: mTLS proxy mode requires a local trusted reverse proxy." });
         }
         if (isAdminMutationRequest(request) && !(await requireSameOriginMutation(request, reply, "admin"))) {
           return;
@@ -1609,7 +1632,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
           account,
           commands,
           message:
-            "Docker VPN mode does not mount the Docker socket in admin. Run the x-login noVNC command from the host shell, then open the noVNC URL."
+            `Docker VPN mode does not mount the Docker socket in admin. Run ${commands.manualLogin} on the Docker host. ` +
+            `The noVNC page is ${commands.noVncUrl}. If this is a VPS, keep x-login running on the VPS, open a second terminal on your local PC, run ${commands.sshTunnel} after replacing <user>@<vps-host> with your SSH login, then open ${commands.noVncUrl} locally.`
         };
       }
 
@@ -2091,6 +2115,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const config = settings.updateXApiConfig(requestedConfig, previousConfig);
     const values = xApiConfigToEnvValues(config);
     await env.update(values);
+    const withoutApiRunReplan = replanFreshWithoutApiRunForConfigChange(previousConfig, config);
     if (!config.xApiEnabled) {
       stopActiveRunBecauseXDisabled(config);
     }
@@ -2113,6 +2138,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     await recordSession("info", "settings.x_api.updated", "X API settings updated", {
       appliedImmediately: true,
       envSynced: true,
+      withoutApiRunReplanned: withoutApiRunReplan.replanned,
+      withoutApiRunReplanReason: withoutApiRunReplan.reason,
       openVpnSettingsChanged: changedVpnKeys.length > 0,
       xApiModeShutdownRequested: xApiModeShutdown.requested
     });
@@ -2121,6 +2148,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       values: redactEnvValues(values),
       redactedKeys: Array.from(envSecretKeys),
       restartRequired: false,
+      withoutApiRunReplan,
       xApiModeShutdown,
       openVpn: {
         settingsChanged: changedVpnKeys.length > 0,
@@ -2510,6 +2538,17 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
     const body = listMutationSchema.parse(request.body);
     return deleteListEntry(kind, body.value, "admin");
+  });
+
+  app.delete("/admin/lists/:kind/all", async (request, reply) => {
+    const kind = getKindParam(request.params);
+    if (!kind) {
+      reply.code(404).send({ error: "Unknown list kind" });
+      return;
+    }
+    const deleted = lists.markDeletedAll(kind);
+    await recordSession("info", "list.delete_all", "All active list entries deleted", { kind, deleted });
+    return { kind, deleted };
   });
 
   app.post("/timeline/lists/:kind", async (request, reply) => {
@@ -3211,6 +3250,45 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   function isWithoutApiRun(run: RunRecord): boolean {
     return parseRunStats(run.statsJson).sessionKeywordLimit !== null;
+  }
+
+  function replanFreshWithoutApiRunForConfigChange(
+    previousConfig: XApiRuntimeConfig,
+    config: XApiRuntimeConfig
+  ): { replanned: boolean; reason: string; runId?: string; plannedKeywords?: number } {
+    if (!config.searchWithoutApiEnabled) {
+      return { replanned: false, reason: "without_api_disabled" };
+    }
+    if (
+      previousConfig.searchWithoutApiSessionKeywordLimit === config.searchWithoutApiSessionKeywordLimit &&
+      previousConfig.searchWithoutApiSessionKeywordLimitRandom === config.searchWithoutApiSessionKeywordLimitRandom &&
+      previousConfig.searchWithoutApiRandomizeKeywordOrder === config.searchWithoutApiRandomizeKeywordOrder &&
+      previousConfig.searchWithoutApiRequestsBeforePauseMin === config.searchWithoutApiRequestsBeforePauseMin
+    ) {
+      return { replanned: false, reason: "search_pacing_unchanged" };
+    }
+
+    const run = runs.current();
+    if (!run || !isWithoutApiRun(run)) {
+      return { replanned: false, reason: "no_fresh_without_api_run" };
+    }
+
+    const stats = parseRunStats(run.statsJson);
+    if (stats.completedKeywords > 0 || stats.apiCallsUsed > 0 || stats.currentKeyword) {
+      return { replanned: false, reason: "run_already_progressed", runId: run.id };
+    }
+
+    const keywords = plannedKeywords(lists, config);
+    runs.replaceKeywords(run.id, keywords);
+    runs.updateStats(
+      run.id,
+      createInitialRunStats(lists, config, keywords, {
+        total: Math.max(1, Math.floor(stats.runChainTotal ?? config.runChainCount ?? 1)),
+        index: Math.max(1, Math.floor(stats.runChainIndex ?? 1)),
+        remaining: Math.max(0, Math.floor(stats.runChainRemaining ?? 0))
+      })
+    );
+    return { replanned: true, reason: "fresh_run_replanned", runId: run.id, plannedKeywords: keywords.length };
   }
 
   function stopActiveRunBecauseXDisabled(config: XApiRuntimeConfig): void {
@@ -4917,18 +4995,19 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   function xAlertManualLoginCommands(accountId: number) {
     const runtimeConfig = getXApiConfig();
+    const noVncUrl = `http://127.0.0.1:${runtimeConfig.xLoginNovncPort}/vnc.html?autoconnect=1&resize=scale`;
+    const sshTunnel = `ssh -L ${runtimeConfig.xLoginNovncPort}:127.0.0.1:${runtimeConfig.xLoginNovncPort} <user>@<vps-host>`;
     const autoSaveLogin = usesDockerVpnIsolation(runtimeConfig)
       ? `docker compose run --rm --service-ports x-login --account-id ${accountId} --resolve-alert`
       : `npm run netns:x-login -- --account-id ${accountId} --resolve-alert --auto-save-on-login --hold-open-after-save`;
     return {
       setup: usesDockerVpnIsolation(runtimeConfig)
-        ? `Open http://127.0.0.1:${runtimeConfig.xLoginNovncPort}/vnc.html?autoconnect=1&resize=scale after starting x-login`
+        ? `Open ${noVncUrl} after starting x-login. On a VPS, keep x-login running on the VPS, run ${sshTunnel} from your local PC after replacing <user>@<vps-host>, then open ${noVncUrl} locally.`
         : "npm run setup:local",
       manualLogin: autoSaveLogin,
       webLaunch: autoSaveLogin,
-      noVncUrl: usesDockerVpnIsolation(runtimeConfig)
-        ? `http://127.0.0.1:${runtimeConfig.xLoginNovncPort}/vnc.html?autoconnect=1&resize=scale`
-        : null,
+      noVncUrl: usesDockerVpnIsolation(runtimeConfig) ? noVncUrl : null,
+      sshTunnel: usesDockerVpnIsolation(runtimeConfig) ? sshTunnel : null,
       diagnose: usesDockerVpnIsolation(runtimeConfig) ? "docker compose exec worker npm run diagnose:vpn" : "npm run netns:diagnose",
       worker: usesDockerVpnIsolation(runtimeConfig) ? "docker compose up -d worker" : "npm run netns:worker"
     };
@@ -6100,10 +6179,12 @@ function normalizePublicAdminUrl(value: string | undefined): string {
   return trimmed.replace(/\/+$/, "");
 }
 
-function applySecurityHeaders(reply: FastifyReply): void {
+function applySecurityHeaders(request: FastifyRequest, reply: FastifyReply): void {
   reply.header("x-content-type-options", "nosniff");
   reply.header("x-frame-options", "DENY");
   reply.header("referrer-policy", "no-referrer");
+  reply.header("cross-origin-opener-policy", "same-origin");
+  reply.header("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()");
   reply.header(
     "content-security-policy",
     [
@@ -6119,6 +6200,9 @@ function applySecurityHeaders(reply: FastifyReply): void {
       "form-action 'self'"
     ].join("; ")
   );
+  if (isHttpsRequest(request)) {
+    reply.header("strict-transport-security", "max-age=15552000; includeSubDomains");
+  }
 }
 
 function isAdminMutationRequest(request: FastifyRequest): boolean {
@@ -6200,6 +6284,20 @@ function isTrustedMtlsProxyRequest(request: FastifyRequest, secret: string | und
   const actualBuffer = Buffer.from(actual);
   const expectedBuffer = Buffer.from(secret);
   return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function isTrustedMtlsProxySourceAddress(ip: string): boolean {
+  const normalized = ip.replace(/^::ffff:/, "").toLowerCase();
+  if (normalized === "127.0.0.1" || normalized === "::1") {
+    return true;
+  }
+  // Docker bridge gateways normally reach published 127.0.0.1 ports from 172.16.0.0/12.
+  const dockerBridgeMatch = normalized.match(/^172\.(\d{1,2})\./);
+  if (dockerBridgeMatch) {
+    const secondOctet = Number(dockerBridgeMatch[1]);
+    return secondOctet >= 16 && secondOctet <= 31;
+  }
+  return false;
 }
 
 function redactEnvValues(values: Record<string, string>): Record<string, string> {
@@ -6999,7 +7097,7 @@ function searchesBeforePauseForKeywords(
     return 0;
   }
   const manualMin = Math.max(1, Math.floor(config.searchWithoutApiRequestsBeforePauseMin ?? 1));
-  return Math.min(remaining, manualMin);
+  return manualMin;
 }
 
 function apiSearchesBeforePauseForKeywords(
@@ -7011,6 +7109,9 @@ function apiSearchesBeforePauseForKeywords(
   }
 ): number {
   const keywordLimit = searchesBeforePauseForKeywords(remainingKeywords, config);
+  if (keywordLimit <= 0) {
+    return 0;
+  }
   const keywordsPerSearch = Math.max(1, Math.floor(config.xKeywordsPerQuery ?? 1));
   const pacingLimit = Math.max(1, Math.ceil(keywordLimit / keywordsPerSearch));
   const apiLimit = Math.max(1, Math.floor(config.xSearchApiCallLimit ?? pacingLimit));

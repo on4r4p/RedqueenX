@@ -109,9 +109,13 @@ pids+=("$!")
 websockify --web=/usr/share/novnc "0.0.0.0:${novnc_port}" "127.0.0.1:${vnc_port}" >/tmp/redqueenx-novnc.log 2>&1 &
 pids+=("$!")
 
+novnc_url="http://127.0.0.1:${novnc_port}/vnc.html?autoconnect=1&resize=scale"
 echo "Launching visible X login through Docker VPN using noVNC."
-echo "Open: http://127.0.0.1:${novnc_port}/vnc.html?autoconnect=1&resize=scale"
-echo "If this runs on a VPS, open the URL through an SSH tunnel to 127.0.0.1:${novnc_port}."
+echo "Open: ${novnc_url}"
+echo "If this runs on a VPS, keep this x-login command running on the VPS."
+echo "Then open another terminal on your local PC and start this SSH tunnel, replacing <user>@<vps-host> with your real SSH login:"
+echo "  ssh -L ${novnc_port}:127.0.0.1:${novnc_port} <user>@<vps-host>"
+echo "Then open this URL in your local browser: ${novnc_url}"
 echo "This noVNC login service will stop automatically after ${service_max_seconds}s."
 
 set +e

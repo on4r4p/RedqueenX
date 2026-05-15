@@ -40,6 +40,7 @@
     "test:visible-x-login-vpn": "node scripts/session-command.cjs test:visible-x-login-vpn -- ./ops/netns/run.sh npm run diagnose:vpn:dev",
     "test:media-cache": "node scripts/session-command.cjs test:media-cache -- vitest run tests/media-cache.test.ts",
     "test:watch": "node scripts/session-command.cjs test:watch -- vitest",
+    "env:sync": "node scripts/session-command.cjs env:sync -- node scripts/sync-env.cjs",
     "security:check": "node scripts/session-command.cjs security:check -- node scripts/security-check.cjs",
     "typecheck": "node scripts/session-command.cjs typecheck -- tsc -p tsconfig.json --noEmit"
   },

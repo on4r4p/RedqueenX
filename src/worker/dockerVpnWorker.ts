@@ -10,6 +10,7 @@ import { CurrentSessionService, type CurrentSessionLevel } from "../admin/curren
 import { ListService } from "../admin/listService";
 import { MediaCacheJobService, type MediaCacheJobRecord } from "../admin/mediaCacheJobService";
 import { parseRunStats, RunService } from "../admin/runService";
+import { SettingsService } from "../admin/settingsService";
 import { XBrowserAccountService } from "../admin/xBrowserAccountService";
 import { XSessionAlertService } from "../admin/xSessionAlertService";
 import { normalizeValue } from "../text";
@@ -54,6 +55,7 @@ async function main() {
   const database = openDatabase(config.databaseUrl);
   const runs = new RunService(database);
   const lists = new ListService(database);
+  const settings = new SettingsService(database);
   const accounts = new XBrowserAccountService(database);
   const alerts = new XSessionAlertService(database);
   const mediaCacheJobs = new MediaCacheJobService(database);
@@ -71,7 +73,7 @@ async function main() {
 
   while (!shuttingDown) {
     try {
-      const config = loadDockerAppConfig();
+      const config = loadDockerRuntimeConfig(settings);
       await assertVpnRuntime(config, "Docker VPN worker");
       const currentRun = runs.current();
       if (currentRun?.status === "running") {
@@ -514,10 +516,20 @@ function loadDockerAppConfig(): AppConfig {
   });
 }
 
+function loadDockerRuntimeConfig(settings: SettingsService): AppConfig {
+  const config = loadDockerAppConfig();
+  return {
+    ...config,
+    ...settings.getXApiConfig(config),
+    searchWithoutApiIsolation: "docker_vpn"
+  };
+}
+
 function childBaseEnv(config: AppConfig): NodeJS.ProcessEnv {
   return {
     ...process.env,
     ...readDotEnvFile(),
+    ...dockerRuntimeEnvValues(config),
     DATABASE_URL: config.databaseUrl,
     CURRENT_SESSION_FILE: config.currentSessionFile,
     SEARCH_WITHOUT_API_ISOLATION: "docker_vpn",
@@ -526,6 +538,58 @@ function childBaseEnv(config: AppConfig): NodeJS.ProcessEnv {
     REDQUEENX_DOCKER_VPN: "true",
     PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/google-chrome-stable",
     PLAYWRIGHT_DISABLE_SANDBOX: process.env.PLAYWRIGHT_DISABLE_SANDBOX || "false"
+  };
+}
+
+function dockerRuntimeEnvValues(config: AppConfig): NodeJS.ProcessEnv {
+  return {
+    X_API_ENABLED: String(config.xApiEnabled),
+    SEARCH_WITHOUT_API_ENABLED: String(config.searchWithoutApiEnabled),
+    SEARCH_WITHOUT_API_ISOLATION: config.searchWithoutApiIsolation,
+    SEARCH_WITHOUT_API_PROFILE_DIR: config.searchWithoutApiProfileDir,
+    SEARCH_WITHOUT_API_START_URL: config.searchWithoutApiStartUrl,
+    SEARCH_WITHOUT_API_MAX_SCROLLS: String(config.searchWithoutApiMaxScrolls),
+    SEARCH_WITHOUT_API_SCROLL_DELAY_MS: String(config.searchWithoutApiScrollDelayMs),
+    SEARCH_WITHOUT_API_SCROLL_DELAY_MIN_MS: String(config.searchWithoutApiScrollDelayMinMs),
+    SEARCH_WITHOUT_API_SCROLL_DELAY_MAX_MS: String(config.searchWithoutApiScrollDelayMaxMs),
+    SEARCH_WITHOUT_API_HEADLESS: String(config.searchWithoutApiHeadless),
+    SEARCH_WITHOUT_API_SHOW_BROWSER_LOCAL: String(config.searchWithoutApiShowBrowserLocal),
+    SEARCH_WITHOUT_API_KEY_DELAY_MIN_MS: String(config.searchWithoutApiKeyDelayMinMs),
+    SEARCH_WITHOUT_API_KEY_DELAY_MAX_MS: String(config.searchWithoutApiKeyDelayMaxMs),
+    SEARCH_WITHOUT_API_SEARCH_DELAY_MIN_SECONDS: String(config.searchWithoutApiSearchDelayMinSeconds),
+    SEARCH_WITHOUT_API_SEARCH_DELAY_MAX_SECONDS: String(config.searchWithoutApiSearchDelayMaxSeconds),
+    SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: String(config.searchWithoutApiSessionKeywordLimit),
+    SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: String(config.searchWithoutApiSessionKeywordLimitRandom),
+    SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: String(config.searchWithoutApiRandomizeKeywordOrder),
+    SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: String(config.searchWithoutApiAutoIgnoreAlert),
+    SEARCH_WITHOUT_API_MAX_RETRIES: String(config.searchWithoutApiMaxRetries),
+    SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS: String(config.searchWithoutApiAutoRestartDelaySeconds),
+    SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN: String(config.searchWithoutApiRequestsBeforePauseMin),
+    SEARCH_WITHOUT_API_PAUSE_MIN_MINUTES: String(config.searchWithoutApiPauseMinMinutes),
+    SEARCH_WITHOUT_API_PAUSE_MAX_MINUTES: String(config.searchWithoutApiPauseMaxMinutes),
+    SEARCH_WITHOUT_API_SCROLLS_MIN: String(config.searchWithoutApiScrollsMin),
+    SEARCH_WITHOUT_API_SCROLLS_MAX: String(config.searchWithoutApiScrollsMax),
+    SEARCH_WITHOUT_API_TWEET_HOVER_MIN_SECONDS: String(config.searchWithoutApiTweetHoverMinSeconds),
+    SEARCH_WITHOUT_API_TWEET_HOVER_MAX_SECONDS: String(config.searchWithoutApiTweetHoverMaxSeconds),
+    SEARCH_WITHOUT_API_MOUSE_PROFILE: config.searchWithoutApiMouseProfile,
+    SEARCH_WITHOUT_API_SAVE_SNAPSHOTS: String(config.searchWithoutApiSaveSnapshots),
+    SEARCH_WITHOUT_API_MEDIA_CACHE_ENABLED: String(config.searchWithoutApiMediaCacheEnabled),
+    SEARCH_WITHOUT_API_MEDIA_CACHE_DIR: config.searchWithoutApiMediaCacheDir,
+    SEARCH_WITHOUT_API_MEDIA_CACHE_TTL_HOURS: String(config.searchWithoutApiMediaCacheTtlHours),
+    SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_MB: String(config.searchWithoutApiMediaCacheMaxMb),
+    SEARCH_WITHOUT_API_MEDIA_CACHE_MAX_FILE_MB: String(config.searchWithoutApiMediaCacheMaxFileMb),
+    SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS: String(config.searchWithoutApiMediaCacheFetchDelayMinMs),
+    SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS: String(config.searchWithoutApiMediaCacheFetchDelayMaxMs),
+    RUN_CHAIN_COUNT: String(config.runChainCount),
+    RAW_TIMELINE_ENABLED: String(config.rawTimelineEnabled),
+    VPN_CONFIG: config.vpnConfig,
+    VPN_REMOTE_HOST: config.vpnRemoteHost,
+    VPN_REMOTE_PORT: String(config.vpnRemotePort),
+    VPN_REMOTE_PROTO: config.vpnRemoteProto,
+    VPN_CHECK_HOST_IPV4_LEAK: String(config.vpnCheckHostIpv4Leak),
+    VPN_CHECK_IPV6: String(config.vpnCheckIpv6),
+    VPN_DIAGNOSTIC_STRICT: String(config.vpnDiagnosticStrict),
+    VPN_DIAGNOSTIC_PLAYWRIGHT: String(config.vpnDiagnosticPlaywright)
   };
 }
 
