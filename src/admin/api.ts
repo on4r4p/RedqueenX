@@ -8199,7 +8199,7 @@ function resolveLastCommitInfo(): { date: string; sha: string | null } {
     }).trim();
     return { date: formatCommitDate(date), sha };
   } catch {
-    return { date: "unavailable", sha: envSha };
+    return { date: formatCommitDate(resolveRuntimeBuildDate()), sha: envSha };
   }
 }
 
@@ -8209,6 +8209,14 @@ function cleanBuildMetadataValue(value: string | undefined): string | null {
     return null;
   }
   return trimmed;
+}
+
+function resolveRuntimeBuildDate(): string {
+  try {
+    return fsSync.statSync(__filename).mtime.toISOString();
+  } catch {
+    return new Date().toISOString();
+  }
 }
 
 function formatCommitDate(value: string): string {
