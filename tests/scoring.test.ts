@@ -130,6 +130,79 @@ describe("scoreTweet", () => {
     expect(decision.reasons).not.toContain("missing_keyword");
   });
 
+  it("adds keyword text relevance on top of handle search relevance", () => {
+    const tweet: TweetCandidate = {
+      id: "handle-keyword-1",
+      text: "Published a fresh vulnerability advisory with exploit details and mitigation guidance for defenders",
+      lang: "en",
+      retweetCount: 1,
+      favoriteCount: 0,
+      user: {
+        screenName: "security_author",
+        followersCount: 400
+      }
+    };
+
+    const decision = scoreTweet(
+      tweet,
+      {
+        queryKeyword: "@security_author",
+        keywords: ["@security_author", "vulnerability advisory"],
+        following: [],
+        friends: [],
+        bannedUsers: [],
+        bannedWords: [],
+        sentTweetIds: [],
+        sentTexts: []
+      },
+      {
+        ...DEFAULT_SCORING_CONFIG,
+        enableMinimumTweetScore: false
+      }
+    );
+
+    expect(decision.reasons).not.toContain("missing_keyword");
+    expect(decision.scoreBreakdown).toEqual(
+      expect.arrayContaining([{ label: "handle search keyword + keyword match", points: 28 }])
+    );
+  });
+
+  it("adds extra relevance when a normal search tweet matches multiple keywords", () => {
+    const tweet: TweetCandidate = {
+      id: "multi-keyword-1",
+      text: "Fresh XSS incident response notes include malware indicators and practical mitigation steps for defenders",
+      lang: "en",
+      retweetCount: 1,
+      favoriteCount: 0,
+      user: {
+        screenName: "researcher",
+        followersCount: 400
+      }
+    };
+
+    const decision = scoreTweet(
+      tweet,
+      {
+        queryKeyword: "xss",
+        keywords: ["xss", "incident response", "malware"],
+        following: [],
+        friends: [],
+        bannedUsers: [],
+        bannedWords: [],
+        sentTweetIds: [],
+        sentTexts: []
+      },
+      {
+        ...DEFAULT_SCORING_CONFIG,
+        enableMinimumTweetScore: false
+      }
+    );
+
+    expect(decision.scoreBreakdown).toEqual(
+      expect.arrayContaining([{ label: "keyword match + 2 extra keywords", points: 26 }])
+    );
+  });
+
   it("gives strong relevance points to exact security keywords", () => {
     const tweet: TweetCandidate = {
       id: "relevance-1",

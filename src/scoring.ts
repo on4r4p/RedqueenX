@@ -202,19 +202,31 @@ function scoreKeywordRelevance(
   normalizedText: string
 ): { matched: boolean; points: number; label: string } {
   if (isHandleSearchKeyword(lists.queryKeyword)) {
+    const keywordTextMatch = bestKeywordTextRelevance(tweet, lists, normalizedText);
+    if (keywordTextMatch) {
+      return {
+        matched: true,
+        points: 10 + keywordTextMatch.points,
+        label: `handle search keyword + ${keywordTextMatch.label}`
+      };
+    }
     return { matched: true, points: 10, label: "handle search keyword" };
   }
 
-  let best: { points: number; label: string } | null = null;
+  const best = bestKeywordTextRelevance(tweet, lists, normalizedText);
+  return best ? { matched: true, ...best } : { matched: false, points: 0, label: "keyword match" };
+}
+
+function bestKeywordTextRelevance(tweet: TweetCandidate, lists: ScoreLists, normalizedText: string): { points: number; label: string } | null {
+  const matches: Array<{ points: number; label: string; keyword: string }> = [];
   const hashtags = (tweet.entities?.hashtags ?? []).map((value) => normalizeSearchText(value)).filter(Boolean);
   for (const keyword of lists.keywords) {
+    if (isHandleSearchKeyword(keyword)) continue;
     const normalizedKeyword = normalizeSearchText(keyword);
     if (!normalizedKeyword) continue;
     if (normalizedText.includes(normalizedKeyword)) {
       const exactPoints = normalizedKeyword.length >= 8 ? 18 : 15;
-      if (!best || exactPoints > best.points) {
-        best = { points: exactPoints, label: "keyword match" };
-      }
+      matches.push({ points: exactPoints, label: "keyword match", keyword: normalizedKeyword });
       continue;
     }
 
@@ -223,21 +235,27 @@ function scoreKeywordRelevance(
       const matchedTokens = keywordTokens.filter((token) => normalizedText.includes(token)).length;
       if (matchedTokens >= 2) {
         const partialPoints = Math.min(14, 7 + matchedTokens * 2);
-        if (!best || partialPoints > best.points) {
-          best = { points: partialPoints, label: "partial keyword match" };
-        }
+        matches.push({ points: partialPoints, label: "partial keyword match", keyword: normalizedKeyword });
       }
     }
 
     if (hashtags.some((hashtag) => hashtag === normalizedKeyword || hashtag.includes(normalizedKeyword))) {
       const hashtagPoints = 12;
-      if (!best || hashtagPoints > best.points) {
-        best = { points: hashtagPoints, label: "keyword hashtag" };
-      }
+      matches.push({ points: hashtagPoints, label: "keyword hashtag", keyword: normalizedKeyword });
     }
   }
 
-  return best ? { matched: true, ...best } : { matched: false, points: 0, label: "keyword match" };
+  if (matches.length === 0) return null;
+  const uniqueMatches = [...new Map(matches.sort((left, right) => right.points - left.points).map((match) => [match.keyword, match])).values()];
+  const [best, ...extraMatches] = uniqueMatches;
+  const extraPoints = Math.min(12, extraMatches.length * 4);
+  if (extraPoints === 0) {
+    return { points: best.points, label: best.label };
+  }
+  return {
+    points: best.points + extraPoints,
+    label: `${best.label} + ${extraMatches.length} extra keyword${extraMatches.length === 1 ? "" : "s"}`
+  };
 }
 
 const securityRelevanceTerms = [
