@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -8157,7 +8157,78 @@ function numberOrNull(value: unknown): number | null {
 
 async function sendFrontendPage(reply: FastifyReply, pageRoot: string, filename: string) {
   const content = await fs.readFile(path.join(pageRoot, filename), "utf8");
-  return reply.type("text/html").send(content);
+  return reply.type("text/html").send(injectAppFooter(content));
+}
+
+let cachedAppFooter: string | null = null;
+
+function injectAppFooter(content: string): string {
+  if (!content.includes("</main>")) {
+    return content;
+  }
+  return content.replace("</main>", `${appFooterHtml()}\n  </main>`);
+}
+
+function appFooterHtml(): string {
+  cachedAppFooter ??= renderAppFooter(resolveLastCommitInfo());
+  return cachedAppFooter;
+}
+
+function renderAppFooter(commit: { date: string; sha: string | null }): string {
+  const title = commit.sha ? ` title="Commit ${escapeHtml(commit.sha)}"` : "";
+  return `\n    <footer class="app-footer"${title}>Last commit: ${escapeHtml(commit.date)}</footer>`;
+}
+
+function resolveLastCommitInfo(): { date: string; sha: string | null } {
+  const envDate = process.env.REDQUEENX_BUILD_COMMIT_DATE?.trim();
+  const envSha = process.env.REDQUEENX_BUILD_COMMIT_SHA?.trim() || null;
+  if (envDate) {
+    return { date: formatCommitDate(envDate), sha: envSha };
+  }
+
+  try {
+    const date = execFileSync("git", ["log", "-1", "--format=%cI"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      timeout: 1_000
+    }).trim();
+    const sha = execFileSync("git", ["rev-parse", "--short=12", "HEAD"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      timeout: 1_000
+    }).trim();
+    return { date: formatCommitDate(date), sha };
+  } catch {
+    return { date: "unknown", sha: envSha };
+  }
+}
+
+function formatCommitDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("fr-FR", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(date);
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
 }
 
 function findFrontendRoot(): string {

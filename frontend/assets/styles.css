@@ -1978,6 +1978,15 @@ h2 {
   color: var(--muted);
 }
 
+.app-footer {
+  margin-top: auto;
+  padding: 22px 28px 18px;
+  border-top: 1px solid rgba(49, 80, 100, 0.55);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
 @media (max-width: 780px) {
   .admin-layout {
     grid-template-columns: 1fr;
