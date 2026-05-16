@@ -301,6 +301,42 @@ describe("scoreTweet", () => {
     );
   });
 
+  it("reduces score progressively as tweet age increases", () => {
+    vi.setSystemTime(new Date("2026-05-16T12:00:00Z"));
+    const baseTweet: TweetCandidate = {
+      id: "age-score-1",
+      text: "Fresh vulnerability advisory includes exploit details and mitigation guidance for defenders",
+      lang: "en",
+      retweetCount: 10,
+      favoriteCount: 10,
+      user: {
+        screenName: "researcher",
+        followersCount: 1000
+      }
+    };
+    const lists = {
+      keywords: ["vulnerability advisory"],
+      following: [],
+      friends: [],
+      bannedUsers: [],
+      bannedWords: [],
+      sentTweetIds: [],
+      sentTexts: []
+    };
+    const config = {
+      ...DEFAULT_SCORING_CONFIG,
+      maximumTweetAgeDays: 365,
+      enableMinimumTweetScore: false
+    };
+
+    const recent = scoreTweet({ ...baseTweet, createdAt: new Date("2026-05-16T10:00:00Z") }, lists, config);
+    const old = scoreTweet({ ...baseTweet, id: "age-score-2", createdAt: new Date("2025-05-16T10:00:00Z") }, lists, config);
+
+    expect(old.score).toBeLessThan(recent.score);
+    expect(old.scoreBreakdown?.find((item) => item.label === "tweet age")?.points).toBeLessThan(0);
+    vi.useRealTimers();
+  });
+
   it("rejects unknown or disallowed tweet languages when allowed languages are enabled", () => {
     const baseTweet: TweetCandidate = {
       id: "lang-1",

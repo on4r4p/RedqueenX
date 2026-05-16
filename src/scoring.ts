@@ -56,6 +56,11 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
     score += points;
     scoreBreakdown.push({ label, points });
   };
+  const addPenalty = (points: number, label: string) => {
+    if (!Number.isFinite(points) || points <= 0) return;
+    score -= points;
+    scoreBreakdown.push({ label, points: -points });
+  };
   const normalizedText = normalizeSearchText(tweet.text);
   const userHandle = normalizeHandle(tweet.user.screenName) ?? tweet.user.screenName.toLowerCase();
   const following = new Set(lists.following.map((value) => normalizeHandle(value) ?? value.toLowerCase()));
@@ -174,9 +179,12 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
   if (tweet.createdAt) {
     const ageMs = Date.now() - tweet.createdAt.getTime();
     const ageDays = ageMs / 86_400_000;
+    const maximumAgeDays = Math.max(1, config.maximumTweetAgeDays);
     if (config.enableMaximumTweetAgeDays && ageDays > config.maximumTweetAgeDays) {
       reasons.push("tweet_too_old");
-    } else {
+    }
+    addPenalty(scoreTweetAgePenalty(ageDays, maximumAgeDays), "tweet age");
+    if (ageDays <= maximumAgeDays) {
       addScore(Math.max(0, 24 - Math.floor(ageMs / 3_600_000)), "fresh tweet");
     }
   }
@@ -318,6 +326,14 @@ function boundedPopularityScore(value: number): number {
   if (value <= 0) return 0;
   if (value <= 23) return value;
   return 23 + Math.min(23, Math.floor((value - 20) / 10));
+}
+
+function scoreTweetAgePenalty(ageDays: number, maximumAgeDays: number): number {
+  if (!Number.isFinite(ageDays) || ageDays <= 1) return 0;
+  const configuredWindow = Math.max(1, maximumAgeDays - 1);
+  const withinWindowPenalty = Math.ceil((Math.min(ageDays, maximumAgeDays) - 1) / configuredWindow * 20);
+  const overLimitPenalty = ageDays > maximumAgeDays ? Math.ceil((ageDays - maximumAgeDays) * 3) : 0;
+  return Math.min(100, withinWindowPenalty + overLimitPenalty);
 }
 
 export interface SimilarSentTextMatch {
