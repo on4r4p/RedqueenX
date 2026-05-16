@@ -48,7 +48,13 @@ export interface ScoreLists {
 
 export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: ScoringConfig = DEFAULT_SCORING_CONFIG): ScoreDecision {
   const reasons: string[] = [];
+  const scoreBreakdown: { label: string; points: number }[] = [];
   let score = 0;
+  const addScore = (points: number, label: string) => {
+    if (!Number.isFinite(points) || points <= 0) return;
+    score += points;
+    scoreBreakdown.push({ label, points });
+  };
   const normalizedText = normalizeSearchText(tweet.text);
   const userHandle = normalizeHandle(tweet.user.screenName) ?? tweet.user.screenName.toLowerCase();
   const following = new Set(lists.following.map((value) => normalizeHandle(value) ?? value.toLowerCase()));
@@ -94,30 +100,28 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
     }
   }
 
-  const matchedKeyword =
-    isHandleSearchKeyword(lists.queryKeyword) ||
-    lists.keywords.some((keyword) => {
-      const normalizedKeyword = normalizeSearchText(keyword);
-      return normalizedKeyword.length > 0 && normalizedText.includes(normalizedKeyword);
-    });
+  const keywordMatch = scoreKeywordRelevance(tweet, lists, normalizedText);
+  const matchedKeyword = keywordMatch.matched;
   if (!matchedKeyword) {
     reasons.push("missing_keyword");
   } else {
-    score += 10;
+    addScore(keywordMatch.points, keywordMatch.label);
   }
+
+  addScore(scoreSecurityRelevance(normalizedText), "security relevance");
 
   const hashtags = tweet.entities?.hashtags?.length ?? 0;
   if (config.enableMaximumHashtags && hashtags >= config.maximumHashtags) {
     reasons.push("too_many_hashtags");
   } else {
-    score += hashtags;
+    addScore(hashtags, "hashtags");
   }
 
   const mentions = tweet.entities?.mentions?.length ?? 0;
   if (config.enableMaximumMentions && mentions >= config.maximumMentions) {
     reasons.push("too_many_mentions");
   } else {
-    score += mentions;
+    addScore(mentions, "mentions");
   }
 
   const userTweetCount = lists.tweetsByUser?.[userHandle] ?? 0;
@@ -132,14 +136,14 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
   if (config.enableMaximumTweetRetweets && retweets > config.maximumTweetRetweets && !following.has(userHandle) && !friends.has(userHandle)) {
     reasons.push("too_many_retweets");
   }
-  score += boundedPopularityScore(retweets);
+  addScore(boundedPopularityScore(retweets), "retweets");
 
   const favorites = tweet.favoriteCount ?? 0;
   if (config.enableMinimumTweetFavorites && favorites < config.minimumTweetFavorites) {
     reasons.push("not_enough_favorites");
   }
   if (favorites > 0 && (!config.enableMinimumTweetFavorites || favorites > config.minimumTweetFavorites)) {
-    score += 1 + boundedPopularityScore(favorites);
+    addScore(1 + boundedPopularityScore(favorites), "favorites");
   }
   if (config.enableMaximumTweetFavorites && favorites > config.maximumTweetFavorites && !following.has(userHandle) && !friends.has(userHandle)) {
     reasons.push("too_many_favorites");
@@ -149,17 +153,17 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
   if (config.enableMinimumUserFollowers && followers < config.minimumUserFollowers && !following.has(userHandle) && !friends.has(userHandle)) {
     reasons.push("not_enough_followers");
   } else {
-    score += boundedPopularityScore(Math.floor(followers / 100));
+    addScore(boundedPopularityScore(Math.floor(followers / 100)), "author followers");
   }
 
   if (tweet.user.verified) {
-    score += 5;
+    addScore(5, "verified author");
   }
   if (following.has(userHandle)) {
-    score += 10;
+    addScore(10, "followed author");
   }
   if (friends.has(userHandle)) {
-    score += 15;
+    addScore(15, "friend author");
   }
 
   if (tweet.createdAt) {
@@ -168,15 +172,15 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
     if (config.enableMaximumTweetAgeDays && ageDays > config.maximumTweetAgeDays) {
       reasons.push("tweet_too_old");
     } else {
-      score += Math.max(0, 24 - Math.floor(ageMs / 3_600_000));
+      addScore(Math.max(0, 24 - Math.floor(ageMs / 3_600_000)), "fresh tweet");
     }
   }
 
   if (tweet.entities?.urls?.length) {
-    score += 3;
+    addScore(3, "has URL");
   }
   if (tweet.entities?.media?.length) {
-    score += 3;
+    addScore(3, "has media");
   }
 
   if (config.enableMinimumTweetScore && score < config.minimumTweetScore) {
@@ -186,9 +190,93 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
   return {
     accepted: reasons.length === 0,
     score,
+    scoreBreakdown,
     reasons,
     normalizedText
   };
+}
+
+function scoreKeywordRelevance(
+  tweet: TweetCandidate,
+  lists: ScoreLists,
+  normalizedText: string
+): { matched: boolean; points: number; label: string } {
+  if (isHandleSearchKeyword(lists.queryKeyword)) {
+    return { matched: true, points: 10, label: "handle search keyword" };
+  }
+
+  let best: { points: number; label: string } | null = null;
+  const hashtags = (tweet.entities?.hashtags ?? []).map((value) => normalizeSearchText(value)).filter(Boolean);
+  for (const keyword of lists.keywords) {
+    const normalizedKeyword = normalizeSearchText(keyword);
+    if (!normalizedKeyword) continue;
+    if (normalizedText.includes(normalizedKeyword)) {
+      const exactPoints = normalizedKeyword.length >= 8 ? 18 : 15;
+      if (!best || exactPoints > best.points) {
+        best = { points: exactPoints, label: "keyword match" };
+      }
+      continue;
+    }
+
+    const keywordTokens = meaningfulKeywordTokens(normalizedKeyword);
+    if (keywordTokens.length >= 2) {
+      const matchedTokens = keywordTokens.filter((token) => normalizedText.includes(token)).length;
+      if (matchedTokens >= 2) {
+        const partialPoints = Math.min(14, 7 + matchedTokens * 2);
+        if (!best || partialPoints > best.points) {
+          best = { points: partialPoints, label: "partial keyword match" };
+        }
+      }
+    }
+
+    if (hashtags.some((hashtag) => hashtag === normalizedKeyword || hashtag.includes(normalizedKeyword))) {
+      const hashtagPoints = 12;
+      if (!best || hashtagPoints > best.points) {
+        best = { points: hashtagPoints, label: "keyword hashtag" };
+      }
+    }
+  }
+
+  return best ? { matched: true, ...best } : { matched: false, points: 0, label: "keyword match" };
+}
+
+const securityRelevanceTerms = [
+  "0day",
+  "advisory",
+  "breach",
+  "cve",
+  "exploit",
+  "incident response",
+  "ioc",
+  "malware",
+  "mitigation",
+  "patch",
+  "phishing",
+  "poc",
+  "ransomware",
+  "threat actor",
+  "vulnerability",
+  "xss"
+];
+
+function scoreSecurityRelevance(normalizedText: string): number {
+  let points = 0;
+  if (/\bcve\s*\d{4}\s*\d{4,7}\b/.test(normalizedText)) {
+    points += 8;
+  }
+  for (const term of securityRelevanceTerms) {
+    if (normalizedText.includes(term)) {
+      points += 3;
+    }
+  }
+  return Math.min(points, 15);
+}
+
+function meaningfulKeywordTokens(normalizedKeyword: string): string[] {
+  return normalizedKeyword
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
 }
 
 export function normalizeLanguageCode(value: string | undefined): string | null {

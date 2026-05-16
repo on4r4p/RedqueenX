@@ -6104,6 +6104,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         createdAt: result.tweet.createdAt?.toISOString() ?? null,
         accepted: result.decision.accepted,
         score: result.decision.score,
+        scoreBreakdown: result.decision.scoreBreakdown,
         reasons: result.decision.reasons,
         favoriteCount: result.tweet.favoriteCount ?? 0,
         retweetCount: result.tweet.retweetCount ?? 0,

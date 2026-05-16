@@ -451,7 +451,7 @@ async function changeRawTimelinePage(action) {
   rawTimelineStatus.textContent = "Loading rejected timeline page...";
   scrollRawTimelineToTop("auto");
   await refreshRawTimeline();
-  scrollRawTimelineToTop("smooth");
+  scrollRawTimelineToTopAfterRender();
 }
 
 async function changeRawTimelinePageSize(value) {
@@ -469,7 +469,7 @@ async function changeRawTimelinePageSize(value) {
   rawTimelineStatus.textContent = "Loading rejected timeline page...";
   scrollRawTimelineToTop("auto");
   await refreshRawTimeline();
-  scrollRawTimelineToTop("smooth");
+  scrollRawTimelineToTopAfterRender();
 }
 
 function scrollRawTimelineToTop(behavior = "smooth") {
@@ -478,6 +478,15 @@ function scrollRawTimelineToTop(behavior = "smooth") {
     document.documentElement.scrollTop = 0;
     document.body.scrollTop = 0;
   }
+}
+
+function scrollRawTimelineToTopAfterRender() {
+  requestAnimationFrame(() => {
+    scrollRawTimelineToTop("smooth");
+    window.setTimeout(() => {
+      if (window.scrollY > 4) scrollRawTimelineToTop("auto");
+    }, 120);
+  });
 }
 
 function renderRejectionReasonFilter(options, selectedReasonGroups) {
@@ -769,6 +778,7 @@ rawTimelinePaginations.forEach((paginationNav) => {
     }
     const button = event.target.closest("[data-page-action]");
     if (!button || button.disabled) return;
+    event.preventDefault();
     await changeRawTimelinePage(button.dataset.pageAction);
   });
 

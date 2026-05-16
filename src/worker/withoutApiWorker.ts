@@ -22,7 +22,7 @@ import {
   XSessionAlertService,
   type XSessionAlertType
 } from "../admin/xSessionAlertService";
-import { normalizeValue } from "../text";
+import { isHandleSearchKeyword, normalizeHandle, normalizeValue } from "../text";
 import type { RunRecord, RunStats, ScoringConfig, TweetCandidate } from "../types";
 import {
   buildBrowserSearchQuery,
@@ -497,6 +497,21 @@ async function runBrowserSearchLoop(input: {
     rejectedTotal += rejected;
     const prefilterReasonCounts = countReasonOccurrences(prefilterRejected.flatMap((result) => result.decision.reasons));
     const scoringReasonCounts = countReasonOccurrences(scoringRejected.flatMap((result) => result.decision.reasons));
+    const staleKeywordUserMoved = await maybeMoveStaleKeywordUserFromTooOldResults({
+      page: input.page,
+      keyword,
+      visibleTweets: tweets.length,
+      tooOldTweets: countReasonsByPrefix(prefilterReasonCounts, "tweet_too_old"),
+      mouseProfile: previousMouseProfile,
+      pacing,
+      config: input.config,
+      publicIpv4: input.publicIpv4,
+      lists: input.lists,
+      runId: input.runId,
+      position: completedKeywords + 1,
+      smoke: input.smoke,
+      record: input.record
+    });
     await input.record("debug", "browser.scoring.summary", "Browser scoring summary for keyword", {
       runId: input.runId,
       keyword,
@@ -537,6 +552,7 @@ async function runBrowserSearchLoop(input: {
         createdAt: result.tweet.createdAt?.toISOString() ?? null,
         accepted: result.decision.accepted,
         score: result.decision.score,
+        scoreBreakdown: result.decision.scoreBreakdown,
         reasons: result.decision.reasons,
         favoriteCount: result.tweet.favoriteCount ?? 0,
         retweetCount: result.tweet.retweetCount ?? 0,
@@ -562,7 +578,7 @@ async function runBrowserSearchLoop(input: {
       });
     }
     const usableTweets = selectedTweets.length;
-    const noUsableResult = scoringConfig.enableMinimumSearchResults && usableTweets < scoringConfig.minimumSearchResults;
+    const noUsableResult = scoringConfig.enableMinimumSearchResults && usableTweets < scoringConfig.minimumSearchResults && !staleKeywordUserMoved;
     keywordSummaries.push({
       keyword,
       searchQuery: search.searchQuery,
@@ -835,6 +851,114 @@ function countReasonOccurrences(reasons: string[]): Record<string, number> {
     counts[reason] = (counts[reason] ?? 0) + 1;
   }
   return counts;
+}
+
+function countReasonsByPrefix(counts: Record<string, number>, prefix: string): number {
+  return Object.entries(counts).reduce((total, [reason, count]) => (reason === prefix || reason.startsWith(`${prefix}:`) ? total + count : total), 0);
+}
+
+async function maybeMoveStaleKeywordUserFromTooOldResults(input: {
+  page: Page;
+  keyword: string;
+  visibleTweets: number;
+  tooOldTweets: number;
+  mouseProfile: MouseProfile;
+  pacing: HumanPacingConfig;
+  config: AppConfig;
+  publicIpv4: string | null;
+  lists: ListService;
+  runId: string;
+  position: number;
+  smoke?: boolean;
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>;
+}): Promise<boolean> {
+  if (input.smoke || !isHandleSearchKeyword(input.keyword) || input.visibleTweets <= 0) {
+    return false;
+  }
+  const tooOldRatio = input.tooOldTweets / input.visibleTweets;
+  if (input.tooOldTweets < 2 || tooOldRatio < 0.6) {
+    return false;
+  }
+
+  const handle = normalizeHandle(input.keyword);
+  if (!handle) {
+    return false;
+  }
+
+  const checkKeyword = `from:${handle}`;
+  await input.record("info", "browser.keyword_user_stale_check.started", "Most visible tweets for @keyword were too old; checking the user directly", {
+    runId: input.runId,
+    keyword: input.keyword,
+    handle,
+    checkKeyword,
+    visibleTweets: input.visibleTweets,
+    tooOldTweets: input.tooOldTweets,
+    tooOldRatio,
+    maxAgeDays: input.config.staleKeywordUserMaxAgeDays,
+    position: input.position
+  });
+
+  const check = await searchOneKeyword(input.page, checkKeyword, input.mouseProfile, input.pacing, input.config, input.publicIpv4, {
+    runId: input.runId,
+    position: input.position,
+    saveSnapshots: input.config.searchWithoutApiSaveSnapshots,
+    retweetFilterApplied: false,
+    record: input.record
+  });
+  const latestTweet = latestTweetForHandle(check.tweets, handle);
+  if (!latestTweet?.createdAt) {
+    await input.record("prob", "browser.keyword_user_stale_check.skipped", "Keyword user could not be confirmed stale", {
+      runId: input.runId,
+      keyword: input.keyword,
+      handle,
+      checkKeyword,
+      visibleTweets: check.tweets.length,
+      reason: latestTweet ? "latest_tweet_has_no_date" : "no_visible_tweet_for_user"
+    });
+    return false;
+  }
+
+  const ageDays = Number(Math.max(0, (Date.now() - latestTweet.createdAt.getTime()) / 86_400_000).toFixed(2));
+  if (ageDays <= input.config.staleKeywordUserMaxAgeDays) {
+    await input.record("debug", "browser.keyword_user_stale_check.kept", "Keyword user kept because the direct user search found recent activity", {
+      runId: input.runId,
+      keyword: input.keyword,
+      handle,
+      latestTweetId: latestTweet.id,
+      latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
+      ageDays,
+      maxAgeDays: input.config.staleKeywordUserMaxAgeDays
+    });
+    return false;
+  }
+
+  const importedAt = new Date().toISOString();
+  const staleEntry = input.lists.add("stale_keyword_user", input.keyword, "runtime:browser-search-too-old-check", null, importedAt);
+  const deletedKeywords = input.lists.markDeleted("keyword", input.keyword);
+  input.lists.markDeleted("skipped_keyword_user", input.keyword);
+  await input.record("info", "browser.keyword_user_stale_check.removed", "Keyword user moved to Stale keyword users after direct activity check", {
+    runId: input.runId,
+    keyword: input.keyword,
+    handle,
+    latestTweetId: latestTweet.id,
+    latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
+    ageDays,
+    maxAgeDays: input.config.staleKeywordUserMaxAgeDays,
+    staleEntryId: staleEntry.id,
+    deletedKeywords
+  });
+  return true;
+}
+
+function latestTweetForHandle(tweets: TweetCandidate[], handle: string): TweetCandidate | null {
+  const normalizedHandle = normalizeHandle(handle);
+  if (!normalizedHandle) {
+    return null;
+  }
+  const matching = tweets
+    .filter((tweet) => normalizeHandle(tweet.user.screenName) === normalizedHandle && tweet.createdAt)
+    .sort((left, right) => (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0));
+  return matching[0] ?? null;
 }
 
 function indentBlock(value: string, prefix: string): string[] {

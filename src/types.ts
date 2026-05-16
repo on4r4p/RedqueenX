@@ -153,6 +153,12 @@ export interface ScoringConfig {
 export interface ScoreDecision {
   accepted: boolean;
   score: number;
+  scoreBreakdown?: ScoreBreakdownItem[];
   reasons: string[];
   normalizedText: string;
+}
+
+export interface ScoreBreakdownItem {
+  label: string;
+  points: number;
 }

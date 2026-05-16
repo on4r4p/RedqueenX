@@ -130,6 +130,39 @@ describe("scoreTweet", () => {
     expect(decision.reasons).not.toContain("missing_keyword");
   });
 
+  it("gives strong relevance points to exact security keywords", () => {
+    const tweet: TweetCandidate = {
+      id: "relevance-1",
+      text: "New CVE-2026-12345 vulnerability advisory includes exploit PoC details and mitigation steps for defenders",
+      lang: "en",
+      retweetCount: 1,
+      favoriteCount: 0,
+      user: {
+        screenName: "researcher",
+        followersCount: 400
+      }
+    };
+
+    const decision = scoreTweet(tweet, {
+      keywords: ["vulnerability advisory"],
+      following: [],
+      friends: [],
+      bannedUsers: [],
+      bannedWords: [],
+      sentTweetIds: [],
+      sentTexts: []
+    });
+
+    expect(decision.reasons).not.toContain("score_too_low");
+    expect(decision.score).toBeGreaterThanOrEqual(DEFAULT_SCORING_CONFIG.minimumTweetScore);
+    expect(decision.scoreBreakdown).toEqual(
+      expect.arrayContaining([
+        { label: "keyword match", points: 18 },
+        { label: "security relevance", points: 15 }
+      ])
+    );
+  });
+
   it("rejects unknown or disallowed tweet languages when allowed languages are enabled", () => {
     const baseTweet: TweetCandidate = {
       id: "lang-1",

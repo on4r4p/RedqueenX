@@ -434,7 +434,7 @@ async function changeTimelinePage(action) {
   timelineStatus.textContent = "Loading timeline page...";
   scrollTimelineToTop("auto");
   await refreshTimeline();
-  scrollTimelineToTop("smooth");
+  scrollTimelineToTopAfterRender();
 }
 
 async function changeTimelinePageSize(value) {
@@ -452,7 +452,7 @@ async function changeTimelinePageSize(value) {
   timelineStatus.textContent = "Loading timeline page...";
   scrollTimelineToTop("auto");
   await refreshTimeline();
-  scrollTimelineToTop("smooth");
+  scrollTimelineToTopAfterRender();
 }
 
 function scrollTimelineToTop(behavior = "smooth") {
@@ -461,6 +461,15 @@ function scrollTimelineToTop(behavior = "smooth") {
     document.documentElement.scrollTop = 0;
     document.body.scrollTop = 0;
   }
+}
+
+function scrollTimelineToTopAfterRender() {
+  requestAnimationFrame(() => {
+    scrollTimelineToTop("smooth");
+    window.setTimeout(() => {
+      if (window.scrollY > 4) scrollTimelineToTop("auto");
+    }, 120);
+  });
 }
 
 function formatHandleForList(value) {
@@ -713,6 +722,7 @@ timelinePaginations.forEach((paginationNav) => {
     }
     const button = event.target.closest("[data-page-action]");
     if (!button || button.disabled) return;
+    event.preventDefault();
     await changeTimelinePage(button.dataset.pageAction);
   });
 
