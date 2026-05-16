@@ -393,6 +393,19 @@ describe("admin api", () => {
       )
     ).toEqual({ raw_value: "timeline-user-ban" });
 
+    const timelineUserAddsBannedWordException = await app.inject({
+      method: "POST",
+      url: "/timeline/lists/banned_word_exception",
+      headers: timelineHeaders,
+      payload: { value: "of course" }
+    });
+    expect(timelineUserAddsBannedWordException.statusCode).toBe(200);
+    expect(
+      database
+        .prepare("SELECT raw_value FROM list_entries WHERE kind = 'banned_word_exception' AND raw_value = ? AND is_deleted = 0")
+        .get("of course")
+    ).toEqual({ raw_value: "of course" });
+
     const timelineUserAdminDeleteDenied = await app.inject({
       method: "DELETE",
       url: "/admin/rejected-timeline",

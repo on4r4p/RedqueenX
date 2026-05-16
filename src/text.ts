@@ -26,12 +26,13 @@ export function normalizeSearchText(value: string): string {
     .trim();
 }
 
-export function textContainsBannedTerm(text: string, bannedTerm: string): boolean {
+export function textContainsBannedTerm(text: string, bannedTerm: string, bannedTermExceptions: string[] = []): boolean {
   const term = bannedTerm.trim();
   if (!term) {
     return false;
   }
   const searchableText = stripIgnoredBannedWordContexts(text);
+  const normalizedExceptions = bannedTermExceptions.map(normalizeSearchText).filter(Boolean);
 
   if (containsLiteralSyntax(term)) {
     return containsBoundedLiteralTerm(searchableText, term);
@@ -45,8 +46,18 @@ export function textContainsBannedTerm(text: string, bannedTerm: string): boolea
   return searchableText
     .split(ignoredBannedWordContextBoundary)
     .map(normalizeSearchText)
+    .map((normalizedText) => stripBannedTermExceptions(normalizedText, normalizedExceptions))
     .filter(Boolean)
     .some((normalizedText) => ` ${normalizedText} `.includes(` ${normalizedTerm} `));
+}
+
+function stripBannedTermExceptions(normalizedText: string, normalizedExceptions: string[]): string {
+  let next = normalizedText;
+  for (const exception of normalizedExceptions) {
+    if (!exception) continue;
+    next = ` ${next} `.split(` ${exception} `).join(" ");
+  }
+  return next.replace(/\s+/g, " ").trim();
 }
 
 const ignoredBannedWordContextBoundary = "\u0000";

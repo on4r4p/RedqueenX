@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   isTweetOlderThanDays,
   applyKeywordUserStartIndex,
+  isMissingKeywordUserText,
   isProtectedPostsText,
+  isSuspendedAccountText,
   keywordUserCandidates,
   planKeywordUserCandidates,
   planResumeKeywordUserCandidates,
@@ -68,5 +70,16 @@ describe("stale keyword user pruner helpers", () => {
       )
     ).toBe(true);
     expect(isProtectedPostsText("Something went wrong. Try reloading. Retry")).toBe(false);
+  });
+
+  it("recognizes missing user pages so removed accounts can be moved to stale users", () => {
+    expect(isMissingKeywordUserText("This account doesn’t exist Try searching for another.")).toBe(true);
+    expect(isMissingKeywordUserText("User not found")).toBe(true);
+    expect(isMissingKeywordUserText("Latest posts from an active account")).toBe(false);
+  });
+
+  it("recognizes suspended account pages so suspended @keywords can be moved to stale users", () => {
+    expect(isSuspendedAccountText("Account suspended X suspends accounts which violate the X Rules")).toBe(true);
+    expect(isSuspendedAccountText("This active account posts security research")).toBe(false);
   });
 });

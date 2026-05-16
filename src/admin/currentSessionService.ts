@@ -314,6 +314,12 @@ function formatKeywordUserPruneLine(line: string): string {
       if (valueText(payload.reason) === "protected_posts") {
         return `${prefix}\nRemoved ${keyword || handle || "unknown user"} from Keywords and moved it to Stale keyword users because posts are protected. ${progress}.`;
       }
+      if (valueText(payload.reason) === "account_suspended") {
+        return `${prefix}\nRemoved ${keyword || handle || "unknown user"} from Keywords and moved it to Stale keyword users because the account is suspended. ${progress}.`;
+      }
+      if (valueText(payload.reason) === "user_not_found") {
+        return `${prefix}\nRemoved ${keyword || handle || "unknown user"} from Keywords and moved it to Stale keyword users because the account was not found. ${progress}.`;
+      }
       return `${prefix}\nRemoved ${keyword || handle || "unknown user"} from Keywords: latest tweet ${valueText(payload.latestTweetCreatedAt) || "unknown date"}, age ${valueText(payload.ageDays) || "?"} days. ${progress}.`;
     }
     if (event.endsWith(".user_kept")) {

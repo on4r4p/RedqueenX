@@ -218,6 +218,12 @@ function renderRejectedListButtons(item) {
     )
   );
   buttons.push(
+    ...bannedWords.map((word) => {
+      const suggestion = suggestBannedWordException(word, item.text);
+      return `<button type="button" class="tweet-action-button tweet-list-button" data-list-action="add" data-list-kind="banned_word_exception" data-list-source="prompt" data-list-prompt-button="true" data-list-default-value="${escapeAttr(suggestion)}" title="Add an allowed phrase that contains ${escapeAttr(word)}.">Add exception</button>`;
+    })
+  );
+  buttons.push(
     renderRawBanWordsPromptButton(bannedWords.length > 0)
   );
   buttons.push(
@@ -231,6 +237,16 @@ function renderRawBanWordsPromptButton(compact = false) {
     ? "Add another word or phrase to banned words."
     : "Add one word or phrase to banned words.";
   return `<button type="button" class="tweet-action-button tweet-list-button${compact ? " tweet-list-plus-button" : ""}" data-list-action="add" data-list-kind="banned_word" data-list-source="prompt" data-list-prompt-button="true"${compact ? ' data-list-add-more-word="true"' : ""} title="${title}">${compact ? "+" : "Ban some words"}</button>`;
+}
+
+function suggestBannedWordException(word, text) {
+  const normalizedWord = String(word || "").trim();
+  if (!normalizedWord) return "";
+  const words = String(text || "").match(/[\p{L}\p{N}_@#'-]+/gu) || [];
+  const lowerWord = normalizedWord.toLowerCase();
+  const index = words.findIndex((candidate) => candidate.toLowerCase() === lowerWord);
+  if (index < 0) return normalizedWord;
+  return [words[index - 1], words[index]].filter(Boolean).join(" ");
 }
 
 async function acceptRejectedTweet(button) {
@@ -554,19 +570,39 @@ function shortRawListButtonValue(value) {
 }
 
 function rawListActionText(kind, action, value = "") {
-  const target = kind === "banned_user" ? "user" : "word";
+  const target = rawListTargetName(kind);
   const displayValue = shortRawListButtonValue(value);
+  if (kind === "banned_word_exception") {
+    if (action === "delete") return displayValue ? `Remove exception ${displayValue}` : "Remove exception";
+    return displayValue ? `Allow ${displayValue}` : "Add exception";
+  }
   if (action === "delete") return displayValue ? `Unban ${displayValue}` : `Unban ${target}`;
   return displayValue ? `Ban ${displayValue}` : `Ban ${target}`;
 }
 
 function rawListButtonText(button, kind, action, value = "") {
-  const target = kind === "banned_user" ? "user" : "word";
+  const target = rawListTargetName(kind);
   const displayValue = shortRawListButtonValue(value || button.dataset.listValue);
   if (action === "add" && kind === "banned_word" && !displayValue && button.dataset.listPromptButton === "true") return "Ban some words";
+  if (kind === "banned_word_exception") {
+    if (action === "delete") return displayValue ? `Remove exception ${displayValue}` : "Remove exception";
+    return displayValue ? `Allow ${displayValue}` : "Add exception";
+  }
   if (action === "delete") return displayValue ? `Unban ${displayValue}` : `Unban ${target}`;
   if (button.dataset.listReadd === "true") return displayValue ? `Reban ${displayValue}` : `Reban ${target}`;
   return displayValue ? `Ban ${displayValue}` : `Ban ${target}`;
+}
+
+function rawListTargetName(kind) {
+  if (kind === "banned_user") return "user";
+  if (kind === "banned_word_exception") return "exception";
+  return "word";
+}
+
+function rawListLabel(kind) {
+  if (kind === "banned_user") return "banned users";
+  if (kind === "banned_word_exception") return "banned word exceptions";
+  return "banned words";
 }
 
 function parseRawPromptListValues(value) {
@@ -619,7 +655,7 @@ function setRawListButtonAction(button, kind, action, value, options = {}) {
     button.dataset.listValue = normalizedValue;
     delete button.dataset.listValues;
     delete button.dataset.listSource;
-  } else if (kind === "banned_word") {
+  } else if (kind === "banned_word" || kind === "banned_word_exception") {
     delete button.dataset.listValue;
     delete button.dataset.listValues;
     button.dataset.listSource = "prompt";
@@ -632,7 +668,7 @@ function setRawListButtonAction(button, kind, action, value, options = {}) {
   button.textContent = rawListButtonText(button, kind, action, normalizedValue);
   button.disabled = false;
 
-  const label = kind === "banned_user" ? "banned users" : "banned words";
+  const label = rawListLabel(kind);
   button.title =
     action === "delete"
       ? `Remove ${normalizedValue} from ${label}.`
@@ -640,7 +676,9 @@ function setRawListButtonAction(button, kind, action, value, options = {}) {
         ? `Add ${normalizedValue} back to ${label}.`
         : normalizedValue
           ? `Add ${normalizedValue} to ${label}.`
-          : "Add one word or phrase to banned words.";
+          : kind === "banned_word_exception"
+            ? "Add one allowed phrase to banned word exceptions."
+            : "Add one word or phrase to banned words.";
 }
 
 function setRawListButtonBatchDeleteAction(button, kind, values) {
@@ -652,8 +690,11 @@ function setRawListButtonBatchDeleteAction(button, kind, values) {
   delete button.dataset.listSource;
   delete button.dataset.listReadd;
   delete button.dataset.listAddMoreWord;
-  button.textContent = `Unban ${normalizedValues.length} ${kind === "banned_user" ? "users" : "words"}`;
-  button.title = `Remove ${normalizedValues.join(", ")} from ${kind === "banned_user" ? "banned users" : "banned words"}.`;
+  button.textContent =
+    kind === "banned_word_exception"
+      ? `Remove ${normalizedValues.length} exceptions`
+      : `Unban ${normalizedValues.length} ${kind === "banned_user" ? "users" : "words"}`;
+  button.title = `Remove ${normalizedValues.join(", ")} from ${rawListLabel(kind)}.`;
   button.disabled = false;
 }
 
@@ -706,14 +747,23 @@ async function mutateList(kind, action, value, button) {
     setRawListButtonFeedback(button, error.error || "List update failed.", "error");
     return;
   }
-  const label = kind === "banned_user" ? "banned users" : "banned words";
+  const label = rawListLabel(kind);
   rawTimelineStatus.textContent = action === "delete" ? `Removed ${normalizedValue} from ${label}.` : `Added ${normalizedValue} to ${label}.`;
   if (action === "delete" && kind === "banned_word" && button.dataset.listPromptButton === "true") {
     removeRawPromptBanWordButton(button);
     return;
   }
   setRawListButtonAction(button, kind, action === "delete" ? "add" : "delete", normalizedValue, { readd: action === "delete" });
-  const successMessage = action === "delete" ? "Unbanned." : wasReadd ? "Rebanned." : "Banned.";
+  const successMessage =
+    kind === "banned_word_exception"
+      ? action === "delete"
+        ? "Exception removed."
+        : "Exception added."
+      : action === "delete"
+        ? "Unbanned."
+        : wasReadd
+          ? "Rebanned."
+          : "Banned.";
   setRawListButtonFeedback(button, successMessage, "success");
   if (action === "add" && kind === "banned_word" && button.dataset.listPromptButton === "true") {
     ensureAdditionalRawBanWordButton(button);
@@ -728,7 +778,7 @@ async function mutateListBatch(kind, action, values, button) {
     return;
   }
   button.disabled = true;
-  const label = kind === "banned_user" ? "banned users" : "banned words";
+  const label = rawListLabel(kind);
   rawTimelineStatus.textContent = action === "delete" ? `Removing ${normalizedValues.length} values from ${kind}...` : `Adding ${normalizedValues.length} values to ${kind}...`;
   setRawListButtonFeedback(button, action === "delete" ? "Removing..." : "Banning...");
   for (const value of normalizedValues) {
@@ -758,12 +808,12 @@ async function mutateListBatch(kind, action, values, button) {
     } else {
       button.disabled = false;
     }
-    setRawListButtonFeedback(button, "Unbanned.", "success");
+    setRawListButtonFeedback(button, kind === "banned_word_exception" ? "Exceptions removed." : "Unbanned.", "success");
     return;
   }
   rawTimelineStatus.textContent = `Added ${normalizedValues.length} values to ${label}.`;
   setRawListButtonBatchDeleteAction(button, kind, normalizedValues);
-  setRawListButtonFeedback(button, `Banned ${normalizedValues.length}.`, "success");
+  setRawListButtonFeedback(button, kind === "banned_word_exception" ? `Added ${normalizedValues.length} exceptions.` : `Banned ${normalizedValues.length}.`, "success");
   if (kind === "banned_word" && button.dataset.listPromptButton === "true") {
     ensureAdditionalRawBanWordButton(button);
   }
@@ -863,11 +913,16 @@ rawTimeline.addEventListener("click", (event) => {
     let values = readRawListButtonValues(listButton);
     if (action === "add" && listButton.dataset.listSource === "prompt") {
       const selected = selectedTextInsideRaw(listButton);
-      const promptValue = window.prompt("Word or phrase to add to banned words:", selected) || "";
+      const defaultValue = selected || listButton.dataset.listDefaultValue || "";
+      const promptMessage =
+        kind === "banned_word_exception"
+          ? "Allowed phrase to ignore when checking banned words:"
+          : "Word or phrase to add to banned words:";
+      const promptValue = window.prompt(promptMessage, defaultValue) || "";
       values = parseRawPromptListValues(promptValue);
       value = values[0] || "";
     }
-    if (kind !== "banned_word" && kind !== "banned_user") {
+    if (kind !== "banned_word" && kind !== "banned_user" && kind !== "banned_word_exception") {
       rawTimelineStatus.textContent = "Unsupported list action.";
       return;
     }

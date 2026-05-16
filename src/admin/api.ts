@@ -37,12 +37,12 @@ import {
   parseAccessListInput,
   type ServerAccessConfig
 } from "./serverAccess";
-import { normalizeHandle, normalizeValue } from "../text";
+import { isHandleSearchKeyword, normalizeHandle, normalizeSearchText, normalizeValue } from "../text";
 import type { ListKind, RunRecord, RunStats, TweetCandidate } from "../types";
 import { Crawler } from "../crawler";
 import { XApiClient } from "../x-client";
 import { XActionClient } from "../x-actions";
-import { RssClient } from "../rss-client";
+import { runRssFallback as runSharedRssFallback } from "../rssFallback";
 import { TimelineTweetService, type TimelineTweetExportRecord } from "./timelineTweetService";
 import { normalizeRawTimelineReasonGroupIds, RawTimelineTweetService } from "./rawTimelineTweetService";
 import { MediaCacheService, type MediaCacheConfig } from "./mediaCacheService";
@@ -5809,10 +5809,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
             await saveNoResultKeyword(keyword, tweets.length, config.minimumSearchResults);
           }
         }
-        const selectedTweets = isNoResultSearch ? [] : crawler.selectTweetsForHydration(query, tweets);
+        const prefilterResults = isNoResultSearch ? [] : crawler.explainTweetsForHydration(query, tweets);
+        const selectedTweets = prefilterResults.filter((result) => result.decision.accepted).map((result) => result.tweet);
         const prefilerRejectedTweets = isNoResultSearch ? 0 : tweets.length - selectedTweets.length;
         if (prefilerRejectedTweets > 0) {
           await recordPrefilterRejectedTweets(runId, query, tweets, selectedTweets);
+        }
+        if (!isNoResultSearch) {
+          await maybeMoveStaleKeywordUsersFromApiTooOldResults(runId, keywordGroup, tweets, prefilterResults, xClient);
         }
         const hydratedTweets = await hydrateSelectedTweets(runId, crawler, selectedTweets);
         const results = isNoResultSearch ? [] : crawler.scoreTweets(query, hydratedTweets);
@@ -5944,46 +5948,12 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   }
 
   async function runRssFallback(runId: string): Promise<void> {
-    const feeds = lists.activeValues("rss_feed").slice(0, options.config.rssFallbackFeedLimit);
-    if (!feeds.length) {
-      await recordSession("prob", "rss.fallback.empty", "No RSS feeds available while X search is paused", { runId });
-      return;
-    }
-
-    const rssClient = new RssClient();
-    let savedItems = 0;
-    await recordSession("info", "rss.fallback.started", "RSS fallback started while X search is paused", {
+    await runSharedRssFallback({
       runId,
-      feeds: feeds.length,
-      configuredLimit: options.config.rssFallbackFeedLimit
-    });
-
-    for (const feed of feeds) {
-      try {
-        const items = await rssClient.fetch(feed);
-        const importedAt = new Date().toISOString();
-        for (const item of items) {
-          lists.add("rss_sent", item.link, `runtime:rss:${feed}`, null, importedAt);
-          lists.add("text_sent", `${item.title} ${item.link}`.trim(), `runtime:rss:${feed}`, null, importedAt);
-          savedItems += 1;
-        }
-        await recordSession("debug", "rss.feed.completed", "RSS feed fetched", {
-          runId,
-          feed,
-          items: items.length
-        });
-      } catch (error) {
-        await recordSession("prob", "rss.feed.failed", error instanceof Error ? error.message : "RSS fetch failed", {
-          runId,
-          feed
-        });
-      }
-    }
-
-    await recordSession("info", "rss.fallback.completed", "RSS fallback completed", {
-      runId,
-      feeds: feeds.length,
-      savedItems
+      lists,
+      feedLimit: options.config.rssFallbackFeedLimit,
+      reason: "x_api_paused",
+      record: recordSession
     });
   }
 
@@ -6144,6 +6114,168 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         text: tweet.text
       });
     }
+  }
+
+  async function maybeMoveStaleKeywordUsersFromApiTooOldResults(
+    runId: string,
+    keywordGroup: string[],
+    tweets: TweetCandidate[],
+    prefilterResults: ReturnType<Crawler["explainTweetsForHydration"]>,
+    xClient: XApiClient
+  ): Promise<void> {
+    for (const keyword of keywordGroup) {
+      if (!isHandleSearchKeyword(keyword)) {
+        continue;
+      }
+      const handle = normalizeHandle(keyword);
+      if (!handle) {
+        continue;
+      }
+      const relevantTweets = tweets.filter((tweet) => tweetMentionsHandleOrComesFromHandle(tweet, handle));
+      if (!relevantTweets.length) {
+        continue;
+      }
+      const relevantTweetIds = new Set(relevantTweets.map((tweet) => tweet.id));
+      const tooOldTweets = prefilterResults.filter(
+        (result) => relevantTweetIds.has(result.tweet.id) && result.decision.reasons.some((reason) => reason.startsWith("tweet_too_old"))
+      );
+      const tooOldRatio = tooOldTweets.length / relevantTweets.length;
+      if (tooOldTweets.length < 1 || tooOldRatio < 0.6) {
+        continue;
+      }
+
+      await recordSession("info", "search.keyword_user_stale_check.started", "Most X API results for @keyword were too old; checking the user directly", {
+        runId,
+        keyword,
+        handle,
+        visibleTweets: relevantTweets.length,
+        tooOldTweets: tooOldTweets.length,
+        tooOldRatio,
+        maxAgeDays: options.config.staleKeywordUserMaxAgeDays
+      });
+
+      const result = await checkKeywordUserStaleViaXApi(handle, xClient);
+      if (result.status === "remove") {
+        moveKeywordUserToStaleFromApi(keyword, result.reason);
+        await recordSession("info", "search.keyword_user_stale_check.removed", "Keyword user moved to Stale keyword users after X API activity check", {
+          runId,
+          keyword,
+          handle,
+          ...result,
+          maxAgeDays: options.config.staleKeywordUserMaxAgeDays
+        });
+      } else if (result.status === "keep") {
+        await recordSession("debug", "search.keyword_user_stale_check.kept", "Keyword user kept because X API found recent direct activity", {
+          runId,
+          keyword,
+          handle,
+          ...result,
+          maxAgeDays: options.config.staleKeywordUserMaxAgeDays
+        });
+      } else {
+        await recordSession("prob", "search.keyword_user_stale_check.skipped", "Keyword user could not be confirmed stale through X API", {
+          runId,
+          keyword,
+          handle,
+          ...result
+        });
+      }
+    }
+  }
+
+  async function checkKeywordUserStaleViaXApi(
+    handle: string,
+    xClient: XApiClient
+  ): Promise<
+    | { status: "remove"; reason: string; latestTweetId: string | null; latestTweetCreatedAt: string | null; ageDays: number | null }
+    | { status: "keep"; reason: string; latestTweetId: string; latestTweetCreatedAt: string; ageDays: number }
+    | { status: "skip"; reason: string; error?: string }
+  > {
+    let user: Awaited<ReturnType<XApiClient["lookupUserByUsername"]>>;
+    try {
+      user = await xClient.lookupUserByUsername(handle);
+    } catch (error) {
+      const reason = xApiUserUnavailableReason(error);
+      if (reason) {
+        return { status: "remove", reason, latestTweetId: null, latestTweetCreatedAt: null, ageDays: null };
+      }
+      return { status: "skip", reason: "x_api_user_lookup_failed", error: error instanceof Error ? error.message : String(error) };
+    }
+
+    if (!user?.id) {
+      return { status: "remove", reason: "user_not_found", latestTweetId: null, latestTweetCreatedAt: null, ageDays: null };
+    }
+    if (user.protected) {
+      return { status: "remove", reason: "protected_posts", latestTweetId: null, latestTweetCreatedAt: null, ageDays: null };
+    }
+
+    let timeline: TweetCandidate[];
+    try {
+      timeline = await xClient.userTimeline(user.id, 10, "minimal");
+    } catch (error) {
+      const reason = xApiUserUnavailableReason(error);
+      if (reason) {
+        return { status: "remove", reason, latestTweetId: null, latestTweetCreatedAt: null, ageDays: null };
+      }
+      return { status: "skip", reason: "x_api_user_timeline_failed", error: error instanceof Error ? error.message : String(error) };
+    }
+
+    const latestTweet = timeline
+      .filter((tweet) => tweet.createdAt)
+      .sort((left, right) => (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0))[0];
+    if (!latestTweet?.createdAt) {
+      return { status: "remove", reason: "no_direct_tweet_for_user", latestTweetId: null, latestTweetCreatedAt: null, ageDays: null };
+    }
+    const ageDays = Number(Math.max(0, (Date.now() - latestTweet.createdAt.getTime()) / 86_400_000).toFixed(2));
+    if (ageDays > options.config.staleKeywordUserMaxAgeDays) {
+      return {
+        status: "remove",
+        reason: "latest_tweet_too_old",
+        latestTweetId: latestTweet.id,
+        latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
+        ageDays
+      };
+    }
+    return {
+      status: "keep",
+      reason: "latest_tweet_within_max_age",
+      latestTweetId: latestTweet.id,
+      latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
+      ageDays
+    };
+  }
+
+  function moveKeywordUserToStaleFromApi(keyword: string, reason: string): void {
+    const importedAt = new Date().toISOString();
+    lists.add("stale_keyword_user", keyword, `runtime:x-search-stale-check:${reason}`, null, importedAt);
+    lists.markDeleted("keyword", keyword);
+    lists.markDeleted("skipped_keyword_user", keyword);
+    lists.markDeleted("no_result", keyword);
+    lists.markDeleted("search_terms_used", keyword);
+  }
+
+  function tweetMentionsHandleOrComesFromHandle(tweet: TweetCandidate, handle: string): boolean {
+    const normalizedHandle = normalizeHandle(handle);
+    if (!normalizedHandle) {
+      return false;
+    }
+    const author = normalizeHandle(tweet.user.screenName);
+    return author === normalizedHandle || normalizeSearchText(tweet.text).includes(`@${normalizedHandle}`.toLowerCase());
+  }
+
+  function xApiUserUnavailableReason(error: unknown): "user_not_found" | "account_suspended" | "protected_posts" | null {
+    const message = error instanceof Error ? error.message : String(error);
+    const normalized = message.toLowerCase();
+    if (normalized.includes("suspended")) {
+      return "account_suspended";
+    }
+    if (normalized.includes("protected") || normalized.includes("unauthorized")) {
+      return "protected_posts";
+    }
+    if (normalized.includes("not found") || normalized.includes("could not find") || normalized.includes("does not exist")) {
+      return "user_not_found";
+    }
+    return null;
   }
 
   async function saveNoResultKeyword(keyword: string, tweetsReceived: number, minimumSearchResults: number): Promise<void> {
@@ -7837,7 +7969,7 @@ function getKindParam(params: unknown) {
 
 function getTimelineListKindParam(params: unknown): ListKind | null {
   const kind = getKindParam(params);
-  return kind === "banned_user" || kind === "banned_word" ? kind : null;
+  return kind === "banned_user" || kind === "banned_word" || kind === "banned_word_exception" ? kind : null;
 }
 
 function getIdParam(params: unknown): string {

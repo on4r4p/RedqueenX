@@ -41,6 +41,7 @@ export interface ScoreLists {
   friends: string[];
   bannedUsers: string[];
   bannedWords: string[];
+  bannedWordExceptions?: string[];
   sentTweetIds: string[];
   sentTexts: string[];
   tweetsByUser?: Record<string, number>;
@@ -93,8 +94,12 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
   }
 
   const userBio = tweet.user.description ?? "";
+  const bannedWordExceptions = lists.bannedWordExceptions ?? [];
   for (const bannedWord of lists.bannedWords) {
-    if (textContainsBannedTerm(tweet.text, bannedWord) || textContainsBannedTerm(userBio, bannedWord)) {
+    if (
+      textContainsBannedTerm(tweet.text, bannedWord, bannedWordExceptions) ||
+      textContainsBannedTerm(userBio, bannedWord, bannedWordExceptions)
+    ) {
       reasons.push(`banned_word:${bannedWord}`);
       break;
     }

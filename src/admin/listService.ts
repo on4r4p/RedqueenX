@@ -534,6 +534,7 @@ const editableListKinds: ListKind[] = [
   "friend",
   "banned_user",
   "banned_word",
+  "banned_word_exception",
   "rss_feed",
   "no_result",
   "search_terms_used",

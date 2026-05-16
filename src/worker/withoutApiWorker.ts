@@ -9,6 +9,7 @@ import { loadConfig, type AppConfig } from "../config";
 import { Crawler } from "../crawler";
 import { openDatabase } from "../db/database";
 import { formatDiagnosticsReport, runVpnDiagnostics, type VpnDiagnosticsReport } from "../diagnostics/vpn";
+import { runRssFallback as runSharedRssFallback } from "../rssFallback";
 import { CurrentSessionService, type CurrentSessionLevel } from "../admin/currentSessionService";
 import { ListService } from "../admin/listService";
 import { RunService, parseRunStats } from "../admin/runService";
@@ -22,7 +23,7 @@ import {
   XSessionAlertService,
   type XSessionAlertType
 } from "../admin/xSessionAlertService";
-import { isHandleSearchKeyword, normalizeHandle, normalizeValue } from "../text";
+import { isHandleSearchKeyword, normalizeHandle, normalizeSearchText, normalizeValue } from "../text";
 import type { RunRecord, RunStats, ScoringConfig, TweetCandidate } from "../types";
 import {
   buildBrowserSearchQuery,
@@ -697,6 +698,7 @@ async function runBrowserSearchLoop(input: {
         pauseMinutes,
         nextSearchWindow: nextResetAt
       });
+      await runBrowserRssFallback(input, "browser_pause");
       await interruptibleDelay(input.runs, input.runId, pauseMinutes * 60_000);
       searchesInWindow = 0;
       searchesBeforePause = searchesBeforePauseForKeywords(input.keywords.length - completedKeywords, input.config);
@@ -720,6 +722,7 @@ async function runBrowserSearchLoop(input: {
   }
 
   input.runs.updateStats(input.runId, { currentKeyword: null });
+  await runBrowserRssFallback(input, "browser_completed");
   safeCompleteRun(input.runs, input.runId);
   await input.record("info", "browser.search.completed", "Without-API browser search run completed", {
     runId: input.runId,
@@ -741,6 +744,29 @@ async function runBrowserSearchLoop(input: {
       keywordSummaries
     })
   );
+}
+
+async function runBrowserRssFallback(input: {
+  runId: string;
+  config: ReturnType<typeof loadConfig>;
+  lists: ListService;
+  smoke?: boolean;
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>;
+}, reason: string): Promise<void> {
+  if (input.smoke) {
+    await input.record("debug", "rss.fallback.skipped", "Smoke test skipped RSS fallback", {
+      runId: input.runId,
+      reason
+    });
+    return;
+  }
+  await runSharedRssFallback({
+    runId: input.runId,
+    lists: input.lists,
+    feedLimit: input.config.rssFallbackFeedLimit,
+    reason,
+    record: input.record
+  });
 }
 
 function formatBrowserRunSummary(input: {
@@ -876,7 +902,7 @@ async function maybeMoveStaleKeywordUserFromTooOldResults(input: {
     return false;
   }
   const tooOldRatio = input.tooOldTweets / input.visibleTweets;
-  if (input.tooOldTweets < 2 || tooOldRatio < 0.6) {
+  if (input.tooOldTweets < 1 || tooOldRatio < 0.6) {
     return false;
   }
 
@@ -898,6 +924,24 @@ async function maybeMoveStaleKeywordUserFromTooOldResults(input: {
     position: input.position
   });
 
+  const profileStatus = await checkKeywordUserProfileStatus(input.page, handle, input.runId, input.record);
+  if (profileStatus.reason) {
+    return moveKeywordUserToStale({
+      ...input,
+      keyword: input.keyword,
+      handle,
+      reason: profileStatus.reason,
+      latestTweet: null,
+      ageDays: null,
+      sourceFile: "runtime:browser-search-user-profile-check",
+      recordData: {
+        profileUrl: profileStatus.url,
+        profileTitle: profileStatus.title,
+        pageText: profileStatus.pageText.slice(0, 500)
+      }
+    });
+  }
+
   const check = await searchOneKeyword(input.page, checkKeyword, input.mouseProfile, input.pacing, input.config, input.publicIpv4, {
     runId: input.runId,
     position: input.position,
@@ -905,60 +949,217 @@ async function maybeMoveStaleKeywordUserFromTooOldResults(input: {
     retweetFilterApplied: false,
     record: input.record
   });
-  const latestTweet = latestTweetForHandle(check.tweets, handle);
-  if (!latestTweet?.createdAt) {
+  const pageReason = keywordUserUnavailablePageReason(check.afterSearch.bodyText);
+  const latestTweets = latestTweetsForHandle(check.tweets, handle, 2);
+  if (pageReason || latestTweets.length === 0) {
+    const reason = pageReason ?? "no_visible_tweet_for_user";
+    return moveKeywordUserToStale({
+      ...input,
+      keyword: input.keyword,
+      handle,
+      reason,
+      latestTweet: null,
+      ageDays: null,
+      sourceFile: "runtime:browser-search-user-unavailable-check",
+      recordData: {
+        checkKeyword,
+        visibleTweets: check.tweets.length,
+        pageReason,
+        pageText: check.afterSearch.bodyText.slice(0, 500)
+      }
+    });
+  }
+
+  if (latestTweets.length < 2 || latestTweets.some((tweet) => !tweet.createdAt)) {
+    const latestTweet = latestTweets[0];
+    if (latestTweet?.createdAt) {
+      const ageDays = Number(Math.max(0, (Date.now() - latestTweet.createdAt.getTime()) / 86_400_000).toFixed(2));
+      if (ageDays > input.config.staleKeywordUserMaxAgeDays) {
+        return moveKeywordUserToStale({
+          ...input,
+          keyword: input.keyword,
+          handle,
+          reason: "latest_tweet_too_old",
+          latestTweet,
+          ageDays,
+          sourceFile: "runtime:browser-search-too-old-check",
+          recordData: {
+            checkKeyword,
+            latestTweetId: latestTweet.id,
+            latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
+            ageDays,
+            directUserTweets: latestTweets.length
+          }
+        });
+      }
+    }
     await input.record("prob", "browser.keyword_user_stale_check.skipped", "Keyword user could not be confirmed stale", {
       runId: input.runId,
       keyword: input.keyword,
       handle,
       checkKeyword,
       visibleTweets: check.tweets.length,
-      reason: latestTweet ? "latest_tweet_has_no_date" : "no_visible_tweet_for_user"
+      directUserTweets: latestTweets.length,
+      reason: latestTweets.length < 2 ? "less_than_two_visible_tweets_for_user" : "latest_tweet_has_no_date"
     });
     return false;
   }
 
-  const ageDays = Number(Math.max(0, (Date.now() - latestTweet.createdAt.getTime()) / 86_400_000).toFixed(2));
-  if (ageDays <= input.config.staleKeywordUserMaxAgeDays) {
+  const latestTweet = latestTweets[0];
+  const secondLatestTweet = latestTweets[1];
+  const latestAgeDays = Number(Math.max(0, (Date.now() - latestTweet.createdAt!.getTime()) / 86_400_000).toFixed(2));
+  const secondLatestAgeDays = Number(Math.max(0, (Date.now() - secondLatestTweet.createdAt!.getTime()) / 86_400_000).toFixed(2));
+  const latestTwoTweetsTooOld =
+    latestAgeDays > input.config.staleKeywordUserMaxAgeDays && secondLatestAgeDays > input.config.staleKeywordUserMaxAgeDays;
+  if (!latestTwoTweetsTooOld) {
     await input.record("debug", "browser.keyword_user_stale_check.kept", "Keyword user kept because the direct user search found recent activity", {
       runId: input.runId,
       keyword: input.keyword,
       handle,
       latestTweetId: latestTweet.id,
-      latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
-      ageDays,
+      latestTweetCreatedAt: latestTweet.createdAt!.toISOString(),
+      ageDays: latestAgeDays,
+      secondLatestTweetId: secondLatestTweet.id,
+      secondLatestTweetCreatedAt: secondLatestTweet.createdAt!.toISOString(),
+      secondLatestAgeDays,
       maxAgeDays: input.config.staleKeywordUserMaxAgeDays
     });
     return false;
   }
 
+  return moveKeywordUserToStale({
+    ...input,
+    keyword: input.keyword,
+    handle,
+    reason: "latest_two_tweets_too_old",
+    latestTweet,
+    ageDays: latestAgeDays,
+    sourceFile: "runtime:browser-search-too-old-check",
+    recordData: {
+      checkKeyword,
+      latestTweetId: latestTweet.id,
+      latestTweetCreatedAt: latestTweet.createdAt!.toISOString(),
+      ageDays: latestAgeDays,
+      secondLatestTweetId: secondLatestTweet.id,
+      secondLatestTweetCreatedAt: secondLatestTweet.createdAt!.toISOString(),
+      secondLatestAgeDays
+    }
+  });
+}
+
+async function moveKeywordUserToStale(input: {
+  lists: ListService;
+  keyword: string;
+  handle: string;
+  runId: string;
+  config: AppConfig;
+  reason: string;
+  latestTweet: TweetCandidate | null;
+  ageDays: number | null;
+  sourceFile: string;
+  recordData?: Record<string, unknown>;
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>;
+}): Promise<boolean> {
   const importedAt = new Date().toISOString();
-  const staleEntry = input.lists.add("stale_keyword_user", input.keyword, "runtime:browser-search-too-old-check", null, importedAt);
+  const staleEntry = input.lists.add("stale_keyword_user", input.keyword, input.sourceFile, null, importedAt);
   const deletedKeywords = input.lists.markDeleted("keyword", input.keyword);
   input.lists.markDeleted("skipped_keyword_user", input.keyword);
   await input.record("info", "browser.keyword_user_stale_check.removed", "Keyword user moved to Stale keyword users after direct activity check", {
     runId: input.runId,
     keyword: input.keyword,
-    handle,
-    latestTweetId: latestTweet.id,
-    latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
-    ageDays,
+    handle: input.handle,
+    reason: input.reason,
+    latestTweetId: input.latestTweet?.id ?? null,
+    latestTweetCreatedAt: input.latestTweet?.createdAt?.toISOString() ?? null,
+    ageDays: input.ageDays,
     maxAgeDays: input.config.staleKeywordUserMaxAgeDays,
     staleEntryId: staleEntry.id,
-    deletedKeywords
+    deletedKeywords,
+    ...input.recordData
   });
   return true;
 }
 
-function latestTweetForHandle(tweets: TweetCandidate[], handle: string): TweetCandidate | null {
+function latestTweetsForHandle(tweets: TweetCandidate[], handle: string, limit = 2): TweetCandidate[] {
   const normalizedHandle = normalizeHandle(handle);
   if (!normalizedHandle) {
-    return null;
+    return [];
   }
-  const matching = tweets
+  return tweets
     .filter((tweet) => normalizeHandle(tweet.user.screenName) === normalizedHandle && tweet.createdAt)
-    .sort((left, right) => (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0));
-  return matching[0] ?? null;
+    .sort((left, right) => (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0))
+    .slice(0, limit);
+}
+
+async function checkKeywordUserProfileStatus(
+  page: Page,
+  handle: string,
+  runId: string,
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>
+): Promise<{ reason: KeywordUserUnavailableReason | null; url: string; title: string; pageText: string }> {
+  const profileUrl = `https://x.com/${encodeURIComponent(handle)}`;
+  await gotoWithTransientRetry(page, profileUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }, {
+    attempts: 3,
+    retryDelayMs: 2_500,
+    onRetry: (event) =>
+      record("prob", "browser.keyword_user_profile.navigation_retry", "Transient profile navigation error; retrying", {
+        runId,
+        handle,
+        profileUrl,
+        ...event
+      })
+  });
+  await delay(2_000);
+  const pageText = await page
+    .locator("body")
+    .innerText({ timeout: 3_000 })
+    .catch(() => "");
+  const title = await page.title().catch(() => "");
+  return {
+    reason: keywordUserUnavailablePageReason(`${title}\n${pageText}`),
+    url: page.url(),
+    title,
+    pageText
+  };
+}
+
+type KeywordUserUnavailableReason = "protected_posts" | "user_not_found" | "account_suspended";
+
+function keywordUserUnavailablePageReason(bodyText: string): KeywordUserUnavailableReason | null {
+  if (isSuspendedAccountText(bodyText)) {
+    return "account_suspended";
+  }
+  if (isProtectedPostsText(bodyText)) {
+    return "protected_posts";
+  }
+  return isMissingKeywordUserText(bodyText) ? "user_not_found" : null;
+}
+
+function isProtectedPostsText(value: string): boolean {
+  const normalized = normalizeSearchText(value);
+  return normalized.includes("these posts are protected") && normalized.includes("only approved followers can see");
+}
+
+function isSuspendedAccountText(value: string): boolean {
+  const normalized = normalizeSearchText(value);
+  return (
+    normalized.includes("account suspended") ||
+    normalized.includes("account is suspended") ||
+    normalized.includes("x suspends accounts") ||
+    normalized.includes("twitter suspends accounts")
+  );
+}
+
+function isMissingKeywordUserText(value: string): boolean {
+  const normalized = normalizeSearchText(value);
+  return (
+    normalized.includes("this account doesn t exist") ||
+    normalized.includes("this account doesn’t exist") ||
+    normalized.includes("account doesn t exist") ||
+    normalized.includes("account doesn’t exist") ||
+    normalized.includes("user not found") ||
+    normalized.includes("try searching for another")
+  );
 }
 
 function indentBlock(value: string, prefix: string): string[] {

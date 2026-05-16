@@ -140,7 +140,7 @@ npm run netns:teardown
 
 Add OpenVPN files from the admin settings page or place them under `ops/vpn/`.
 
-Files in `ops/vpn/` are ignored by Git except:
+Files in `ops/vpn/` :
 
 - `ops/vpn/README.md`
 - `ops/vpn/custom.conf.example`

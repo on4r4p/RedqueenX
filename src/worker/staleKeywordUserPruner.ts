@@ -241,6 +241,28 @@ export function isProtectedPostsText(value: string): boolean {
   return normalized.includes("these posts are protected") && normalized.includes("only approved followers can see");
 }
 
+export function isSuspendedAccountText(value: string): boolean {
+  const normalized = value.replace(/\s+/g, " ").trim().toLowerCase();
+  return (
+    normalized.includes("account suspended") ||
+    normalized.includes("account is suspended") ||
+    normalized.includes("x suspends accounts") ||
+    normalized.includes("twitter suspends accounts")
+  );
+}
+
+export function isMissingKeywordUserText(value: string): boolean {
+  const normalized = value.replace(/[’']/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+  return (
+    normalized.includes("this account doesn t exist") ||
+    normalized.includes("account doesn t exist") ||
+    normalized.includes("this account doesn exist") ||
+    normalized.includes("account doesn exist") ||
+    normalized.includes("user not found") ||
+    normalized.includes("try searching for another")
+  );
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig();
@@ -558,7 +580,9 @@ async function applyKeywordUserCheckOutcome(
   report.processedCandidates += 1;
   const position = report.processedCandidates;
   const remainingUsers = Math.max(0, report.totalCandidates - report.processedCandidates);
-  const shouldTreatAsStaleRemoval = result.status === "remove" || (result.status === "delete_keyword" && result.user.reason === "protected_posts");
+  const shouldTreatAsStaleRemoval =
+    result.status === "remove" ||
+    (result.status === "delete_keyword" && (result.user.reason === "protected_posts" || result.user.reason === "user_not_found"));
   if (shouldTreatAsStaleRemoval) {
     const removedUser: PrunedKeywordUser =
       result.status === "remove"
@@ -581,6 +605,8 @@ async function applyKeywordUserCheckOutcome(
       "keyword_user_prune.removed",
       removedUser.reason === "protected_posts"
         ? "Keyword user moved to stale because posts are protected"
+        : removedUser.reason === "user_not_found"
+          ? "Keyword user moved to stale because the account was not found"
         : "Keyword user removed because the latest tweet is too old",
       {
       jobId: args.jobId,
@@ -675,7 +701,8 @@ async function checkKeywordUserViaApi(
   if (timelineResult.status !== "ok") {
     return timelineResult.result;
   }
-  const latestTweet = latestTweetFromUserTimeline(timelineResult.tweets, candidate.handle);
+  const latestTweets = latestTweetsFromUserTimeline(timelineResult.tweets, candidate.handle, 2);
+  const latestTweet = latestTweets[0] ?? null;
   await randomActionPause("after_latest_tweet_check", candidate, options.record, options.progress);
 
   if (!latestTweet?.createdAt) {
@@ -694,8 +721,27 @@ async function checkKeywordUserViaApi(
     return { status: "skip", user };
   }
 
+  if (latestTweets.length < 2 || latestTweets.some((tweet) => !tweet.createdAt)) {
+    const user = {
+      keyword: candidate.keyword,
+      handle: candidate.handle,
+      latestTweetId: latestTweet.id,
+      latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
+      ageDays: Number(tweetAgeDays(latestTweet.createdAt).toFixed(2)),
+      reason: latestTweets.length < 2 ? "less_than_two_api_tweets_for_user" : "latest_tweet_has_no_date"
+    };
+    await options.record("prob", "keyword_user_prune.user_skipped", "Keyword user could not be confirmed stale through X API", {
+      ...user,
+      source: "x_api",
+      ...options.progress
+    });
+    return { status: "skip", user };
+  }
+
+  const secondLatestTweet = latestTweets[1];
   const ageDays = Number(tweetAgeDays(latestTweet.createdAt).toFixed(2));
-  if (isTweetOlderThanDays(latestTweet.createdAt, options.maxAgeDays)) {
+  const secondLatestAgeDays = Number(tweetAgeDays(secondLatestTweet.createdAt!).toFixed(2));
+  if (isTweetOlderThanDays(latestTweet.createdAt, options.maxAgeDays) && isTweetOlderThanDays(secondLatestTweet.createdAt!, options.maxAgeDays)) {
     return {
       status: "remove",
       user: {
@@ -703,7 +749,8 @@ async function checkKeywordUserViaApi(
         handle: candidate.handle,
         latestTweetId: latestTweet.id,
         latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
-        ageDays
+        ageDays,
+        reason: "latest_two_tweets_too_old"
       }
     };
   }
@@ -714,7 +761,7 @@ async function checkKeywordUserViaApi(
     latestTweetId: latestTweet.id,
     latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
     ageDays,
-    reason: "latest_tweet_within_max_age"
+    reason: "one_of_latest_two_tweets_within_max_age"
   };
   await options.record("debug", "keyword_user_prune.user_kept", "Keyword user kept because latest API tweet is recent enough", {
     ...user,
@@ -822,9 +869,9 @@ async function readLatestTweetsFromApi(
   return { status: "done", result };
 }
 
-function latestTweetFromUserTimeline(tweets: TweetCandidate[], handle: string): TweetCandidate | null {
+function latestTweetsFromUserTimeline(tweets: TweetCandidate[], handle: string, limit = 2): TweetCandidate[] {
   const normalizedHandle = normalizeHandle(handle);
-  const matching = tweets
+  return tweets
     .filter((tweet) => {
       if (!tweet.user.screenName) {
         return true;
@@ -833,8 +880,8 @@ function latestTweetFromUserTimeline(tweets: TweetCandidate[], handle: string): 
       return !tweetHandle || tweetHandle === normalizedHandle;
     })
     .filter((tweet) => tweet.createdAt)
-    .sort((left, right) => (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0));
-  return matching[0] ?? null;
+    .sort((left, right) => (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0))
+    .slice(0, limit);
 }
 
 function keywordUserDeleteResult(
@@ -965,6 +1012,11 @@ async function checkKeywordUser(
     };
   }
 ): Promise<KeywordUserCheckResult> {
+  const unavailableProfile = await keywordUserUnavailableProfile(page, candidate, options.record, options.progress);
+  if (unavailableProfile) {
+    return { status: "delete_keyword", user: unavailableProfile };
+  }
+
   await randomActionPause("before_user_search", candidate, options.record, options.progress);
   const searchUrl = buildBrowserSearchUrl(candidate.searchQuery, options.startUrl);
   await options.record("info", "keyword_user_prune.user_search", "Searching latest tweets for keyword user", {
@@ -998,9 +1050,27 @@ async function checkKeywordUser(
     });
     return { status: "delete_keyword", user };
   }
+  const missingUserText = await missingKeywordUserVisibleText(page);
+  if (missingUserText) {
+    const user = {
+      keyword: candidate.keyword,
+      handle: candidate.handle,
+      latestTweetId: null,
+      latestTweetCreatedAt: null,
+      ageDays: null,
+      reason: "user_not_found"
+    };
+    await options.record("info", "keyword_user_prune.missing_keyword", "Keyword user account was not found; removing keyword without adding to skipped", {
+      ...user,
+      pageText: missingUserText.slice(0, 500),
+      ...options.progress
+    });
+    return { status: "delete_keyword", user };
+  }
 
   await randomActionPause("before_latest_tweet_check", candidate, options.record, options.progress);
-  const latestTweet = latestTweetForHandle(await extractVisibleTweetsForKeywordUser(page, candidate, options), candidate.handle);
+  const latestTweets = latestTweetsForHandle(await extractVisibleTweetsForKeywordUser(page, candidate, options), candidate.handle, 2);
+  const latestTweet = latestTweets[0] ?? null;
   await randomActionPause("after_latest_tweet_check", candidate, options.record, options.progress);
 
   if (!latestTweet?.createdAt) {
@@ -1019,8 +1089,40 @@ async function checkKeywordUser(
     return { status: "skip", user };
   }
 
+  if (latestTweets.length < 2 || latestTweets.some((tweet) => !tweet.createdAt)) {
+    const ageDays = Number(tweetAgeDays(latestTweet.createdAt).toFixed(2));
+    if (isTweetOlderThanDays(latestTweet.createdAt, options.maxAgeDays)) {
+      return {
+        status: "remove",
+        user: {
+          keyword: candidate.keyword,
+          handle: candidate.handle,
+          latestTweetId: latestTweet.id,
+          latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
+          ageDays,
+          reason: "latest_tweet_too_old"
+        }
+      };
+    }
+    const user = {
+      keyword: candidate.keyword,
+      handle: candidate.handle,
+      latestTweetId: latestTweet.id,
+      latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
+      ageDays,
+      reason: latestTweets.length < 2 ? "less_than_two_visible_tweets_for_user" : "latest_tweet_has_no_date"
+    };
+    await options.record("prob", "keyword_user_prune.user_skipped", "Keyword user could not be confirmed stale", {
+      ...user,
+      ...options.progress
+    });
+    return { status: "skip", user };
+  }
+
+  const secondLatestTweet = latestTweets[1];
   const ageDays = Number(tweetAgeDays(latestTweet.createdAt).toFixed(2));
-  if (isTweetOlderThanDays(latestTweet.createdAt, options.maxAgeDays)) {
+  const secondLatestAgeDays = Number(tweetAgeDays(secondLatestTweet.createdAt!).toFixed(2));
+  if (isTweetOlderThanDays(latestTweet.createdAt, options.maxAgeDays) && isTweetOlderThanDays(secondLatestTweet.createdAt!, options.maxAgeDays)) {
     return {
       status: "remove",
       user: {
@@ -1028,7 +1130,8 @@ async function checkKeywordUser(
         handle: candidate.handle,
         latestTweetId: latestTweet.id,
         latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
-        ageDays
+        ageDays,
+        reason: "latest_two_tweets_too_old"
       }
     };
   }
@@ -1039,7 +1142,7 @@ async function checkKeywordUser(
     latestTweetId: latestTweet.id,
     latestTweetCreatedAt: latestTweet.createdAt.toISOString(),
     ageDays,
-    reason: "latest_tweet_within_max_age"
+    reason: "one_of_latest_two_tweets_within_max_age"
   };
   await options.record("debug", "keyword_user_prune.user_kept", "Keyword user kept because latest tweet is recent enough", {
     ...user,
@@ -1145,12 +1248,69 @@ async function protectedPostsVisibleText(page: Page): Promise<string | null> {
   return isProtectedPostsText(text) ? text : null;
 }
 
-function latestTweetForHandle(tweets: TweetCandidate[], handle: string): TweetCandidate | null {
+async function keywordUserUnavailableProfile(
+  page: Page,
+  candidate: KeywordUserCandidate,
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>,
+  progress: {
+    position: number;
+    totalCandidates: number;
+    processedUsers: number;
+    remainingUsers: number;
+  }
+): Promise<CheckedKeywordUser | null> {
+  const profileUrl = `https://x.com/${encodeURIComponent(candidate.handle)}`;
+  await gotoWithTransientRetry(page, profileUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+  await delay(2_000);
+  const text = await page
+    .locator("body")
+    .innerText({ timeout: 3_000 })
+    .catch(() => "");
+  const title = await page.title().catch(() => "");
+  const combinedText = `${title}\n${text}`;
+  const reason = isSuspendedAccountText(combinedText)
+    ? "account_suspended"
+    : isProtectedPostsText(combinedText)
+      ? "protected_posts"
+      : isMissingKeywordUserText(combinedText)
+        ? "user_not_found"
+        : null;
+  if (!reason) {
+    return null;
+  }
+  const user = {
+    keyword: candidate.keyword,
+    handle: candidate.handle,
+    latestTweetId: null,
+    latestTweetCreatedAt: null,
+    ageDays: null,
+    reason
+  };
+  await record("info", "keyword_user_prune.unavailable_keyword", "Keyword user profile is unavailable; removing keyword without adding to skipped", {
+    ...user,
+    profileUrl,
+    currentUrl: page.url(),
+    pageTitle: title,
+    pageText: text.slice(0, 500),
+    ...progress
+  });
+  return user;
+}
+
+async function missingKeywordUserVisibleText(page: Page): Promise<string | null> {
+  const text = await page
+    .locator("body")
+    .innerText({ timeout: 3_000 })
+    .catch(() => "");
+  return isMissingKeywordUserText(text) ? text : null;
+}
+
+function latestTweetsForHandle(tweets: TweetCandidate[], handle: string, limit = 2): TweetCandidate[] {
   const normalizedHandle = `@${handle}`.toLowerCase();
-  const matching = tweets
+  return tweets
     .filter((tweet) => tweet.user.screenName.toLowerCase() === normalizedHandle && tweet.createdAt)
-    .sort((left, right) => (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0));
-  return matching[0] ?? null;
+    .sort((left, right) => (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0))
+    .slice(0, limit);
 }
 
 async function extractVisibleTweetsForKeywordUser(

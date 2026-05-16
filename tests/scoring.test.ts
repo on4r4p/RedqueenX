@@ -67,6 +67,71 @@ describe("scoreTweet", () => {
     expect(tweet.text).toContain("Important malware research");
   });
 
+  it("does not reject the allowed phrase of course when course is banned", () => {
+    const tweet: TweetCandidate = {
+      id: "course-1",
+      text: "Of course this advisory includes enough detail about vulnerability mitigation for defenders",
+      lang: "en",
+      retweetCount: 10,
+      user: {
+        screenName: "researcher",
+        followersCount: 1000
+      }
+    };
+
+    const decision = scoreTweet(
+      tweet,
+      {
+        keywords: ["vulnerability"],
+        following: [],
+        friends: [],
+        bannedUsers: [],
+        bannedWords: ["course"],
+        bannedWordExceptions: ["of course"],
+        sentTweetIds: [],
+        sentTexts: []
+      },
+      {
+        ...DEFAULT_SCORING_CONFIG,
+        enableMinimumTweetScore: false
+      }
+    );
+
+    expect(decision.reasons).not.toContain("banned_word:course");
+  });
+
+  it("still rejects course outside the allowed phrase", () => {
+    const tweet: TweetCandidate = {
+      id: "course-2",
+      text: "This course includes enough detail about vulnerability mitigation for defenders",
+      lang: "en",
+      retweetCount: 10,
+      user: {
+        screenName: "researcher",
+        followersCount: 1000
+      }
+    };
+
+    const decision = scoreTweet(
+      tweet,
+      {
+        keywords: ["vulnerability"],
+        following: [],
+        friends: [],
+        bannedUsers: [],
+        bannedWords: ["course"],
+        sentTweetIds: [],
+        sentTexts: []
+      },
+      {
+        ...DEFAULT_SCORING_CONFIG,
+        enableMinimumTweetScore: false
+      }
+    );
+
+    expect(decision.reasons).toContain("banned_word:course");
+  });
+
   it("rejects tweets that are too similar to already accepted text", () => {
     const previousText =
       "A threat actor on a cybercrime forum is claiming to sell an alleged unpatched Boolean-based Blind SQL Injection vulnerability targeting a French government-related imports website. According to the post, the vulnerability allegedly affects a high-traffic backend system.";

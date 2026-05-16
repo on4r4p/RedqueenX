@@ -4,6 +4,7 @@ export const LIST_KINDS = [
   "friend",
   "banned_user",
   "banned_word",
+  "banned_word_exception",
   "rss_feed",
   "tweet_sent",
   "text_sent",

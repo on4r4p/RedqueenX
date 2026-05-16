@@ -128,6 +128,7 @@ export class Crawler {
       friends: this.lists.activeValues("friend"),
       bannedUsers: this.lists.activeValues("banned_user"),
       bannedWords: this.lists.activeValues("banned_word"),
+      bannedWordExceptions: this.lists.activeValues("banned_word_exception"),
       sentTweetIds: this.lists.activeValues("tweet_sent"),
       sentTexts: this.lists.activeValues("text_sent"),
       tweetsByUser: Object.fromEntries(this.acceptedTweetsByUser)
@@ -192,8 +193,9 @@ export function explainTweetPrefilter(
   if (bannedUsers.has(userHandle)) {
     reasons.push(`banned_user:${tweet.user.screenName}`);
   }
+  const bannedWordExceptions = lists.bannedWordExceptions ?? [];
   for (const bannedWord of lists.bannedWords) {
-    if (textContainsBannedTerm(tweet.text, bannedWord)) {
+    if (textContainsBannedTerm(tweet.text, bannedWord, bannedWordExceptions)) {
       reasons.push(`banned_word:${bannedWord}`);
       break;
     }
