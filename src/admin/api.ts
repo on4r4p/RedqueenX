@@ -8180,8 +8180,8 @@ function renderAppFooter(commit: { date: string; sha: string | null }): string {
 }
 
 function resolveLastCommitInfo(): { date: string; sha: string | null } {
-  const envDate = process.env.REDQUEENX_BUILD_COMMIT_DATE?.trim();
-  const envSha = process.env.REDQUEENX_BUILD_COMMIT_SHA?.trim() || null;
+  const envDate = cleanBuildMetadataValue(process.env.REDQUEENX_BUILD_COMMIT_DATE);
+  const envSha = cleanBuildMetadataValue(process.env.REDQUEENX_BUILD_COMMIT_SHA);
   if (envDate) {
     return { date: formatCommitDate(envDate), sha: envSha };
   }
@@ -8199,8 +8199,16 @@ function resolveLastCommitInfo(): { date: string; sha: string | null } {
     }).trim();
     return { date: formatCommitDate(date), sha };
   } catch {
-    return { date: "unknown", sha: envSha };
+    return { date: "unavailable", sha: envSha };
   }
+}
+
+function cleanBuildMetadataValue(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed || trimmed.toLowerCase() === "unknown") {
+    return null;
+  }
+  return trimmed;
 }
 
 function formatCommitDate(value: string): string {
