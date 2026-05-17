@@ -2,6 +2,16 @@ const statusLine = document.getElementById("status-line");
 const adminNavMore = document.getElementById("admin-nav-more");
 const metrics = document.getElementById("metrics");
 const countersUpdatedAt = document.getElementById("counters-updated-at");
+const runPreviewRefreshButton = document.getElementById("run-preview-refresh-button");
+const runPreviewSummary = document.getElementById("run-preview-summary");
+const runPreviewList = document.getElementById("run-preview-list");
+const systemHealthRefreshButton = document.getElementById("system-health-refresh-button");
+const systemHealthUpdated = document.getElementById("system-health-updated");
+const systemHealthSummary = document.getElementById("system-health-summary");
+const systemHealthServices = document.getElementById("system-health-services");
+const systemHealthSsh = document.getElementById("system-health-ssh");
+const systemHealthWeb = document.getElementById("system-health-web");
+const systemHealthRuntime = document.getElementById("system-health-runtime");
 const runStatusLine = document.getElementById("run-status-line");
 const rawTimelineLinks = Array.from(document.querySelectorAll("[data-raw-timeline-link]"));
 const xSessionAlertHeader = document.getElementById("x-session-alert-header");
@@ -211,7 +221,7 @@ let staleKeywordUserInlineListTouched = false;
 let alertSnapshotHeightPx = 360;
 const buttonFeedbackTimers = new WeakMap();
 const manualLoginPollTimers = new Map();
-const moreNavSectionIds = new Set(["tests", "database", "env"]);
+const moreNavSectionIds = new Set(["tests", "database", "env", "system"]);
 
 const editableKinds = new Set(Array.from(editKind.options).map((option) => option.value));
 const openVpnSettingsFields = [
@@ -268,7 +278,8 @@ const metricDefinitions = [
   ["tweet_sent", "Tweets.Sent"],
   ["update_status_call", "UpdateStatus.Call"],
   ["text_sent", "Text.Sent"],
-  ["total_api_call", "TotalApi.Call"]
+  ["total_api_call", "TotalApi.Call"],
+  ["current_session", "Current.Session entries"]
 ];
 
 const scoringNumberFields = [
@@ -1272,6 +1283,94 @@ function renderDatabaseTable(rows, columns) {
   return `<table class="database-table"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
+function renderAvailabilityNote(block, label) {
+  if (!block || block.available) return "";
+  const error = block.error ? ` ${block.error}` : "";
+  return `<div class="empty-state">${escapeHtml(label)} unavailable in this runtime.${escapeHtml(error)}</div>`;
+}
+
+function renderIpTable(rows) {
+  return renderDatabaseTable(rows || [], [
+    { key: "ip", label: "IP" },
+    { key: "count", label: "Count" }
+  ]);
+}
+
+function renderStringList(values) {
+  const rows = (values || []).map((value) => ({ value }));
+  return renderDatabaseTable(rows, [{ key: "value", label: "Value" }]);
+}
+
+async function refreshSystemHealth() {
+  if (!systemHealthSummary) return;
+  systemHealthSummary.innerHTML = '<div class="empty-state">Loading system health...</div>';
+  const data = await jsonFetch("/admin/system/health");
+  if (!data) return;
+
+  if (systemHealthUpdated) {
+    systemHealthUpdated.textContent = `Updated ${new Date(data.generatedAt).toLocaleString()}. Host checks use the last 30 days when journalctl is available.`;
+  }
+
+  systemHealthSummary.innerHTML = [
+    renderMetric("Runtime", data.environment?.inDocker ? "Docker container" : "host/local", true),
+    renderMetric("Host", data.environment?.host || "-", true),
+    renderMetric("SSH accepted logins", data.ssh?.available ? data.ssh.acceptedLogins ?? 0 : "unavailable", true),
+    renderMetric("SSH failed attempts", data.ssh?.available ? data.ssh.failedAttempts ?? 0 : "unavailable", true),
+    renderMetric("fail2ban sshd banned", data.fail2ban?.available ? data.fail2ban.sshd?.currentlyBanned ?? 0 : "unavailable", true),
+    renderMetric("Web scan hits", data.caddy?.available ? data.caddy.suspiciousRequests ?? 0 : "unavailable", true),
+    renderMetric("Webhook invalid signatures", data.webhook?.available ? data.webhook.invalidSignatures ?? 0 : "unavailable", true)
+  ].join("");
+
+  if (systemHealthServices) {
+    systemHealthServices.innerHTML = renderDatabaseTable(data.services || [], [
+      { key: "name", label: "Service" },
+      { key: "status", label: "Status" },
+      { key: "error", label: "Note" }
+    ]);
+  }
+
+  if (systemHealthSsh) {
+    systemHealthSsh.innerHTML = [
+      renderAvailabilityNote(data.ssh, "SSH logs"),
+      data.ssh?.available ? `<h3>SSH login IPs</h3>${renderIpTable(data.ssh.loginIps)}<h3>SSH failed source IPs</h3>${renderIpTable(data.ssh.topIps)}` : "",
+      renderAvailabilityNote(data.fail2ban, "fail2ban"),
+      data.fail2ban?.available
+        ? `<h3>fail2ban sshd</h3>${renderDatabaseTable([data.fail2ban.sshd || {}], [
+            { key: "currentlyBanned", label: "Currently banned" },
+            { key: "totalBanned", label: "Total banned" }
+          ])}<h3>Banned IPs</h3>${renderStringList(data.fail2ban.sshd?.bannedIps || [])}<h3>Jails</h3>${renderStringList(data.fail2ban.jails || [])}`
+        : ""
+    ].join("");
+  }
+
+  if (systemHealthWeb) {
+    systemHealthWeb.innerHTML = [
+      renderAvailabilityNote(data.caddy, "Caddy logs"),
+      data.caddy?.available ? `<h3>Scanner IPs</h3>${renderIpTable(data.caddy.topIps)}` : ""
+    ].join("");
+  }
+
+  if (systemHealthRuntime) {
+    systemHealthRuntime.innerHTML = [
+      renderAvailabilityNote(data.webhook, "Webhook logs"),
+      data.webhook?.available
+        ? `<h3>Webhook</h3>${renderDatabaseTable([data.webhook], [
+            { key: "posts", label: "POSTs" },
+            { key: "invalidSignatures", label: "Invalid signatures" },
+            { key: "errors", label: "Errors" }
+          ])}<h3>Webhook IPs</h3>${renderIpTable(data.webhook.topIps)}`
+        : "",
+      renderAvailabilityNote(data.docker, "Docker compose"),
+      data.docker?.available
+        ? `<h3>Docker compose services</h3>${renderDatabaseTable(data.docker.services || [], [
+            { key: "name", label: "Container" },
+            { key: "status", label: "Status" }
+          ])}`
+        : ""
+    ].join("");
+  }
+}
+
 function renderDatabasePreview(rows) {
   if (!rows.length) {
     return '<div class="empty-state">This table is empty.</div>';
@@ -1469,9 +1568,9 @@ async function refreshStats() {
 
 function renderRunCounterMetric(run) {
   if (!run) {
-    return '<div class="metric"><span>Current run</span><strong class="metric-text">No active run</strong></div>';
+    return '<div class="metric"><span>Active run</span><strong class="metric-text">No active run</strong></div>';
   }
-  return `<div class="metric"><span>Current run</span><strong class="metric-text">${escapeHtml(run.status)} - ${escapeHtml(run.id)}</strong></div>`;
+  return `<div class="metric"><span>Active run</span><strong class="metric-text">${escapeHtml(run.status)} - ${escapeHtml(run.id)}</strong></div>`;
 }
 
 function renderXBudgetMetrics(budget, runtimeModes = {}) {
@@ -1507,10 +1606,10 @@ function renderSearchWithoutApiMetrics(stats) {
   const noResultExcluded = stats.excludedNoResultKeywords ?? 0;
   return `
     <div class="metric"><span>Keywords per session</span><strong>${formatSessionKeywordLimit(stats)}</strong></div>
-    <div class="metric"><span>Total active keywords</span><strong>${stats.keywordTotal ?? 0}</strong></div>
+    <div class="metric"><span>Active keyword entries</span><strong>${stats.keywordTotal ?? 0}</strong></div>
     <div class="metric"><span>No.Result exclusions</span><strong class="metric-text">${noResultExcluded} active / ${noResultSaved} saved</strong></div>
-    <div class="metric"><span>SearchTerms.Used entries</span><strong>${stats.searchTermsUsedKeywords ?? stats.searchedKeywords ?? 0}</strong></div>
-    <div class="metric"><span>Keywords already searched</span><strong>${stats.excludedAlreadySearchedKeywords ?? 0}</strong></div>
+    <div class="metric"><span>SearchTerms.Used saved</span><strong>${stats.searchTermsUsedKeywords ?? stats.searchedKeywords ?? 0}</strong></div>
+    <div class="metric"><span>Active keywords already searched</span><strong>${stats.excludedAlreadySearchedKeywords ?? 0}</strong></div>
     <div class="metric"><span>Available keywords now</span><strong>${stats.availableKeywords ?? 0}</strong></div>
   `;
 }
@@ -3000,7 +3099,8 @@ async function refreshSessionKeywords() {
     return;
   }
   const loadedLabel = data.loaded > 0 ? `${data.loaded} shown` : "0 persisted";
-  sessionKeywordsSummary.textContent = `${loadedLabel} / ${data.total} planned - run ${data.run.id}`;
+  const runScope = data.run.isCurrent ? "active run" : `latest ${data.run.status} run`;
+  sessionKeywordsSummary.textContent = `${loadedLabel} / ${data.total} planned - ${runScope} ${data.run.id}`;
   if (!data.keywords.length) {
     sessionKeywordsList.innerHTML =
       data.total > 0
@@ -3013,6 +3113,31 @@ async function refreshSessionKeywords() {
       <span>#${escapeHtml(item.position)}</span>
       <strong>${escapeHtml(item.keyword)}</strong>
       <em>${escapeHtml(item.status)}</em>
+    </div>`)
+    .join("");
+}
+
+async function refreshRunPreview() {
+  if (!runPreviewList || !runPreviewSummary) return;
+  const data = await jsonFetch("/admin/runs/preview");
+  if (!data) return;
+  const availability = data.availability || {};
+  runPreviewSummary.textContent = [
+    `${data.plannedKeywords ?? 0} planned`,
+    `${availability.availableKeywords ?? 0} available now`,
+    `${availability.excludedBySearchTermsUsed ?? 0} already searched`,
+    `${availability.excludedByNoResult ?? 0} no-result excluded`
+  ].join(" - ");
+  const sample = Array.isArray(data.sample) ? data.sample : [];
+  if (!sample.length) {
+    runPreviewList.innerHTML = '<div class="empty-state">No eligible keyword for the next run.</div>';
+    return;
+  }
+  runPreviewList.innerHTML = sample
+    .map((keyword, index) => `<div class="session-keyword-row">
+      <span>#${index + 1}</span>
+      <strong>${escapeHtml(keyword)}</strong>
+      <em>planned</em>
     </div>`)
     .join("");
 }
@@ -3764,6 +3889,61 @@ function readScoringForm() {
   }
 
   return config;
+}
+
+const scoringPresets = {
+  strict: {
+    enableMinimumTweetScore: true,
+    minimumTweetScore: 28,
+    enableMaximumTweetAgeDays: true,
+    maximumTweetAgeDays: 120,
+    enableMinimumTweetLength: true,
+    minimumTweetLength: 80,
+    enableMaximumMentions: true,
+    maximumMentions: 6,
+    enableSimilarTweetText: true,
+    similarTweetTextThreshold: 0.84
+  },
+  balanced: {
+    enableMinimumTweetScore: true,
+    minimumTweetScore: 18,
+    enableMaximumTweetAgeDays: true,
+    maximumTweetAgeDays: 365,
+    enableMinimumTweetLength: true,
+    minimumTweetLength: 60,
+    enableMaximumMentions: true,
+    maximumMentions: 10,
+    enableSimilarTweetText: true,
+    similarTweetTextThreshold: 0.9
+  },
+  permissive: {
+    enableMinimumTweetScore: true,
+    minimumTweetScore: 10,
+    enableMaximumTweetAgeDays: true,
+    maximumTweetAgeDays: 900,
+    enableMinimumTweetLength: false,
+    minimumTweetLength: 40,
+    enableMaximumMentions: false,
+    maximumMentions: 20,
+    enableSimilarTweetText: true,
+    similarTweetTextThreshold: 0.95
+  }
+};
+
+function applyScoringPreset(name) {
+  const preset = scoringPresets[name];
+  if (!preset) return;
+  for (const [field, value] of Object.entries(preset)) {
+    const element = scoringForm.elements[field];
+    if (!element) continue;
+    if (element.type === "checkbox") {
+      element.checked = Boolean(value);
+    } else {
+      element.value = String(value);
+    }
+  }
+  applyScoringCheckUi();
+  setStatus(`${name[0].toUpperCase()}${name.slice(1)} scoring preset applied. Save scoring to persist it.`);
 }
 
 function readServerAccessForm() {
@@ -4539,6 +4719,9 @@ scoringForm.addEventListener("submit", async (event) => {
 scoringBooleanFields.forEach((field) => {
   scoringForm.elements[field]?.addEventListener("change", applyScoringCheckUi);
 });
+document.querySelectorAll("[data-scoring-preset]").forEach((button) => {
+  button.addEventListener("click", () => applyScoringPreset(button.dataset.scoringPreset));
+});
 
 generalSettingsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -4819,6 +5002,7 @@ document.querySelectorAll("[data-admin-section-target]").forEach((button) => {
       refreshStats().catch((error) => setStatus(error.message));
       refreshCurrentSession().catch((error) => setStatus(error.message));
       refreshSessionKeywords().catch((error) => setStatus(error.message));
+      refreshRunPreview().catch((error) => setStatus(error.message));
     }
     if (section === "tests") {
       refreshBrowserSnapshots().catch((error) => setStatus(error.message));
@@ -4837,8 +5021,14 @@ document.querySelectorAll("[data-admin-section-target]").forEach((button) => {
     if (section === "env") {
       refreshEnvSettings().catch((error) => setStatus(error.message));
     }
+    if (section === "system") {
+      refreshSystemHealth().catch((error) => setStatus(error.message));
+    }
     updateSessionPolling();
   });
+});
+systemHealthRefreshButton?.addEventListener("click", () => {
+  refreshSystemHealth().catch((error) => setStatus(error.message));
 });
 timelineUsersList?.addEventListener("click", (event) => {
   const button = event.target.closest("[data-timeline-user-id]");
@@ -4909,6 +5099,9 @@ sessionRefreshButton.addEventListener("click", () => {
 });
 sessionKeywordsRefreshButton?.addEventListener("click", () => {
   refreshSessionKeywords().catch((error) => setStatus(error.message));
+});
+runPreviewRefreshButton?.addEventListener("click", () => {
+  refreshRunPreview().catch((error) => setStatus(error.message));
 });
 sessionLog?.addEventListener("scroll", updateSessionStickStateFromScroll);
 sessionStickBottom?.addEventListener("change", () => {
@@ -5095,6 +5288,12 @@ staleKeywordUserPruneResult?.addEventListener("click", (event) => {
 const initialAdminSection = window.location.hash.replace("#", "");
 if (initialAdminSection && document.getElementById(`admin-section-${initialAdminSection}`)) {
   showAdminSection(initialAdminSection);
+  if (initialAdminSection === "system") {
+    refreshSystemHealth().catch((error) => setStatus(error.message));
+  }
+  if (initialAdminSection === "session") {
+    refreshRunPreview().catch((error) => setStatus(error.message));
+  }
   updateSessionPolling();
 }
 

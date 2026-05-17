@@ -274,6 +274,7 @@ export class ListService {
         SELECT kind, COUNT(*) AS count
         FROM list_entries
         WHERE is_deleted = 0
+          AND is_empty = 0
         GROUP BY kind
       `)
       .all() as Array<{ kind: string; count: number }>;

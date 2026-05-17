@@ -657,6 +657,7 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('data-admin-section-target="tests"');
     expect(adminPage.body).toContain('data-admin-section-target="database"');
     expect(adminPage.body).toContain('data-admin-section-target="env"');
+    expect(adminPage.body).toContain('data-admin-section-target="system"');
     expect(adminPage.body).toContain('id="admin-nav-more"');
     expect(adminPage.body).toContain("More ...");
     expect(adminPage.body).toContain('data-run-action="start"');
@@ -761,6 +762,7 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="session-keywords-list"');
     expect(adminPage.body).toContain('id="toggle-inline-stale-keyword-users-button"');
     expect(adminPage.body).toContain('id="admin-section-tests"');
+    expect(adminPage.body).toContain('id="admin-section-system"');
     expect(adminPage.body).toContain('data-admin-test="visible-x-login-vpn"');
     expect(adminPage.body).toContain('data-admin-test="media-cache"');
     expect(adminPage.body).toContain("Visible X login VPN preflight");

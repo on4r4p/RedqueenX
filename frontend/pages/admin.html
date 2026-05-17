@@ -64,6 +64,7 @@
               <button class="admin-nav-button" type="button" data-admin-section-target="tests">Tests</button>
               <button class="admin-nav-button" type="button" data-admin-section-target="database">Database</button>
               <button class="admin-nav-button" type="button" data-admin-section-target="env">Env</button>
+              <button class="admin-nav-button" type="button" data-admin-section-target="system">System</button>
             </div>
           </details>
         </nav>
@@ -272,6 +273,17 @@
               <div id="session-keywords-list" class="session-keywords-list"></div>
             </section>
 
+            <section class="session-keywords-panel">
+              <header class="section-header">
+                <div>
+                  <h3>Next run preview</h3>
+                  <p id="run-preview-summary" class="muted">No preview loaded.</p>
+                </div>
+                <button id="run-preview-refresh-button" type="button" class="secondary-button">Refresh preview</button>
+              </header>
+              <div id="run-preview-list" class="session-keywords-list"></div>
+            </section>
+
             <section class="session-counters-panel">
               <header class="section-header">
                 <div>
@@ -280,6 +292,38 @@
                 </div>
               </header>
               <div id="metrics" class="metrics metrics-wide"></div>
+            </section>
+          </section>
+        </section>
+
+        <section id="admin-section-system" class="admin-section">
+          <section class="panel">
+            <header class="section-header">
+              <div>
+                <h2>VPS health</h2>
+                <p id="system-health-updated" class="muted">Not loaded yet.</p>
+              </div>
+              <button id="system-health-refresh-button" type="button" class="secondary-button">Refresh</button>
+            </header>
+            <div id="system-health-summary" class="metrics metrics-wide"></div>
+          </section>
+
+          <section class="database-grid">
+            <section class="panel">
+              <h2>Services</h2>
+              <div id="system-health-services" class="database-scroll"></div>
+            </section>
+            <section class="panel">
+              <h2>SSH and fail2ban</h2>
+              <div id="system-health-ssh" class="database-scroll"></div>
+            </section>
+            <section class="panel">
+              <h2>Web scans</h2>
+              <div id="system-health-web" class="database-scroll"></div>
+            </section>
+            <section class="panel">
+              <h2>Webhook and Docker</h2>
+              <div id="system-health-runtime" class="database-scroll"></div>
             </section>
           </section>
         </section>
@@ -585,6 +629,9 @@
                   </div>
                 </div>
                 <div class="settings-subsection-actions">
+                  <button type="button" class="secondary-button" data-scoring-preset="strict">Strict preset</button>
+                  <button type="button" class="secondary-button" data-scoring-preset="balanced">Balanced preset</button>
+                  <button type="button" class="secondary-button" data-scoring-preset="permissive">Permissive preset</button>
                   <button type="submit" data-settings-section>Save scoring</button>
                 </div>
               </fieldset>

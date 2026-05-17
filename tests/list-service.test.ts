@@ -17,6 +17,17 @@ describe("ListService", () => {
     expect(lists.countActiveByKind().keyword).toBe(1);
   });
 
+  it("does not count empty active entries as usable counters", () => {
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+
+    lists.add("keyword", "");
+    lists.add("keyword", "xss");
+
+    expect(lists.countActiveByKind().keyword).toBe(1);
+    expect(lists.activeValues("keyword")).toEqual(["xss"]);
+  });
+
   it("reuses active handle entries across @handle variants", () => {
     const database = openMemoryDatabase();
     const lists = new ListService(database);

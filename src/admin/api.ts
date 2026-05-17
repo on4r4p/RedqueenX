@@ -1422,6 +1422,19 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     };
   });
 
+  app.get("/admin/system/health", async () => systemHealthReport());
+
+  app.get("/admin/runs/preview", async () => {
+    const runtimeConfig = getXApiConfig();
+    const keywords = plannedKeywords(lists, runtimeConfig);
+    return {
+      generatedAt: new Date().toISOString(),
+      availability: keywordAvailability(lists),
+      plannedKeywords: keywords.length,
+      sample: keywords.slice(0, 80)
+    };
+  });
+
   app.get("/admin/database/overview", async () => databaseAdmin.overview());
 
   app.get("/admin/filesystem/browse", async (request, reply) => {
@@ -1903,7 +1916,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   app.get("/admin/session/keywords", async (request) => {
     const query = z.object({ limit: z.coerce.number().int().positive().max(5_000).default(1_000) }).parse(request.query);
-    const run = runs.current() ?? runs.latest();
+    const currentRun = runs.current();
+    const run = currentRun ?? runs.latest();
     if (!run) {
       return { run: null, keywords: [], total: 0, loaded: 0 };
     }
@@ -1918,7 +1932,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
             : "pending"
     }));
     return {
-      run: { id: run.id, status: run.status },
+      run: { id: run.id, status: run.status, isCurrent: currentRun?.id === run.id },
       keywords,
       total: stats.totalKeywords,
       loaded: keywords.length,
@@ -7310,10 +7324,7 @@ function shuffleKeywordList(keywords: string[]): string[] {
 function keywordAvailability(lists: ListService) {
   const noResults = new Set(lists.activeValues("no_result").map(normalizeValue).filter(Boolean));
   const alreadyUsed = new Set(lists.activeValues("search_terms_used").map(normalizeValue).filter(Boolean));
-  const keywords = lists
-    .activeValues("keyword")
-    .map((keyword) => normalizeValue(keyword))
-    .filter(Boolean);
+  const keywords = Array.from(new Set(lists.activeValues("keyword").map((keyword) => normalizeValue(keyword)).filter(Boolean)));
 
   let excludedByNoResult = 0;
   let excludedBySearchTermsUsed = 0;
@@ -7695,6 +7706,215 @@ function commandErrorOutput(error: unknown): string {
     typeof commandError.message === "string" ? commandError.message : error instanceof Error ? error.message : String(error);
   const code = typeof commandError.code === "string" ? commandError.code : "";
   return [stderr, stdout, message, code].filter(Boolean).join("\n");
+}
+
+type SafeCommandResult = {
+  available: boolean;
+  stdout: string;
+  stderr: string;
+  error?: string;
+};
+
+type IpCount = {
+  ip: string;
+  count: number;
+};
+
+async function systemHealthReport() {
+  const since = "30 days ago";
+  const [docker, caddy, webhook, ssh, fail2ban, dockerCompose] = await Promise.all([
+    serviceStatus("docker"),
+    serviceStatus("caddy"),
+    serviceStatus("redqueenx-webhook"),
+    sshHealth(since),
+    fail2banHealth(),
+    dockerComposeHealth()
+  ]);
+  const caddyScan = await caddyScanHealth(since);
+  const webhookActivity = await webhookHealth(since);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    environment: {
+      inDocker: fsSync.existsSync("/.dockerenv"),
+      cwd: process.cwd(),
+      host: os.hostname()
+    },
+    services: [docker, caddy, webhook],
+    ssh,
+    fail2ban,
+    caddy: caddyScan,
+    webhook: webhookActivity,
+    docker: dockerCompose
+  };
+}
+
+async function serviceStatus(name: string) {
+  const result = await safeExec("systemctl", ["is-active", name], 3_000, 100_000);
+  return {
+    name,
+    available: result.available,
+    status: result.available ? firstLine(result.stdout || result.stderr || "unknown") || "unknown" : "unavailable",
+    error: result.error
+  };
+}
+
+async function sshHealth(since: string) {
+  const result = await safeExec("journalctl", ["-u", "ssh", "-u", "sshd", "--since", since, "--no-pager", "-o", "cat"], 8_000);
+  if (!result.available) {
+    return { available: false, window: since, failedAttempts: 0, topIps: [] as IpCount[], error: result.error };
+  }
+  const failedPattern = /Failed password|Invalid user|authentication failure|Connection closed by authenticating user/i;
+  const failedLines = result.stdout
+    .split(/\r?\n/)
+    .filter((line) => failedPattern.test(line));
+  const acceptedPattern = /Accepted password|Accepted publickey|Accepted keyboard-interactive/i;
+  const acceptedLines = result.stdout
+    .split(/\r?\n/)
+    .filter((line) => acceptedPattern.test(line));
+  return {
+    available: true,
+    window: since,
+    failedAttempts: failedLines.length,
+    acceptedLogins: acceptedLines.length,
+    topIps: topIpCounts(failedLines.join("\n")),
+    loginIps: topIpCounts(acceptedLines.join("\n")),
+    error: result.stderr ? firstLine(result.stderr) : undefined
+  };
+}
+
+async function fail2banHealth() {
+  const [summary, sshd] = await Promise.all([
+    safeExec("fail2ban-client", ["status"], 5_000),
+    safeExec("fail2ban-client", ["status", "sshd"], 5_000)
+  ]);
+  if (!summary.available && !sshd.available) {
+    return {
+      available: false,
+      jails: [] as string[],
+      sshd: { currentlyBanned: 0, totalBanned: 0, bannedIps: [] as string[] },
+      error: summary.error || sshd.error
+    };
+  }
+  const sshdText = sshd.stdout || "";
+  return {
+    available: true,
+    jails: parseFail2banJails(summary.stdout),
+    sshd: {
+      currentlyBanned: parseNumberAfterLabel(sshdText, "Currently banned"),
+      totalBanned: parseNumberAfterLabel(sshdText, "Total banned"),
+      bannedIps: parseFail2banBannedIps(sshdText)
+    },
+    error: !sshd.available ? sshd.error : undefined
+  };
+}
+
+async function caddyScanHealth(since: string) {
+  const result = await safeExec("journalctl", ["-u", "caddy", "--since", since, "--no-pager", "-o", "cat"], 8_000, 4_000_000);
+  if (!result.available) {
+    return { available: false, window: since, suspiciousRequests: 0, topIps: [] as IpCount[], error: result.error };
+  }
+  const suspiciousPattern =
+    /\.env|wp-login\.php|xmlrpc\.php|phpmyadmin|phpMyAdmin|cgi-bin|boaform|HNAP1|vendor\/phpunit|actuator|server-status|\.git|\.aws|config\.json/i;
+  const suspiciousLines = result.stdout
+    .split(/\r?\n/)
+    .filter((line) => suspiciousPattern.test(line));
+  return {
+    available: true,
+    window: since,
+    suspiciousRequests: suspiciousLines.length,
+    topIps: topIpCounts(suspiciousLines.join("\n"))
+  };
+}
+
+async function webhookHealth(since: string) {
+  const result = await safeExec("journalctl", ["-u", "redqueenx-webhook", "--since", since, "--no-pager", "-o", "cat"], 8_000);
+  if (!result.available) {
+    return { available: false, window: since, posts: 0, invalidSignatures: 0, errors: 0, topIps: [] as IpCount[], error: result.error };
+  }
+  return {
+    available: true,
+    window: since,
+    posts: countMatches(result.stdout, /incoming HTTP POST|POST \/hooks/gi),
+    invalidSignatures: countMatches(result.stdout, /invalid payload signatures/gi),
+    errors: countMatches(result.stdout, /error evaluating hook|error occurred|error in exec/gi),
+    topIps: topIpCounts(result.stdout)
+  };
+}
+
+async function dockerComposeHealth() {
+  const result = await safeExec("docker", ["compose", "-f", "compose.prod.yaml", "ps"], 6_000, 500_000);
+  if (!result.available) {
+    return { available: false, services: [] as Array<{ name: string; status: string }>, error: result.error };
+  }
+  const services = result.stdout
+    .split(/\r?\n/)
+    .slice(1)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split(/\s{2,}/);
+      return {
+        name: parts[0] || line,
+        status: parts.find((part) => /\b(Up|Exited|Restarting|Created|Paused)\b/i.test(part)) || parts.at(-1) || "unknown"
+      };
+    });
+  return { available: true, services };
+}
+
+async function safeExec(command: string, args: string[], timeout = 5_000, maxBuffer = 2_000_000): Promise<SafeCommandResult> {
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, {
+      timeout,
+      maxBuffer
+    });
+    return { available: true, stdout, stderr };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return {
+      available: code !== "ENOENT",
+      stdout: typeof (error as { stdout?: unknown }).stdout === "string" ? String((error as { stdout?: unknown }).stdout) : "",
+      stderr: typeof (error as { stderr?: unknown }).stderr === "string" ? String((error as { stderr?: unknown }).stderr) : "",
+      error: commandErrorSummary(error)
+    };
+  }
+}
+
+function topIpCounts(text: string, limit = 30): IpCount[] {
+  const counts = new Map<string, number>();
+  for (const ip of extractIps(text)) {
+    counts.set(ip, (counts.get(ip) || 0) + 1);
+  }
+  return Array.from(counts, ([ip, count]) => ({ ip, count }))
+    .sort((a, b) => b.count - a.count || a.ip.localeCompare(b.ip))
+    .slice(0, limit);
+}
+
+function extractIps(text: string): string[] {
+  const ips = text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
+  return ips.filter((ip) => ip.split(".").every((part) => Number(part) >= 0 && Number(part) <= 255));
+}
+
+function countMatches(text: string, pattern: RegExp): number {
+  return Array.from(text.matchAll(pattern)).length;
+}
+
+function parseNumberAfterLabel(text: string, label: string): number {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = text.match(new RegExp(`${escaped}:\\s*(\\d+)`, "i"));
+  return match ? Number(match[1]) : 0;
+}
+
+function parseFail2banJails(text: string): string[] {
+  const match = text.match(/Jail list:\s*(.+)$/im);
+  if (!match) return [];
+  return match[1].split(/,\s*/).map((jail) => jail.trim()).filter(Boolean);
+}
+
+function parseFail2banBannedIps(text: string): string[] {
+  const match = text.match(/Banned IP list:\s*(.*)$/im);
+  if (!match || !match[1].trim()) return [];
+  return extractIps(match[1]);
 }
 
 async function waitForProcessesToExit(pids: number[], timeoutMs: number): Promise<number[]> {
