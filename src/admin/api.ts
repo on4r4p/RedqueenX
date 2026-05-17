@@ -2737,7 +2737,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     clearApiResumeTimer(run.id);
     const paused = runs.pause(run.id);
     await recordSession("info", "run.paused", "Run paused", { runId: paused.id, status: paused.status });
-    return { run: paused };
+    const rssFallback = run.status !== "paused" ? await runRssFallback(paused.id, "manual_pause") : null;
+    return { run: paused, rssFallback };
   });
 
   app.post("/admin/runs/current/resume", async (_request, reply) => {
@@ -2794,9 +2795,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     try {
       const id = getIdParam(request.params);
       clearApiResumeTimer(id);
+      const existing = runs.get(id);
       const run = runs.pause(id);
       await recordSession("info", "run.paused", "Run paused", { runId: run.id, status: run.status });
-      return { run };
+      const rssFallback = existing?.status !== "paused" ? await runRssFallback(run.id, "manual_pause") : null;
+      return { run, rssFallback };
     } catch (error) {
       await recordSession("prob", "run.pause.failed", error instanceof Error ? error.message : "Run not found");
       reply.code(404).send({ error: error instanceof Error ? error.message : "Run not found" });
@@ -5961,12 +5964,15 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return hydratedTweets;
   }
 
-  async function runRssFallback(runId: string): Promise<void> {
-    await runSharedRssFallback({
+  async function runRssFallback(
+    runId: string,
+    reason = "x_api_paused"
+  ): Promise<Awaited<ReturnType<typeof runSharedRssFallback>>> {
+    return runSharedRssFallback({
       runId,
       lists,
       feedLimit: options.config.rssFallbackFeedLimit,
-      reason: "x_api_paused",
+      reason,
       record: recordSession
     });
   }

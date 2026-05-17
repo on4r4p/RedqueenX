@@ -4180,7 +4180,14 @@ async function runAction(action) {
   }
   const result = await jsonFetch(`/admin/runs/current/${action}`, { method: "POST" });
   if (result) {
-    setStatus(`Run ${result.run.status}: ${result.run.id}`);
+    const rssFallback = result.rssFallback;
+    if (rssFallback) {
+      setStatus(
+        `Run ${result.run.status}: ${result.run.id}. RSS fallback: ${rssFallback.savedItems} saved from ${rssFallback.feeds} feeds.`
+      );
+    } else {
+      setStatus(`Run ${result.run.status}: ${result.run.id}`);
+    }
   }
   if (action === "resume") {
     await openCurrentSessionSection();

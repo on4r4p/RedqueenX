@@ -1788,28 +1788,30 @@ describe("admin api", () => {
       url: "/admin/runs/current/pause",
       headers: authHeaders
     });
-	    expect(runPause.statusCode).toBe(200);
-	    expect(runPause.json().run.status).toBe("paused");
-	
-	    const runStartWhilePaused = await app.inject({
-	      method: "POST",
-	      url: "/admin/runs",
-	      headers: authHeaders
-	    });
-	    expect(runStartWhilePaused.statusCode).toBe(200);
-	    expect(runStartWhilePaused.json().run.status).toBe("running");
+    expect(runPause.statusCode).toBe(200);
+    expect(runPause.json().run.status).toBe("paused");
+    expect(runPause.json().rssFallback).toEqual({ feeds: 0, savedItems: 0, failedFeeds: 0 });
 
-	    const runPauseAgain = await app.inject({
-	      method: "POST",
-	      url: "/admin/runs/current/pause",
-	      headers: authHeaders
-	    });
-	    expect(runPauseAgain.statusCode).toBe(200);
-	    expect(runPauseAgain.json().run.status).toBe("paused");
+    const runStartWhilePaused = await app.inject({
+      method: "POST",
+      url: "/admin/runs",
+      headers: authHeaders
+    });
+    expect(runStartWhilePaused.statusCode).toBe(200);
+    expect(runStartWhilePaused.json().run.status).toBe("running");
 
-	    const runResume = await app.inject({
-	      method: "POST",
-	      url: "/admin/runs/current/resume",
+    const runPauseAgain = await app.inject({
+      method: "POST",
+      url: "/admin/runs/current/pause",
+      headers: authHeaders
+    });
+    expect(runPauseAgain.statusCode).toBe(200);
+    expect(runPauseAgain.json().run.status).toBe("paused");
+    expect(runPauseAgain.json().rssFallback).toEqual({ feeds: 0, savedItems: 0, failedFeeds: 0 });
+
+    const runResume = await app.inject({
+      method: "POST",
+      url: "/admin/runs/current/resume",
       headers: authHeaders
     });
     expect(runResume.statusCode).toBe(200);
