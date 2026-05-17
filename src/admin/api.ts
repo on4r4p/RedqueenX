@@ -8450,9 +8450,15 @@ function formatCommitDate(value: string): string {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
+  const timeZone = process.env.TZ?.trim() || "Europe/Paris";
   return new Intl.DateTimeFormat("fr-FR", {
-    dateStyle: "medium",
-    timeStyle: "short"
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone,
+    timeZoneName: "short"
   }).format(date);
 }
 
