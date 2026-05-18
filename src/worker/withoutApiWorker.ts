@@ -16,6 +16,7 @@ import { RunService, parseRunStats } from "../admin/runService";
 import { SettingsService } from "../admin/settingsService";
 import { RawTimelineTweetService, type RawTimelineDecisionUpdate } from "../admin/rawTimelineTweetService";
 import { TimelineTweetService } from "../admin/timelineTweetService";
+import { TimelineItemService } from "../admin/timelineItemService";
 import { XBrowserAccountService, type XBrowserAccountRecord } from "../admin/xBrowserAccountService";
 import {
   defaultManualVerificationMessage,
@@ -186,6 +187,7 @@ async function main() {
   const settings = new SettingsService(database);
   const rawTimelineTweets = new RawTimelineTweetService(database);
   const timelineTweets = new TimelineTweetService(database);
+  const timelineItems = new TimelineItemService(database);
   const accounts = new XBrowserAccountService(database);
   const alerts = new XSessionAlertService(database);
   const currentSession = new CurrentSessionService(config.currentSessionFile);
@@ -317,6 +319,7 @@ async function main() {
       record,
       crawler,
       rawTimelineTweets,
+      timelineItems,
       smoke: args.smoke
     });
   } catch (error) {
@@ -399,6 +402,7 @@ async function runBrowserSearchLoop(input: {
   record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>;
   crawler: Crawler;
   rawTimelineTweets: RawTimelineTweetService;
+  timelineItems: TimelineItemService;
   smoke?: boolean;
 }) {
   const pacing = browserPacingConfig(input.config);
@@ -688,7 +692,6 @@ async function runBrowserSearchLoop(input: {
       },
       source: input.smoke ? "test" : "tweet"
     });
-
     if (searchesInWindow >= searchesBeforePause && completedKeywords < input.keywords.length) {
       const pauseMinutes = randomInt(input.config.searchWithoutApiPauseMinMinutes, input.config.searchWithoutApiPauseMaxMinutes);
       const nextResetAt = new Date(Date.now() + pauseMinutes * 60_000).toISOString();
@@ -750,6 +753,7 @@ async function runBrowserRssFallback(input: {
   runId: string;
   config: ReturnType<typeof loadConfig>;
   lists: ListService;
+  timelineItems: TimelineItemService;
   smoke?: boolean;
   record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>;
 }, reason: string): Promise<void> {
@@ -763,6 +767,7 @@ async function runBrowserRssFallback(input: {
   await runSharedRssFallback({
     runId: input.runId,
     lists: input.lists,
+    timelineItems: input.timelineItems,
     feedLimit: input.config.rssFallbackFeedLimit,
     reason,
     record: input.record

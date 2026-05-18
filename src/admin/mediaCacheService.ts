@@ -55,7 +55,8 @@ export interface MediaSource {
   mediaType: string;
 }
 
-type TimelineMediaItem = Omit<TimelineTweetItem, "source" | "tweetId" | "tweetUrl" | "retweetCount" | "favoriteCount" | "score" | "acceptedAt"> & {
+type TimelineMediaItem = Omit<TimelineTweetItem, "id" | "source" | "tweetId" | "tweetUrl" | "retweetCount" | "favoriteCount" | "score" | "acceptedAt"> & {
+  id: number | string;
   source: string;
   tweetId: string | null;
   tweetUrl: string | null;

@@ -3,14 +3,17 @@ const timelineStatus = document.getElementById("timeline-status");
 const timelinePaginations = Array.from(document.querySelectorAll("[data-timeline-pagination]"));
 const rawTimelineLinks = Array.from(document.querySelectorAll("[data-raw-timeline-link]"));
 const adminLinks = Array.from(document.querySelectorAll("[data-admin-link]"));
+const sourceFilterInputs = Array.from(document.querySelectorAll("[data-source-filter]"));
 const retryAbsTwimgFailures = document.getElementById("retry-abs-twimg-failures");
 const timelineDefaultPageSize = 50;
 const timelineMaxPageSize = 200;
 const timelineQueryLimit = readOptionalBoundedQueryInt("limit", 1, timelineMaxPageSize);
+const defaultTimelineSources = ["tweet", "rss"];
 const timelineState = {
   offset: readBoundedQueryInt("offset", 0, 0, Number.MAX_SAFE_INTEGER),
   limit: timelineQueryLimit ?? timelineDefaultPageSize,
   customLimit: timelineQueryLimit !== null,
+  sources: readSourceFilters(),
   total: 0,
   hasMore: false
 };
@@ -288,12 +291,12 @@ function renderMetrics(item) {
   const retweets = item.retweetCount ?? 0;
   const favorites = item.favoriteCount ?? 0;
   const score = item.score ?? "legacy";
+  const createdAt = item.tweetCreatedAt || item.acceptedAt;
   return `<div class="tweet-actions">
     ${item.keyword ? `<span>Keyword: ${escapeHtml(item.keyword)}</span>` : ""}
-    <span>Retweets: ${retweets}</span>
-    <span>Favorites: ${favorites}</span>
+    <span>Retweets: ${retweets}</span><span>Favorites: ${favorites}</span>
     <span>Score: ${score}</span>
-    ${item.tweetCreatedAt ? `<span>${formatDate(item.tweetCreatedAt)}</span>` : ""}
+    ${createdAt ? `<span>${formatDate(createdAt)}</span>` : ""}
   </div>`;
 }
 
@@ -303,6 +306,9 @@ async function refreshTimeline() {
   });
   if (timelineState.customLimit) {
     params.set("limit", String(timelineState.limit));
+  }
+  if (timelineState.sources.length > 0 && timelineState.sources.length < defaultTimelineSources.length) {
+    params.set("sources", timelineState.sources.join(","));
   }
   const response = await fetch(`/timeline/data?${params.toString()}`);
   if (response.status === 401) {
@@ -339,8 +345,9 @@ async function refreshTimeline() {
   timeline.innerHTML = items
     .map((item) => {
       const author = item.author || "legacy";
+      const externalLabel = item.source === "rss" ? "RSS link hidden" : "Tweet link hidden";
       const tweetLink = item.tweetUrl
-        ? `<span class="tweet-link external-link-disabled" data-external-url="${escapeAttr(item.tweetUrl)}" title="Click to show a warning before opening X.">Tweet link hidden</span>`
+        ? `<span class="tweet-link external-link-disabled" data-external-url="${escapeAttr(item.tweetUrl)}" title="Click to show a warning before opening this link.">${externalLabel}</span>`
         : "";
       return `<article class="tweet-card">
         ${renderAvatar(item, author)}
@@ -425,7 +432,39 @@ function updateTimelineUrl() {
   } else {
     url.searchParams.delete("offset");
   }
+  if (timelineState.sources.length > 0 && timelineState.sources.length < defaultTimelineSources.length) {
+    url.searchParams.set("sources", timelineState.sources.join(","));
+  } else {
+    url.searchParams.delete("sources");
+  }
   window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+}
+
+function readSourceFilters() {
+  const params = new URLSearchParams(window.location.search);
+  const sourceParam = params.get("sources");
+  if (!sourceParam) return [...defaultTimelineSources];
+  const values = sourceParam
+    .split(",")
+    .map((source) => source.trim())
+    .filter((source) => defaultTimelineSources.includes(source));
+  return values.length > 0 ? Array.from(new Set(values)) : [...defaultTimelineSources];
+}
+
+function syncSourceFilterInputs() {
+  sourceFilterInputs.forEach((input) => {
+    input.checked = timelineState.sources.includes(input.value);
+  });
+}
+
+async function changeTimelineSources() {
+  const selected = sourceFilterInputs.filter((input) => input.checked).map((input) => input.value);
+  timelineState.sources = selected.length > 0 ? selected : [...defaultTimelineSources];
+  timelineState.offset = 0;
+  syncSourceFilterInputs();
+  timelineStatus.textContent = "Loading timeline sources...";
+  scrollTimelineToTop("auto");
+  await refreshTimeline();
 }
 
 async function changeTimelinePage(action) {
@@ -759,6 +798,15 @@ timelinePaginations.forEach((paginationNav) => {
     await changeTimelinePageSize(input.value);
   });
 });
+
+sourceFilterInputs.forEach((input) => {
+  input.addEventListener("change", () => {
+    changeTimelineSources().catch((error) => {
+      timelineStatus.textContent = error instanceof Error ? error.message : "Timeline source filter failed.";
+    });
+  });
+});
+syncSourceFilterInputs();
 
 retryAbsTwimgFailures?.addEventListener("click", () => {
   const confirmed = window.confirm("Retry all timeline media downloads that failed because abs.twimg.com was blocked?\n\nContinue?");

@@ -28,6 +28,15 @@
       <section class="timeline-maintenance-bar">
         <button id="retry-abs-twimg-failures" type="button" class="tweet-action-button" title="Retry timeline media downloads that previously failed because abs.twimg.com was blocked.">Retry failed media</button>
       </section>
+      <section class="timeline-filter-bar" aria-label="Timeline source filters">
+        <div class="timeline-filter-field">
+          <span>Sources</span>
+          <div class="timeline-filter-options" role="group" aria-label="Timeline source filters">
+            <label><input type="checkbox" data-source-filter value="tweet" checked /> Tweets</label>
+            <label><input type="checkbox" data-source-filter value="rss" checked /> RSS</label>
+          </div>
+        </div>
+      </section>
       <nav id="timeline-pagination" class="timeline-pagination is-hidden" aria-label="Timeline pagination" data-timeline-pagination>
         <button type="button" class="tweet-action-button" data-page-action="prev">Previous</button>
         <span data-pagination-label></span>

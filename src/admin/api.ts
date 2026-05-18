@@ -44,6 +44,7 @@ import { XApiClient } from "../x-client";
 import { XActionClient } from "../x-actions";
 import { runRssFallback as runSharedRssFallback } from "../rssFallback";
 import { TimelineTweetService, type TimelineTweetExportRecord } from "./timelineTweetService";
+import { TimelineItemService } from "./timelineItemService";
 import { normalizeRawTimelineReasonGroupIds, RawTimelineTweetService } from "./rawTimelineTweetService";
 import { MediaCacheService, type MediaCacheConfig } from "./mediaCacheService";
 import { MediaCacheJobService } from "./mediaCacheJobService";
@@ -140,7 +141,18 @@ const databaseTableQuerySchema = z.object({
 });
 const timelineQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(200).optional(),
-  offset: z.coerce.number().int().min(0).default(0)
+  offset: z.coerce.number().int().min(0).default(0),
+  sources: z
+    .string()
+    .optional()
+    .transform((value) =>
+      value
+        ? value
+            .split(",")
+            .map((source) => source.trim())
+            .filter((source): source is "tweet" | "rss" => source === "tweet" || source === "rss")
+        : undefined
+    )
 });
 const rawTimelineQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(300).optional(),
@@ -570,6 +582,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   const importer = new LegacyImporter(options.database);
   const timeline = new LegacyTimelineService(options.database);
   const timelineTweets = new TimelineTweetService(options.database);
+  const timelineItems = new TimelineItemService(options.database);
   const rawTimelineTweets = new RawTimelineTweetService(options.database);
   const mediaCacheJobs = new MediaCacheJobService(options.database);
   const settings = new SettingsService(options.database);
@@ -975,7 +988,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     await mediaCacheService.prune().catch(() => undefined);
     const page = timeline.page({
       limit: query.limit ?? xApiConfig.timelineDefaultPageSize,
-      offset: query.offset
+      offset: query.offset,
+      sources: query.sources
     });
     return {
       items: page.items.map((item) => mediaCacheService.decorateTimelineItem(item)),
@@ -5866,7 +5880,6 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
           noResultSaved: isNoResultSearch,
           apiCallsRemaining
         });
-
         if (apiCallsRemaining <= 0) {
           const nextApiResetAt = await pauseForApiWindow(runId, "Search paused until the next API window", {
             apiCallsRemaining
@@ -5971,6 +5984,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return runSharedRssFallback({
       runId,
       lists,
+      timelineItems,
       feedLimit: options.config.rssFallbackFeedLimit,
       reason,
       record: recordSession

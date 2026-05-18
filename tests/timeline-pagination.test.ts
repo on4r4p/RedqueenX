@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ListService } from "../src/admin/listService";
 import { LegacyTimelineService } from "../src/admin/legacyTimeline";
+import { TimelineItemService } from "../src/admin/timelineItemService";
 import { TimelineTweetService } from "../src/admin/timelineTweetService";
 import { openMemoryDatabase } from "../src/db/database";
 
@@ -26,6 +27,49 @@ describe("timeline pagination", () => {
       hasMore: true
     });
     expect(page.items.map((item) => item.source)).toEqual(["tweet", "legacy"]);
+  });
+
+  it("paginates external timeline items before accepted tweets and legacy entries", () => {
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+    const external = new TimelineItemService(database);
+    const runtime = new TimelineTweetService(database);
+    const timeline = new LegacyTimelineService(database);
+    const decision = { accepted: true, score: 10, reasons: ["test"], normalizedText: "accepted" };
+
+    external.save({
+      source: "rss",
+      externalId: "rss-1",
+      keyword: "malware",
+      title: "RSS item",
+      text: "RSS item about malware",
+      itemUrl: "https://feed.example/1",
+      acceptedAt: "2026-05-18T10:00:00.000Z"
+    });
+    runtime.saveAccepted("xss", { id: "tweet-1", text: "accepted one", user: { screenName: "@one" } }, decision);
+    lists.add("text_sent", "legacy one", "uploaded:Text.Sent", 1);
+
+    const page = timeline.page({ limit: 3, offset: 0 });
+
+    expect(page.total).toBe(3);
+    expect(page.items.map((item) => item.source)).toEqual(["rss", "tweet", "legacy"]);
+  });
+
+  it("filters timeline items by source", () => {
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+    const external = new TimelineItemService(database);
+    const runtime = new TimelineTweetService(database);
+    const timeline = new LegacyTimelineService(database);
+    const decision = { accepted: true, score: 10, reasons: ["test"], normalizedText: "accepted" };
+
+    external.save({ source: "rss", externalId: "rss-1", text: "rss item", acceptedAt: "2026-05-18T09:00:00.000Z" });
+    runtime.saveAccepted("xss", { id: "tweet-1", text: "accepted one", user: { screenName: "@one" } }, decision);
+    lists.add("text_sent", "legacy rss https://feed.example/1", "runtime:rss:https://feed.example/rss", 1);
+    lists.add("text_sent", "legacy one", "uploaded:Text.Sent", 2);
+
+    expect(timeline.page({ sources: ["tweet"], limit: 10 }).items.map((item) => item.source)).toEqual(["tweet"]);
+    expect(timeline.page({ sources: ["rss"], limit: 10 }).items.map((item) => item.source)).toEqual(["rss", "rss"]);
   });
 
   it("exposes luck factor reasons for accepted tweets", () => {

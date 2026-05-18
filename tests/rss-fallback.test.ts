@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ListService } from "../src/admin/listService";
+import { TimelineItemService } from "../src/admin/timelineItemService";
 import { openMemoryDatabase } from "../src/db/database";
 import { runRssFallback } from "../src/rssFallback";
 import type { CurrentSessionLevel } from "../src/admin/currentSessionService";
@@ -8,6 +9,7 @@ describe("RSS fallback", () => {
   it("saves RSS items into timeline-compatible lists", async () => {
     const database = openMemoryDatabase();
     const lists = new ListService(database);
+    const timelineItems = new TimelineItemService(database);
     lists.add("rss_feed", "https://feed.example/rss");
     const record = vi.fn<RecordFn>().mockResolvedValue(undefined);
     const rssClient = {
@@ -20,6 +22,7 @@ describe("RSS fallback", () => {
     const result = await runRssFallback({
       runId: "run-1",
       lists,
+      timelineItems,
       feedLimit: 10,
       reason: "browser_pause",
       record,
@@ -29,10 +32,10 @@ describe("RSS fallback", () => {
     expect(result).toEqual({ feeds: 1, savedItems: 2, failedFeeds: 0 });
     expect(rssClient.fetch).toHaveBeenCalledWith("https://feed.example/rss");
     expect(lists.activeValues("rss_sent")).toEqual(["https://feed.example/1", "https://feed.example/2"]);
-    expect(lists.activeValues("text_sent")).toEqual([
-      "First advisory https://feed.example/1",
-      "Second advisory https://feed.example/2"
-    ]);
+    expect(lists.activeValues("text_sent")).toEqual([]);
+    const savedItems = timelineItems.latest(10);
+    expect(savedItems.map((item) => item.source)).toEqual(["rss", "rss"]);
+    expect(savedItems.map((item) => item.text).sort()).toEqual(["First advisory", "Second advisory"]);
     expect(record).toHaveBeenCalledWith(
       "info",
       "rss.fallback.completed",

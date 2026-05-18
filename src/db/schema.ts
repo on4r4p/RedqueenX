@@ -117,6 +117,31 @@ export function migrate(database: Database): void {
     CREATE INDEX IF NOT EXISTS idx_timeline_tweets_accepted_at
       ON timeline_tweets(accepted_at DESC);
 
+    CREATE TABLE IF NOT EXISTS timeline_items (
+      source TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      keyword TEXT,
+      title TEXT,
+      text TEXT NOT NULL,
+      author_handle TEXT,
+      author_name TEXT,
+      avatar_url TEXT,
+      item_url TEXT,
+      external_created_at TEXT,
+      score INTEGER NOT NULL DEFAULT 0,
+      engagement_score INTEGER NOT NULL DEFAULT 0,
+      comments_count INTEGER NOT NULL DEFAULT 0,
+      reasons_json TEXT NOT NULL DEFAULT '[]',
+      media_json TEXT NOT NULL DEFAULT '[]',
+      urls_json TEXT NOT NULL DEFAULT '[]',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      accepted_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (source, external_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_timeline_items_accepted_at
+      ON timeline_items(accepted_at DESC, source, external_id);
+
     CREATE TABLE IF NOT EXISTS raw_timeline_tweets (
       run_id TEXT NOT NULL,
       tweet_id TEXT NOT NULL,

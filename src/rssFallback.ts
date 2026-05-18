@@ -1,5 +1,7 @@
+import crypto from "node:crypto";
 import { ListService } from "./admin/listService";
 import type { CurrentSessionLevel } from "./admin/currentSessionService";
+import type { TimelineItemService } from "./admin/timelineItemService";
 import { RssClient, type RssItem } from "./rss-client";
 
 export interface RssFallbackResult {
@@ -15,6 +17,7 @@ export interface RssFallbackOptions {
   reason: string;
   record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>;
   rssClient?: Pick<RssClient, "fetch">;
+  timelineItems?: TimelineItemService;
 }
 
 export async function runRssFallback(options: RssFallbackOptions): Promise<RssFallbackResult> {
@@ -42,7 +45,7 @@ export async function runRssFallback(options: RssFallbackOptions): Promise<RssFa
       const items = await rssClient.fetch(feed);
       const importedAt = new Date().toISOString();
       for (const item of items) {
-        saveRssItem(options.lists, feed, item, importedAt);
+        saveRssItem(options.lists, options.timelineItems, feed, item, importedAt);
         savedItems += 1;
       }
       await options.record("debug", "rss.feed.completed", "RSS feed fetched", {
@@ -72,8 +75,28 @@ export async function runRssFallback(options: RssFallbackOptions): Promise<RssFa
   return { feeds: feeds.length, savedItems, failedFeeds };
 }
 
-function saveRssItem(lists: ListService, feed: string, item: RssItem, importedAt: string): void {
+function saveRssItem(lists: ListService, timelineItems: TimelineItemService | undefined, feed: string, item: RssItem, importedAt: string): void {
   const source = `runtime:rss:${feed}`;
   lists.add("rss_sent", item.link, source, null, importedAt);
-  lists.add("text_sent", `${item.title} ${item.link}`.trim(), source, null, importedAt);
+  if (!timelineItems) {
+    lists.add("text_sent", `${item.title} ${item.link}`.trim(), source, null, importedAt);
+    return;
+  }
+  timelineItems.save({
+    source: "rss",
+    externalId: crypto.createHash("sha256").update(item.link || `${feed}:${item.title}`).digest("hex"),
+    keyword: null,
+    title: item.title,
+    text: item.title,
+    authorName: feed,
+    itemUrl: item.link,
+    externalCreatedAt: null,
+    score: 0,
+    engagementScore: 0,
+    commentsCount: 0,
+    reasons: ["rss_fallback"],
+    urls: item.link ? [item.link] : [],
+    metadata: { feed },
+    acceptedAt: importedAt
+  });
 }

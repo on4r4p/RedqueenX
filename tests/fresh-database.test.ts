@@ -26,10 +26,11 @@ describe("fresh database boot", () => {
       expect(tableNames).toContain("list_entries");
       expect(tableNames).toContain("runs");
       expect(tableNames).toContain("timeline_tweets");
+      expect(tableNames).toContain("timeline_items");
       expect(tableNames).toContain("raw_timeline_tweets");
       expect(tableNames).toContain("x_session_alerts");
 
-      for (const table of ["list_entries", "runs", "timeline_tweets", "raw_timeline_tweets", "x_session_alerts"]) {
+      for (const table of ["list_entries", "runs", "timeline_tweets", "timeline_items", "raw_timeline_tweets", "x_session_alerts"]) {
         const row = database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
         expect(row.count).toBe(0);
       }
