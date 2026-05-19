@@ -680,6 +680,11 @@ h2 {
   overflow: auto;
 }
 
+#run-preview-list {
+  max-height: none;
+  overflow: visible;
+}
+
 .run-preview-panel {
   border: 1px solid rgba(49, 80, 100, 0.7);
   border-radius: 6px;
@@ -704,6 +709,8 @@ h2 {
 .run-preview-panel .session-keywords-list {
   border-top: 1px solid rgba(49, 80, 100, 0.5);
   border-radius: 0 0 6px 6px;
+  max-height: none;
+  overflow: visible;
   padding: 8px;
 }
 
