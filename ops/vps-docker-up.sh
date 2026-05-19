@@ -82,6 +82,7 @@ if [ -z "${REDQUEENX_GID:-}" ]; then
 fi
 
 mkdir -p runtime/docker
+chown "$REDQUEENX_UID:$REDQUEENX_GID" .env 2>/dev/null || true
 chown -R "$REDQUEENX_UID:$REDQUEENX_GID" runtime/docker 2>/dev/null || true
 
 services=(admin vpn worker)

@@ -67,6 +67,15 @@ else
   log "env sync script not found; skipping .env sync."
 fi
 
+if [[ -f .env ]]; then
+  env_owner="${REDQUEENX_UID:-1000}:${REDQUEENX_GID:-1000}"
+  if chown "$env_owner" .env >/dev/null 2>&1; then
+    log "Set .env owner to $env_owner so the admin container can save settings."
+  else
+    log "Could not chown .env to $env_owner; admin settings may not be able to write .env."
+  fi
+fi
+
 compose -f "$compose_file" pull
 compose -f "$compose_file" up -d --remove-orphans
 
