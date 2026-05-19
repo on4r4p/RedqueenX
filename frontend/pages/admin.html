@@ -52,9 +52,9 @@
     <div class="admin-layout">
       <aside class="admin-sidebar">
         <nav class="admin-nav" aria-label="Admin">
-          <button class="admin-nav-button is-active" type="button" data-admin-section-target="lists">Lists</button>
-          <button class="admin-nav-button" type="button" data-admin-section-target="session">Show current
+          <button class="admin-nav-button is-active" type="button" data-admin-section-target="session">Show current
             session</button>
+          <button class="admin-nav-button" type="button" data-admin-section-target="lists">Lists</button>
           <button class="admin-nav-button" type="button" data-admin-section-target="session-alerts">Session
             Alerts</button>
           <button class="admin-nav-button" type="button" data-admin-section-target="settings">Settings</button>
@@ -71,7 +71,7 @@
       </aside>
 
       <div class="admin-content">
-        <section id="admin-section-lists" class="admin-section is-active">
+        <section id="admin-section-lists" class="admin-section">
           <section class="admin-grid">
             <form id="list-form" class="panel form-grid">
               <h2>Edit a list</h2>
@@ -171,7 +171,7 @@
           </section>
         </section>
 
-        <section id="admin-section-session" class="admin-section">
+        <section id="admin-section-session" class="admin-section is-active">
           <section id="session-panel" class="panel session-panel">
             <header class="section-header">
               <h2>Current session</h2>

@@ -605,7 +605,9 @@ async function runBrowserSearchLoop(input: {
       });
     }
     const usableTweets = selectedTweets.length;
-    const noUsableResult = scoringConfig.enableMinimumSearchResults && usableTweets < scoringConfig.minimumSearchResults && !staleKeywordUserMoved;
+    const noVisibleResult =
+      isBelowMinimumSearchResults(scoringConfig.enableMinimumSearchResults, tweets.length, scoringConfig.minimumSearchResults) &&
+      !staleKeywordUserMoved;
     keywordSummaries.push({
       keyword,
       searchQuery: search.searchQuery,
@@ -619,13 +621,13 @@ async function runBrowserSearchLoop(input: {
       scrollsPerformed: search.scrollsPerformed,
       preSearchDelayMs: search.preSearchDelayMs,
       timings: search.timings,
-      noResultSaved: noUsableResult && !input.smoke,
+      noResultSaved: noVisibleResult && !input.smoke,
       prefilterReasonCounts,
       scoringReasonCounts,
       beforeSearch: search.beforeSearch,
       afterSearch: search.afterSearch
     });
-    if (noUsableResult && !input.smoke) {
+    if (noVisibleResult && !input.smoke) {
       const entry = input.lists.add("no_result", keyword, "runtime:browser-search", null, importedAt);
       await input.record("info", "browser.search.no_result.saved", "Keyword saved to No.Result after browser search", {
         runId: input.runId,
@@ -638,8 +640,9 @@ async function runBrowserSearchLoop(input: {
         runId: input.runId,
         keyword,
         entryId: entry.id,
-        reason: "usable_tweets_below_minimum",
+        reason: "visible_tweets_below_minimum",
         minimumSearchResults: scoringConfig.minimumSearchResults,
+        visibleTweets: tweets.length,
         usableTweets
       });
     } else {
@@ -649,6 +652,7 @@ async function runBrowserSearchLoop(input: {
         smokeTest: Boolean(input.smoke),
         minimumSearchResultsEnabled: scoringConfig.enableMinimumSearchResults,
         minimumSearchResults: scoringConfig.minimumSearchResults,
+        visibleTweets: tweets.length,
         usableTweets
       });
     }
@@ -692,7 +696,7 @@ async function runBrowserSearchLoop(input: {
       usableTweets,
       acceptedTweets: accepted,
       rejectedTweets: rejected,
-      noResultSaved: noUsableResult && !input.smoke,
+      noResultSaved: noVisibleResult && !input.smoke,
       smokeTest: Boolean(input.smoke),
       scrollsPerformed: search.scrollsPerformed,
       preSearchDelayMs: search.preSearchDelayMs,
@@ -742,7 +746,7 @@ async function runBrowserSearchLoop(input: {
         input.config.searchWithoutApiSearchDelayMinSeconds * 1000,
         input.config.searchWithoutApiSearchDelayMaxSeconds * 1000
       );
-      await interruptibleDelay(input.runs, input.runId, noUsableResult ? Math.floor(baseDelay / 2) : baseDelay);
+      await interruptibleDelay(input.runs, input.runId, noVisibleResult ? Math.floor(baseDelay / 2) : baseDelay);
     }
   }
 
@@ -1879,6 +1883,10 @@ function browserKeywordAvailability(lists: ListService) {
     excludedAlreadySearchedKeywords,
     availableKeywords
   };
+}
+
+function isBelowMinimumSearchResults(enabled: boolean, resultCount: number, minimumSearchResults: number): boolean {
+  return enabled && Math.max(0, Math.floor(resultCount)) < Math.max(1, Math.floor(minimumSearchResults));
 }
 
 async function promptSmokeKeyword(): Promise<string | null> {

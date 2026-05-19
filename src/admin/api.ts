@@ -5861,7 +5861,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
             keywordGroup,
             count
           });
-          if (config.enableMinimumSearchResults && count <= config.minimumSearchResults) {
+          if (isBelowMinimumSearchResults(config.enableMinimumSearchResults, count, config.minimumSearchResults)) {
             for (const keyword of keywordGroup) {
               await saveNoResultKeyword(keyword, count, config.minimumSearchResults);
             }
@@ -5894,7 +5894,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
           return;
         }
         saveSearchTermsUsed(keywordGroup);
-        const isNoResultSearch = config.enableMinimumSearchResults && tweets.length <= config.minimumSearchResults;
+        const isNoResultSearch = isBelowMinimumSearchResults(config.enableMinimumSearchResults, tweets.length, config.minimumSearchResults);
         if (isNoResultSearch) {
           for (const keyword of keywordGroup) {
             await saveNoResultKeyword(keyword, tweets.length, config.minimumSearchResults);
@@ -6380,6 +6380,10 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       tweetsReceived,
       minimumSearchResults
     });
+  }
+
+  function isBelowMinimumSearchResults(enabled: boolean, resultCount: number, minimumSearchResults: number): boolean {
+    return enabled && Math.max(0, Math.floor(resultCount)) < Math.max(1, Math.floor(minimumSearchResults));
   }
 
   function saveSearchTermsUsed(keywords: string[]): void {

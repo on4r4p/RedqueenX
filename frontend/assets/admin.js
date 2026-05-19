@@ -2367,7 +2367,7 @@ function showAdminSection(sectionId) {
 
 function activeAdminSection() {
   const active = document.querySelector(".admin-section.is-active");
-  return active?.id.replace("admin-section-", "") || "lists";
+  return active?.id.replace("admin-section-", "") || "session";
 }
 
 async function openCurrentSessionSection() {
@@ -5320,6 +5320,11 @@ if (initialAdminSection && document.getElementById(`admin-section-${initialAdmin
     refreshRunPreview().catch((error) => setStatus(error.message));
   }
   updateSessionPolling();
+} else {
+  updateSessionPolling();
+  refreshCurrentSession().catch((error) => setStatus(error.message));
+  refreshSessionKeywords().catch((error) => setStatus(error.message));
+  refreshRunPreview().catch((error) => setStatus(error.message));
 }
 
 refreshStats()
