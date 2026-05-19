@@ -56,20 +56,22 @@ export class LegacyTimelineService {
     return this.page({ limit, offset: 0 }).items;
   }
 
-  page(options: { limit?: number; offset?: number; sources?: TimelineSourceFilter[] } = {}): LegacyTimelinePage {
+  page(options: { limit?: number; offset?: number; sources?: TimelineSourceFilter[]; archived?: boolean } = {}): LegacyTimelinePage {
     const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
     const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const archived = Boolean(options.archived);
     const sourceSet = normalizeTimelineSources(options.sources);
     const itemSources = timelineItemSources(sourceSet);
     const includeTweets = sourceSet.size === 0 || sourceSet.has("tweet");
     const includeLegacyRss = sourceSet.size === 0 || sourceSet.has("rss");
-    const itemTotal = this.timelineItems.count(itemSources);
-    const runtimeTotal = includeTweets ? this.timelineTweets.count() : 0;
-    const legacyTotal = includeLegacyRss ? this.countLegacy({ rssOnly: sourceSet.has("rss") }) : 0;
+    const itemTotal = this.timelineItems.count(itemSources, archived);
+    const runtimeTotal = includeTweets ? this.timelineTweets.count(archived) : 0;
+    const legacyRssOnly = sourceSet.size === 1 && sourceSet.has("rss");
+    const legacyTotal = includeLegacyRss ? this.countLegacy({ rssOnly: legacyRssOnly, archived }) : 0;
     const windowSize = offset + limit;
-    const timelineItems = itemTotal > 0 ? this.timelineItems.latest(windowSize, 0, itemSources) : [];
-    const runtimeTweets = runtimeTotal > 0 ? this.timelineTweets.latest(windowSize, 0) : [];
-    const legacyItems = legacyTotal > 0 ? this.latestLegacy(windowSize, 0, { rssOnly: sourceSet.has("rss") }) : [];
+    const timelineItems = itemTotal > 0 ? this.timelineItems.latest(windowSize, 0, itemSources, archived) : [];
+    const runtimeTweets = runtimeTotal > 0 ? this.timelineTweets.latest(windowSize, 0, archived) : [];
+    const legacyItems = legacyTotal > 0 ? this.latestLegacy(windowSize, 0, { rssOnly: legacyRssOnly, archived }) : [];
     const items = [...timelineItems, ...runtimeTweets, ...legacyItems]
       .sort(compareTimelineItems)
       .slice(offset, offset + limit);
@@ -83,8 +85,9 @@ export class LegacyTimelineService {
     };
   }
 
-  private latestLegacy(limit: number, offset: number, options: { rssOnly?: boolean } = {}): LegacyTimelineItem[] {
+  private latestLegacy(limit: number, offset: number, options: { rssOnly?: boolean; archived?: boolean } = {}): LegacyTimelineItem[] {
     const rssWhere = options.rssOnly ? "AND text_entry.source_file LIKE 'runtime:rss:%'" : "";
+    const archiveWhere = options.archived ? "text_entry.archived_at IS NOT NULL" : "text_entry.archived_at IS NULL";
     const rows = this.database
       .prepare(`
         SELECT
@@ -100,6 +103,7 @@ export class LegacyTimelineService {
         WHERE text_entry.kind = 'text_sent'
           AND text_entry.is_deleted = 0
           AND text_entry.is_empty = 0
+          AND ${archiveWhere}
           AND (
             text_entry.source_file IS NULL
             OR text_entry.source_file NOT LIKE 'runtime:x-search:%'
@@ -138,8 +142,9 @@ export class LegacyTimelineService {
     });
   }
 
-  private countLegacy(options: { rssOnly?: boolean } = {}): number {
+  private countLegacy(options: { rssOnly?: boolean; archived?: boolean } = {}): number {
     const rssWhere = options.rssOnly ? "AND text_entry.source_file LIKE 'runtime:rss:%'" : "";
+    const archiveWhere = options.archived ? "text_entry.archived_at IS NOT NULL" : "text_entry.archived_at IS NULL";
     const row = this.database
       .prepare(`
         SELECT COUNT(*) AS total
@@ -147,6 +152,7 @@ export class LegacyTimelineService {
         WHERE text_entry.kind = 'text_sent'
           AND text_entry.is_deleted = 0
           AND text_entry.is_empty = 0
+          AND ${archiveWhere}
           AND (
             text_entry.source_file IS NULL
             OR text_entry.source_file NOT LIKE 'runtime:x-search:%'
@@ -155,6 +161,68 @@ export class LegacyTimelineService {
       `)
       .get() as { total: number };
     return row.total;
+  }
+
+  archiveAll(sources?: TimelineSourceFilter[], archivedAt = new Date().toISOString()): { tweets: number; items: number; legacy: number } {
+    const sourceSet = normalizeTimelineSources(sources);
+    const includeTweets = sourceSet.size === 0 || sourceSet.has("tweet");
+    const includeLegacyRss = sourceSet.size === 0 || sourceSet.has("rss");
+    const legacyRssOnly = sourceSet.size === 1 && sourceSet.has("rss");
+    const tweets = includeTweets ? this.timelineTweets.archiveAll(archivedAt) : 0;
+    const items = this.timelineItems.archiveAll(timelineItemSources(sourceSet), archivedAt);
+    const legacy = includeLegacyRss ? this.archiveLegacy(archivedAt, { rssOnly: legacyRssOnly }) : 0;
+    return { tweets, items, legacy };
+  }
+
+  restoreAll(sources?: TimelineSourceFilter[]): { tweets: number; items: number; legacy: number } {
+    const sourceSet = normalizeTimelineSources(sources);
+    const includeTweets = sourceSet.size === 0 || sourceSet.has("tweet");
+    const includeLegacyRss = sourceSet.size === 0 || sourceSet.has("rss");
+    const legacyRssOnly = sourceSet.size === 1 && sourceSet.has("rss");
+    const tweets = includeTweets ? this.timelineTweets.restoreAll() : 0;
+    const items = this.timelineItems.restoreAll(timelineItemSources(sourceSet));
+    const legacy = includeLegacyRss ? this.restoreLegacy({ rssOnly: legacyRssOnly }) : 0;
+    return { tweets, items, legacy };
+  }
+
+  private archiveLegacy(archivedAt: string, options: { rssOnly?: boolean } = {}): number {
+    const rssWhere = options.rssOnly ? "AND source_file LIKE 'runtime:rss:%'" : "";
+    const result = this.database
+      .prepare(`
+        UPDATE list_entries
+        SET archived_at = ?
+        WHERE kind = 'text_sent'
+          AND is_deleted = 0
+          AND is_empty = 0
+          AND archived_at IS NULL
+          AND (
+            source_file IS NULL
+            OR source_file NOT LIKE 'runtime:x-search:%'
+          )
+          ${rssWhere}
+      `)
+      .run(archivedAt);
+    return Number(result.changes ?? 0);
+  }
+
+  private restoreLegacy(options: { rssOnly?: boolean } = {}): number {
+    const rssWhere = options.rssOnly ? "AND source_file LIKE 'runtime:rss:%'" : "";
+    const result = this.database
+      .prepare(`
+        UPDATE list_entries
+        SET archived_at = NULL
+        WHERE kind = 'text_sent'
+          AND is_deleted = 0
+          AND is_empty = 0
+          AND archived_at IS NOT NULL
+          AND (
+            source_file IS NULL
+            OR source_file NOT LIKE 'runtime:x-search:%'
+          )
+          ${rssWhere}
+      `)
+      .run();
+    return Number(result.changes ?? 0);
   }
 }
 

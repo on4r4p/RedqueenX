@@ -67,6 +67,7 @@ type TimelineItemRow = {
   media_json: string;
   urls_json: string;
   accepted_at: string;
+  archived_at: string | null;
 };
 
 export class TimelineItemService {
@@ -155,18 +156,19 @@ export class TimelineItemService {
       });
   }
 
-  latest(limit = 50, offset = 0, sources?: TimelineItemSource[]): TimelineItem[] {
+  latest(limit = 50, offset = 0, sources?: TimelineItemSource[], archived = false): TimelineItem[] {
     const safeLimit = Math.max(1, Math.min(limit, 200));
     const safeOffset = Math.max(0, Math.floor(offset));
     const activeSources = normalizeSources(sources);
     if (sources && activeSources.length === 0) {
       return [];
     }
-    const sourceWhere = activeSources.length > 0 ? `WHERE source IN (${activeSources.map(() => "?").join(", ")})` : "";
+    const sourceWhere = activeSources.length > 0 ? `AND source IN (${activeSources.map(() => "?").join(", ")})` : "";
     const rows = this.database
       .prepare(`
         SELECT *
         FROM timeline_items
+        WHERE archived_at IS ${archived ? "NOT NULL" : "NULL"}
         ${sourceWhere}
         ORDER BY accepted_at DESC, external_created_at DESC, source ASC, external_id DESC
         LIMIT ?
@@ -176,14 +178,40 @@ export class TimelineItemService {
     return rows.map(mapTimelineItemRow);
   }
 
-  count(sources?: TimelineItemSource[]): number {
+  count(sources?: TimelineItemSource[], archived = false): number {
     const activeSources = normalizeSources(sources);
     if (sources && activeSources.length === 0) {
       return 0;
     }
-    const sourceWhere = activeSources.length > 0 ? `WHERE source IN (${activeSources.map(() => "?").join(", ")})` : "";
-    const row = this.database.prepare(`SELECT COUNT(*) AS total FROM timeline_items ${sourceWhere}`).get(...activeSources) as { total: number };
+    const sourceWhere = activeSources.length > 0 ? `AND source IN (${activeSources.map(() => "?").join(", ")})` : "";
+    const row = this.database
+      .prepare(`SELECT COUNT(*) AS total FROM timeline_items WHERE archived_at IS ${archived ? "NOT NULL" : "NULL"} ${sourceWhere}`)
+      .get(...activeSources) as { total: number };
     return row.total;
+  }
+
+  archiveAll(sources?: TimelineItemSource[], archivedAt = new Date().toISOString()): number {
+    const activeSources = normalizeSources(sources);
+    if (sources && activeSources.length === 0) {
+      return 0;
+    }
+    const sourceWhere = activeSources.length > 0 ? `AND source IN (${activeSources.map(() => "?").join(", ")})` : "";
+    const result = this.database
+      .prepare(`UPDATE timeline_items SET archived_at = ? WHERE archived_at IS NULL ${sourceWhere}`)
+      .run(archivedAt, ...activeSources);
+    return Number(result.changes ?? 0);
+  }
+
+  restoreAll(sources?: TimelineItemSource[]): number {
+    const activeSources = normalizeSources(sources);
+    if (sources && activeSources.length === 0) {
+      return 0;
+    }
+    const sourceWhere = activeSources.length > 0 ? `AND source IN (${activeSources.map(() => "?").join(", ")})` : "";
+    const result = this.database
+      .prepare(`UPDATE timeline_items SET archived_at = NULL WHERE archived_at IS NOT NULL ${sourceWhere}`)
+      .run(...activeSources);
+    return Number(result.changes ?? 0);
   }
 }
 

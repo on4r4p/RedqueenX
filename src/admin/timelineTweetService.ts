@@ -75,6 +75,7 @@ type TimelineTweetRow = {
   accepted_at: string;
   liked_at: string | null;
   retweeted_at: string | null;
+  archived_at: string | null;
 };
 
 export interface TimelineManualAcceptedInput {
@@ -250,13 +251,14 @@ export class TimelineTweetService {
       });
   }
 
-  latest(limit = 50, offset = 0): TimelineTweetItem[] {
+  latest(limit = 50, offset = 0, archived = false): TimelineTweetItem[] {
     const safeLimit = Math.max(1, Math.min(limit, 200));
     const safeOffset = Math.max(0, Math.floor(offset));
     const rows = this.database
       .prepare(`
         SELECT rowid, *
         FROM timeline_tweets
+        WHERE archived_at IS ${archived ? "NOT NULL" : "NULL"}
         ORDER BY accepted_at DESC, tweet_created_at DESC, rowid DESC
         LIMIT ?
         OFFSET ?
@@ -280,9 +282,21 @@ export class TimelineTweetService {
     };
   }
 
-  count(): number {
-    const row = this.database.prepare("SELECT COUNT(*) AS total FROM timeline_tweets").get() as { total: number };
+  count(archived = false): number {
+    const row = this.database
+      .prepare(`SELECT COUNT(*) AS total FROM timeline_tweets WHERE archived_at IS ${archived ? "NOT NULL" : "NULL"}`)
+      .get() as { total: number };
     return row.total;
+  }
+
+  archiveAll(archivedAt = new Date().toISOString()): number {
+    const result = this.database.prepare("UPDATE timeline_tweets SET archived_at = ? WHERE archived_at IS NULL").run(archivedAt);
+    return Number(result.changes ?? 0);
+  }
+
+  restoreAll(): number {
+    const result = this.database.prepare("UPDATE timeline_tweets SET archived_at = NULL WHERE archived_at IS NOT NULL").run();
+    return Number(result.changes ?? 0);
   }
 
   exportAll(): TimelineTweetExportRecord[] {

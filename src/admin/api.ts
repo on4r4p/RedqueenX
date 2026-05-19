@@ -142,6 +142,10 @@ const databaseTableQuerySchema = z.object({
 const timelineQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(200).optional(),
   offset: z.coerce.number().int().min(0).default(0),
+  archived: z
+    .enum(["0", "1", "false", "true"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
   sources: z
     .string()
     .optional()
@@ -153,6 +157,9 @@ const timelineQuerySchema = z.object({
             .filter((source): source is "tweet" | "rss" => source === "tweet" || source === "rss")
         : undefined
     )
+});
+const timelineArchiveSchema = z.object({
+  sources: z.array(z.enum(["tweet", "rss"])).optional()
 });
 const rawTimelineQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(300).optional(),
@@ -989,7 +996,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const page = timeline.page({
       limit: query.limit ?? xApiConfig.timelineDefaultPageSize,
       offset: query.offset,
-      sources: query.sources
+      sources: query.sources,
+      archived: query.archived
     });
     return {
       items: page.items.map((item) => mediaCacheService.decorateTimelineItem(item)),
@@ -1002,6 +1010,28 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       rawTimelineEnabled: xApiConfig.rawTimelineEnabled,
       actionsEnabled: Boolean(options.config.enableXWrite && xApiConfig.xApiEnabled && !xApiConfig.searchWithoutApiEnabled)
     };
+  });
+
+  app.post("/timeline/archive", async (request) => {
+    const body = timelineArchiveSchema.parse(request.body ?? {});
+    const archivedAt = new Date().toISOString();
+    const archived = timeline.archiveAll(body.sources, archivedAt);
+    await recordSession("info", "timeline.archive", "Timeline entries archived", {
+      archivedAt,
+      sources: body.sources ?? ["tweet", "rss"],
+      ...archived
+    });
+    return { archivedAt, archived, total: archived.tweets + archived.items + archived.legacy };
+  });
+
+  app.post("/timeline/archive/restore", async (request) => {
+    const body = timelineArchiveSchema.parse(request.body ?? {});
+    const restored = timeline.restoreAll(body.sources);
+    await recordSession("info", "timeline.archive.restore", "Timeline archive entries restored", {
+      sources: body.sources ?? ["tweet", "rss"],
+      ...restored
+    });
+    return { restored, total: restored.tweets + restored.items + restored.legacy };
   });
 
   app.get("/admin/timeline/export", async (_request, reply) => {
@@ -6422,6 +6452,8 @@ function isTimelineProtectedPath(pathName: string): boolean {
     pathName === "/raw-timeline" ||
     pathName === "/rejected-timeline" ||
     pathName === "/timeline/data" ||
+    pathName === "/timeline/archive" ||
+    pathName === "/timeline/archive/restore" ||
     pathName === "/raw-timeline/data" ||
     pathName === "/rejected-timeline/data" ||
     pathName === "/timeline/auth" ||

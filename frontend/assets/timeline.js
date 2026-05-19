@@ -5,6 +5,9 @@ const rawTimelineLinks = Array.from(document.querySelectorAll("[data-raw-timelin
 const adminLinks = Array.from(document.querySelectorAll("[data-admin-link]"));
 const sourceFilterInputs = Array.from(document.querySelectorAll("[data-source-filter]"));
 const retryAbsTwimgFailures = document.getElementById("retry-abs-twimg-failures");
+const archiveTimelineButton = document.getElementById("archive-timeline");
+const viewArchiveTimelineButton = document.getElementById("view-archive-timeline");
+const restoreArchiveTimelineButton = document.getElementById("restore-archive-timeline");
 const timelineDefaultPageSize = 50;
 const timelineMaxPageSize = 200;
 const timelineQueryLimit = readOptionalBoundedQueryInt("limit", 1, timelineMaxPageSize);
@@ -14,6 +17,7 @@ const timelineState = {
   limit: timelineQueryLimit ?? timelineDefaultPageSize,
   customLimit: timelineQueryLimit !== null,
   sources: readSourceFilters(),
+  archived: readArchivedMode(),
   total: 0,
   hasMore: false
 };
@@ -310,6 +314,9 @@ async function refreshTimeline() {
   if (timelineState.sources.length > 0 && timelineState.sources.length < defaultTimelineSources.length) {
     params.set("sources", timelineState.sources.join(","));
   }
+  if (timelineState.archived) {
+    params.set("archived", "1");
+  }
   const response = await fetch(`/timeline/data?${params.toString()}`);
   if (response.status === 401) {
     location.href = "/timeline/login";
@@ -330,15 +337,19 @@ async function refreshTimeline() {
   timelineState.offset = pagination.offset;
   timelineState.hasMore = pagination.hasMore;
   updateTimelineUrl();
+  updateArchiveControls();
   renderPagination(pagination, items.length);
   timelineStatus.textContent = [
+    timelineState.archived ? "Archive view." : "",
     pageSummary(pagination, items.length),
     "Remote avatars, media, and external links are not loaded directly. Cached media is served locally from /media-cache only."
   ]
     .filter(Boolean)
     .join(" ");
   if (!items.length) {
-    timeline.innerHTML = '<div class="empty-state">No imported data. Go to Admin, then run the legacy import.</div>';
+    timeline.innerHTML = timelineState.archived
+      ? '<div class="empty-state">No archived timeline item for the selected sources.</div>'
+      : '<div class="empty-state">No imported data. Go to Admin, then run the legacy import.</div>';
     return;
   }
 
@@ -437,7 +448,27 @@ function updateTimelineUrl() {
   } else {
     url.searchParams.delete("sources");
   }
+  if (timelineState.archived) {
+    url.searchParams.set("archived", "1");
+  } else {
+    url.searchParams.delete("archived");
+  }
   window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+}
+
+function readArchivedMode() {
+  const params = new URLSearchParams(window.location.search);
+  const value = params.get("archived");
+  return value === "1" || value === "true";
+}
+
+function updateArchiveControls() {
+  archiveTimelineButton?.classList.toggle("is-hidden", timelineState.archived);
+  restoreArchiveTimelineButton?.classList.toggle("is-hidden", !timelineState.archived);
+  if (viewArchiveTimelineButton) {
+    viewArchiveTimelineButton.textContent = timelineState.archived ? "Back to timeline" : "View archive";
+    viewArchiveTimelineButton.title = timelineState.archived ? "Show active timeline items." : "Show archived timeline items.";
+  }
 }
 
 function readSourceFilters() {
@@ -843,6 +874,100 @@ retryAbsTwimgFailures?.addEventListener("click", () => {
       retryAbsTwimgFailures.textContent = previousText || "Retry failed media";
     });
 });
+
+archiveTimelineButton?.addEventListener("click", () => {
+  const sources = timelineState.sources.length > 0 ? timelineState.sources : [...defaultTimelineSources];
+  const label = sources.length === defaultTimelineSources.length ? "all timeline items" : sources.join(" and ");
+  const confirmed = window.confirm(
+    `Archive ${label}?\n\nArchived items will disappear from this timeline but remain stored in the database. Continue?`
+  );
+  if (!confirmed) {
+    timelineStatus.textContent = "Archive cancelled.";
+    return;
+  }
+  const previousText = archiveTimelineButton.textContent;
+  archiveTimelineButton.disabled = true;
+  archiveTimelineButton.textContent = "Archiving...";
+  timelineStatus.textContent = "Archiving timeline items...";
+  csrfFetch("/timeline/archive", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sources })
+  })
+    .then(async (response) => {
+      if (response.status === 401) {
+        location.href = "/timeline/login";
+        return null;
+      }
+      const result = await response.json().catch(() => ({ error: "Archive failed" }));
+      if (!response.ok) {
+        throw new Error(result.error || "Archive failed.");
+      }
+      timelineState.offset = 0;
+      timelineStatus.textContent = `Archived ${result.total ?? 0} timeline items.`;
+      await refreshTimeline();
+      return result;
+    })
+    .catch((error) => {
+      timelineStatus.textContent = error instanceof Error ? error.message : "Archive failed.";
+    })
+    .finally(() => {
+      archiveTimelineButton.disabled = false;
+      archiveTimelineButton.textContent = previousText;
+    });
+});
+
+viewArchiveTimelineButton?.addEventListener("click", () => {
+  timelineState.archived = !timelineState.archived;
+  timelineState.offset = 0;
+  updateArchiveControls();
+  timelineStatus.textContent = timelineState.archived ? "Loading archived timeline..." : "Loading active timeline...";
+  scrollTimelineToTop("auto");
+  refreshTimeline().catch((error) => {
+    timelineStatus.textContent = error instanceof Error ? error.message : "Timeline failed to load.";
+  });
+});
+
+restoreArchiveTimelineButton?.addEventListener("click", () => {
+  const sources = timelineState.sources.length > 0 ? timelineState.sources : [...defaultTimelineSources];
+  const label = sources.length === defaultTimelineSources.length ? "all archived timeline items" : `archived ${sources.join(" and ")}`;
+  const confirmed = window.confirm(`Restore ${label}?\n\nRestored items will move back into the active timeline. Continue?`);
+  if (!confirmed) {
+    timelineStatus.textContent = "Restore cancelled.";
+    return;
+  }
+  const previousText = restoreArchiveTimelineButton.textContent;
+  restoreArchiveTimelineButton.disabled = true;
+  restoreArchiveTimelineButton.textContent = "Restoring...";
+  timelineStatus.textContent = "Restoring archived timeline items...";
+  csrfFetch("/timeline/archive/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sources })
+  })
+    .then(async (response) => {
+      if (response.status === 401) {
+        location.href = "/timeline/login";
+        return null;
+      }
+      const result = await response.json().catch(() => ({ error: "Restore failed" }));
+      if (!response.ok) {
+        throw new Error(result.error || "Restore failed.");
+      }
+      timelineState.offset = 0;
+      timelineStatus.textContent = `Restored ${result.total ?? 0} timeline items.`;
+      await refreshTimeline();
+      return result;
+    })
+    .catch((error) => {
+      timelineStatus.textContent = error instanceof Error ? error.message : "Restore failed.";
+    })
+    .finally(() => {
+      restoreArchiveTimelineButton.disabled = false;
+      restoreArchiveTimelineButton.textContent = previousText;
+    });
+});
+updateArchiveControls();
 
 timeline.addEventListener("click", async (event) => {
   const externalLink = event.target.closest("[data-external-url]");

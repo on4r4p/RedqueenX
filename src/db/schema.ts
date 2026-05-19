@@ -15,6 +15,7 @@ export function migrate(database: Database): void {
       line_number INTEGER,
       is_empty INTEGER NOT NULL DEFAULT 0,
       is_deleted INTEGER NOT NULL DEFAULT 0,
+      archived_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       imported_at TEXT
     );
@@ -111,11 +112,12 @@ export function migrate(database: Database): void {
       liked_at TEXT,
       retweeted_at TEXT,
       like_error TEXT,
-      retweet_error TEXT
+      retweet_error TEXT,
+      archived_at TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_timeline_tweets_accepted_at
-      ON timeline_tweets(accepted_at DESC);
+      ON timeline_tweets(archived_at, accepted_at DESC);
 
     CREATE TABLE IF NOT EXISTS timeline_items (
       source TEXT NOT NULL,
@@ -136,11 +138,12 @@ export function migrate(database: Database): void {
       urls_json TEXT NOT NULL DEFAULT '[]',
       metadata_json TEXT NOT NULL DEFAULT '{}',
       accepted_at TEXT NOT NULL DEFAULT (datetime('now')),
+      archived_at TEXT,
       PRIMARY KEY (source, external_id)
     );
 
     CREATE INDEX IF NOT EXISTS idx_timeline_items_accepted_at
-      ON timeline_items(accepted_at DESC, source, external_id);
+      ON timeline_items(archived_at, accepted_at DESC, source, external_id);
 
     CREATE TABLE IF NOT EXISTS raw_timeline_tweets (
       run_id TEXT NOT NULL,
@@ -288,9 +291,33 @@ export function migrate(database: Database): void {
 
 	  ensureListEntryUniqueness(database);
 	  ensureTimelineUserSessionColumns(database);
+	  ensureTimelineArchiveColumns(database);
 	  ensureRawTimelineDecisionColumns(database);
 	  ensureXSessionAlertDetailColumns(database);
 	}
+
+function ensureTimelineArchiveColumns(database: Database): void {
+  const ensureColumn = (tableName: string, columnName: string, sql: string) => {
+    const columns = new Set(
+      (database.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>).map((column) => column.name)
+    );
+    if (!columns.has(columnName)) {
+      database.exec(sql);
+    }
+  };
+
+  ensureColumn("list_entries", "archived_at", "ALTER TABLE list_entries ADD COLUMN archived_at TEXT");
+  ensureColumn("timeline_tweets", "archived_at", "ALTER TABLE timeline_tweets ADD COLUMN archived_at TEXT");
+  ensureColumn("timeline_items", "archived_at", "ALTER TABLE timeline_items ADD COLUMN archived_at TEXT");
+
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_timeline_tweets_archive_accepted
+      ON timeline_tweets(archived_at, accepted_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_timeline_items_archive_accepted
+      ON timeline_items(archived_at, accepted_at DESC, source, external_id);
+  `);
+}
 
 function ensureTimelineUserSessionColumns(database: Database): void {
   const columns = new Set(
