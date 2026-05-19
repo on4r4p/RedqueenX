@@ -680,6 +680,33 @@ h2 {
   overflow: auto;
 }
 
+.run-preview-panel {
+  border: 1px solid rgba(49, 80, 100, 0.7);
+  border-radius: 6px;
+  background: rgba(6, 16, 23, 0.76);
+}
+
+.run-preview-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.run-preview-panel summary span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.run-preview-panel .session-keywords-list {
+  border-top: 1px solid rgba(49, 80, 100, 0.5);
+  border-radius: 0 0 6px 6px;
+  padding: 8px;
+}
+
 .session-keyword-row {
   display: grid;
   grid-template-columns: 70px minmax(0, 1fr) 90px;

@@ -5,6 +5,7 @@ const countersUpdatedAt = document.getElementById("counters-updated-at");
 const runPreviewRefreshButton = document.getElementById("run-preview-refresh-button");
 const runPreviewSummary = document.getElementById("run-preview-summary");
 const runPreviewList = document.getElementById("run-preview-list");
+const runPreviewOpenState = new Set(["1"]);
 const systemHealthRefreshButton = document.getElementById("system-health-refresh-button");
 const systemHealthUpdated = document.getElementById("system-health-updated");
 const systemHealthSummary = document.getElementById("system-health-summary");
@@ -3233,25 +3234,46 @@ async function refreshRunPreview() {
   const data = await jsonFetch("/admin/runs/preview");
   if (!data) return;
   const availability = data.availability || {};
+  const previews = Array.isArray(data.previews)
+    ? data.previews
+    : [{ runIndex: 1, plannedKeywords: data.plannedKeywords ?? 0, sample: Array.isArray(data.sample) ? data.sample : [] }];
   runPreviewSummary.textContent = [
-    `${data.plannedKeywords ?? 0} planned`,
+    `${previews.length} run preview${previews.length === 1 ? "" : "s"}`,
     `${availability.availableKeywords ?? 0} available now`,
     `${availability.excludedBySearchTermsUsed ?? 0} already searched`,
     `${availability.excludedByNoResult ?? 0} no-result excluded`
   ].join(" - ");
-  const sample = Array.isArray(data.sample) ? data.sample : [];
-  if (!sample.length) {
+  if (!previews.some((preview) => Array.isArray(preview.sample) && preview.sample.length > 0)) {
     runPreviewList.innerHTML =
       '<div class="empty-state">No eligible keyword for the next run. SearchTerms.Used and/or No.Result currently exclude every active keyword.</div>';
     return;
   }
-  runPreviewList.innerHTML = sample
-    .map((keyword, index) => `<div class="session-keyword-row">
-      <span>#${index + 1}</span>
-      <strong>${escapeHtml(keyword)}</strong>
-      <em>planned</em>
-    </div>`)
+  runPreviewList.innerHTML = previews
+    .map((preview) => renderRunPreviewPanel(preview))
     .join("");
+}
+
+function renderRunPreviewPanel(preview) {
+  const runIndex = String(preview.runIndex ?? 1);
+  const sample = Array.isArray(preview.sample) ? preview.sample : [];
+  const plannedCount = Number.isFinite(Number(preview.plannedKeywords)) ? Number(preview.plannedKeywords) : sample.length;
+  const isOpen = runPreviewOpenState.has(runIndex) || (runIndex === "1" && runPreviewOpenState.size === 0);
+  const rows = sample.length
+    ? sample
+        .map((keyword, index) => `<div class="session-keyword-row">
+          <span>#${index + 1}</span>
+          <strong>${escapeHtml(keyword)}</strong>
+          <em>planned</em>
+        </div>`)
+        .join("")
+    : '<div class="empty-state">No eligible keyword left for this run preview.</div>';
+  return `<details class="run-preview-panel" data-run-preview-index="${escapeAttribute(runIndex)}"${isOpen ? " open" : ""}>
+    <summary>
+      <strong>Run ${escapeHtml(runIndex)}</strong>
+      <span>${escapeHtml(String(plannedCount))} planned${sample.length < plannedCount ? ` - ${escapeHtml(String(sample.length))} shown` : ""}</span>
+    </summary>
+    <div class="session-keywords-list">${rows}</div>
+  </details>`;
 }
 
 function updateSessionStickStateFromScroll() {
@@ -5227,6 +5249,17 @@ sessionKeywordsRefreshButton?.addEventListener("click", () => {
 runPreviewRefreshButton?.addEventListener("click", () => {
   refreshRunPreview().catch((error) => setStatus(error.message));
 });
+runPreviewList?.addEventListener("toggle", (event) => {
+  const panel = event.target.closest?.("[data-run-preview-index]");
+  if (!panel) return;
+  const runIndex = panel.dataset.runPreviewIndex;
+  if (!runIndex) return;
+  if (panel.open) {
+    runPreviewOpenState.add(runIndex);
+  } else {
+    runPreviewOpenState.delete(runIndex);
+  }
+}, true);
 sessionLog?.addEventListener("scroll", updateSessionStickStateFromScroll);
 sessionStickBottom?.addEventListener("change", () => {
   sessionShouldStickBottom = Boolean(sessionStickBottom.checked);

@@ -1484,12 +1484,20 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   app.get("/admin/runs/preview", async () => {
     const runtimeConfig = getXApiConfig();
-    const keywords = plannedKeywords(lists, runtimeConfig);
+    const runCount = Math.max(1, Math.floor(runtimeConfig.runChainCount ?? 1));
+    const previews = plannedKeywordBatches(lists, runtimeConfig, runCount).map((preview) => ({
+      runIndex: preview.runIndex,
+      plannedKeywords: preview.keywords.length,
+      sample: preview.keywords.slice(0, 80)
+    }));
+    const firstPreview = previews[0] ?? { plannedKeywords: 0, sample: [] };
     return {
       generatedAt: new Date().toISOString(),
       availability: keywordAvailability(lists),
-      plannedKeywords: keywords.length,
-      sample: keywords.slice(0, 80)
+      runCount,
+      plannedKeywords: firstPreview.plannedKeywords,
+      sample: firstPreview.sample,
+      previews
     };
   });
 
@@ -7410,20 +7418,52 @@ function plannedKeywords(
     searchWithoutApiUserKeywordPercent?: number;
   }
 ): string[] {
+  return plannedKeywordBatches(lists, config, 1)[0]?.keywords ?? [];
+}
+
+function plannedKeywordBatches(
+  lists: ListService,
+  config:
+    | {
+        searchWithoutApiSessionKeywordLimit?: number;
+        searchWithoutApiSessionKeywordLimitRandom?: boolean;
+        searchWithoutApiRandomizeKeywordOrder?: boolean;
+        searchWithoutApiUserKeywordPercent?: number;
+      }
+    | undefined,
+  count: number
+): Array<{ runIndex: number; keywords: string[] }> {
   const noResults = new Set(lists.activeValues("no_result").map(normalizeValue));
   const alreadyUsed = new Set(lists.activeValues("search_terms_used").map(normalizeValue));
-  const keywords = lists
+  let remainingKeywords = lists
     .activeValues("keyword")
     .filter((keyword) => {
       const normalized = normalizeValue(keyword);
       return normalized.length > 0 && !noResults.has(normalized) && !alreadyUsed.has(normalized);
     });
-  const orderedKeywords = config?.searchWithoutApiRandomizeKeywordOrder ? shuffleKeywordList(keywords) : keywords;
-  const configuredLimit = Math.max(0, Math.floor(config?.searchWithoutApiSessionKeywordLimit ?? 0));
-  const maxKeywords = configuredLimit > 0 ? Math.min(orderedKeywords.length, configuredLimit) : orderedKeywords.length;
-  const totalKeywords =
-    config?.searchWithoutApiSessionKeywordLimitRandom && maxKeywords > 0 ? randomInt(1, maxKeywords) : maxKeywords;
-  return applyUserKeywordPercent(orderedKeywords, totalKeywords, config?.searchWithoutApiUserKeywordPercent);
+  const totalBatches = Math.max(1, Math.floor(count));
+  const batches: Array<{ runIndex: number; keywords: string[] }> = [];
+
+  for (let runIndex = 1; runIndex <= totalBatches; runIndex += 1) {
+    const orderedKeywords = config?.searchWithoutApiRandomizeKeywordOrder
+      ? shuffleKeywordList(remainingKeywords)
+      : remainingKeywords;
+    const configuredLimit = Math.max(0, Math.floor(config?.searchWithoutApiSessionKeywordLimit ?? 0));
+    const maxKeywords = configuredLimit > 0 ? Math.min(orderedKeywords.length, configuredLimit) : orderedKeywords.length;
+    const totalKeywords =
+      config?.searchWithoutApiSessionKeywordLimitRandom && maxKeywords > 0 ? randomInt(1, maxKeywords) : maxKeywords;
+    const keywords = applyUserKeywordPercent(orderedKeywords, totalKeywords, config?.searchWithoutApiUserKeywordPercent);
+    batches.push({ runIndex, keywords });
+
+    if (keywords.length === 0) {
+      remainingKeywords = [];
+      continue;
+    }
+    const usedInPreview = new Set(keywords.map(normalizeValue));
+    remainingKeywords = remainingKeywords.filter((keyword) => !usedInPreview.has(normalizeValue(keyword)));
+  }
+
+  return batches;
 }
 
 function applyUserKeywordPercent(keywords: string[], totalKeywords: number, configuredPercent = 100): string[] {
