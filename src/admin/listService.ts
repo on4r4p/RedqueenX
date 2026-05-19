@@ -39,6 +39,20 @@ export interface ListConsistencyCleanupResult {
   totalDeleted: number;
 }
 
+export const EDITABLE_LIST_KINDS: ListKind[] = [
+  "keyword",
+  "following",
+  "friend",
+  "banned_user",
+  "banned_word",
+  "banned_word_exception",
+  "rss_feed",
+  "no_result",
+  "search_terms_used",
+  "stale_keyword_user",
+  "skipped_keyword_user"
+];
+
 export function isListKind(value: string): value is ListKind {
   return (LIST_KINDS as readonly string[]).includes(value);
 }
@@ -207,6 +221,39 @@ export class ListService {
     };
   }
 
+  searchEditableLists(
+    search: string,
+    options: { includeDeleted?: boolean; limitPerKind?: number } = {}
+  ): { query: string; total: number; groups: Array<{ kind: ListKind; total: number; entries: ListEntry[] }> } {
+    const query = search.trim();
+    const includeDeleted = options.includeDeleted === true;
+    const limitPerKind = Math.max(1, Math.min(options.limitPerKind ?? 8, 25));
+    if (!query) {
+      return { query, total: 0, groups: [] };
+    }
+
+    const groups = EDITABLE_LIST_KINDS.map((kind) => {
+      const page = this.listPage(kind, {
+        includeDeleted,
+        limit: limitPerKind,
+        offset: 0,
+        search: query,
+        order: "desc"
+      });
+      return {
+        kind,
+        total: page.total,
+        entries: page.entries
+      };
+    }).filter((group) => group.total > 0);
+
+    return {
+      query,
+      total: groups.reduce((sum, group) => sum + group.total, 0),
+      groups
+    };
+  }
+
   activeValues(kind: ListKind): string[] {
     const rows = this.database
       .prepare(`
@@ -333,7 +380,7 @@ export class ListService {
       totalDeleted: 0
     };
 
-    for (const kind of editableListKinds) {
+    for (const kind of EDITABLE_LIST_KINDS) {
       result.duplicatesDeleted += this.deduplicateActive(kind);
     }
 
@@ -345,7 +392,7 @@ export class ListService {
           AND is_deleted = 0
           AND is_empty = 1
       `);
-      for (const kind of editableListKinds) {
+      for (const kind of EDITABLE_LIST_KINDS) {
         result.emptyDeleted += deleteEmpty.run(kind).changes;
       }
 
@@ -529,20 +576,6 @@ export class ListService {
 }
 
 const handleKinds = new Set<ListKind>(["following", "friend", "banned_user", "stale_keyword_user", "skipped_keyword_user"]);
-const editableListKinds: ListKind[] = [
-  "keyword",
-  "following",
-  "friend",
-  "banned_user",
-  "banned_word",
-  "banned_word_exception",
-  "rss_feed",
-  "no_result",
-  "search_terms_used",
-  "stale_keyword_user",
-  "skipped_keyword_user"
-];
-
 function sourcePriority(sourceFile: string | null): number {
   if (!sourceFile) return 3;
   if (sourceFile.startsWith("uploaded:")) return 1;

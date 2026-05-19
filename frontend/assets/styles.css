@@ -937,6 +937,10 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.metric strong.metric-ok {
+  color: var(--accent-2);
+}
+
 .metric.metric-wide {
   grid-column: 1 / -1;
 }
@@ -976,6 +980,78 @@ h2 {
   gap: 6px;
   max-height: 360px;
   overflow: auto;
+}
+
+.list-search-matches {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.list-search-match-title,
+.list-search-match-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.list-search-match-group {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid rgba(45, 82, 111, 0.85);
+  border-radius: 6px;
+  background: rgba(5, 17, 26, 0.45);
+}
+
+.list-search-match-group header,
+.list-search-match {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.list-search-match-group header {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.list-search-match-more {
+  margin-left: 6px;
+}
+
+.list-search-match {
+  width: 100%;
+  padding: 6px 0;
+  border: 0;
+  border-top: 1px solid rgba(41, 65, 83, 0.55);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.list-search-match:hover {
+  background: rgba(0, 217, 255, 0.08);
+}
+
+.list-search-match code {
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.list-search-match span {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.list-search-match mark {
+  background: rgba(255, 184, 77, 0.28);
+  color: var(--text);
+  padding: 0 2px;
+  border-radius: 3px;
 }
 
 .list-panel-tools {

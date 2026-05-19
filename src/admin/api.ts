@@ -251,6 +251,18 @@ const listQuerySchema = z.object({
     .optional()
     .transform((value) => value === "true")
 });
+const listSearchQuerySchema = z.object({
+  q: z
+    .string()
+    .max(200)
+    .optional()
+    .transform((value) => value?.trim() || ""),
+  limit: z.coerce.number().int().positive().max(25).default(8),
+  includeDeleted: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((value) => value === "true")
+});
 const booleanQuerySchema = z
   .enum(["true", "false"])
   .optional()
@@ -2459,6 +2471,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const result = lists.cleanupActiveInconsistencies();
     await recordSession("info", "list.cleanup", "List duplicates and inconsistencies cleaned", { ...result });
     return result;
+  });
+
+  app.get("/admin/lists/search", async (request) => {
+    const query = listSearchQuerySchema.parse(request.query);
+    return lists.searchEditableLists(query.q, {
+      limitPerKind: query.limit,
+      includeDeleted: query.includeDeleted
+    });
   });
 
   app.get("/admin/lists/:kind", async (request, reply) => {

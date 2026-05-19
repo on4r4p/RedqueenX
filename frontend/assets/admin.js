@@ -44,6 +44,7 @@ const cleanupListsButton = document.getElementById("cleanup-lists-button");
 const deleteAllListButton = document.getElementById("delete-all-list-button");
 const activeListLabel = document.getElementById("active-list-label");
 const listSearch = document.getElementById("list-search");
+const listSearchMatches = document.getElementById("list-search-matches");
 const listContent = document.getElementById("list-content");
 const importLocalFile = document.getElementById("import-local-file");
 const importKind = document.getElementById("import-kind");
@@ -184,6 +185,7 @@ const listState = {
   loading: false,
   search: "",
   total: null,
+  pendingEntryId: null,
   selectedEntry: null
 };
 
@@ -267,11 +269,9 @@ const metricDefinitions = [
   ["friend", "Rq.Friends"],
   ["banned_user", "Rq.Bannedpeople"],
   ["banned_word", "Rq.Bannedword"],
-  ["banned_word_exception", "Banned word exceptions"],
   ["rss_feed", "RSS feeds"],
   ["rss_sent", "RssSave"],
   ["no_result", "No.Result"],
-  ["request_log", "Request.log"],
   ["search_terms_used", "SearchTerms.Used"],
   ["stale_keyword_user", "Stale keyword users"],
   ["skipped_keyword_user", "Skipped keyword users"],
@@ -281,6 +281,8 @@ const metricDefinitions = [
   ["total_api_call", "TotalApi.Call"],
   ["current_session", "Current.Session entries"]
 ];
+
+const xApiOnlyCounterKinds = new Set(["total_api_call", "update_status_call"]);
 
 const scoringNumberFields = [
   "minimumSearchResults",
@@ -1559,7 +1561,7 @@ async function refreshStats() {
   renderXSessionAlertHeader();
 
   const listCounts = data.lists || {};
-  metrics.innerHTML = metricDefinitions
+  metrics.innerHTML = visibleMetricDefinitions(data.runtimeModes)
     .map(([kind, label]) => {
       const value = listCounts[kind] || 0;
       return `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
@@ -1571,11 +1573,15 @@ async function refreshStats() {
   renderRunStatus(data.currentRun, data.staleKeywordUserPrune);
 }
 
+function visibleMetricDefinitions(runtimeModes = {}) {
+  return metricDefinitions.filter(([kind]) => runtimeModes.xApiEnabled !== false || !xApiOnlyCounterKinds.has(kind));
+}
+
 function renderRunCounterMetric(run) {
   if (!run) {
     return '<div class="metric"><span>Active run</span><strong class="metric-text">No active run</strong></div>';
   }
-  return `<div class="metric"><span>Active run</span><strong class="metric-text">${escapeHtml(run.status)} - ${escapeHtml(run.id)}</strong></div>`;
+  return `<div class="metric"><span>Active run</span><strong class="metric-text metric-ok">${escapeHtml(run.status)} - ${escapeHtml(run.id)}</strong></div>`;
 }
 
 function renderXBudgetMetrics(budget, runtimeModes = {}) {
@@ -1607,8 +1613,6 @@ function renderXBudgetMetrics(budget, runtimeModes = {}) {
 
 function renderSearchWithoutApiMetrics(stats) {
   if (!stats?.enabled) return "";
-  const noResultSaved = stats.noResultKeywords ?? 0;
-  const noResultExcluded = stats.excludedNoResultKeywords ?? 0;
   const available = stats.availableKeywords ?? 0;
   const noEligibleWarning =
     (stats.keywordTotal ?? 0) > 0 && available === 0
@@ -1617,7 +1621,6 @@ function renderSearchWithoutApiMetrics(stats) {
   return `
     <div class="metric"><span>Keywords per session</span><strong>${formatSessionKeywordLimit(stats)}</strong></div>
     <div class="metric"><span>Active keyword entries</span><strong>${stats.keywordTotal ?? 0}</strong></div>
-    <div class="metric"><span>No.Result exclusions</span><strong class="metric-text">${noResultExcluded} active / ${noResultSaved} saved</strong></div>
     <div class="metric"><span>SearchTerms.Used saved</span><strong>${stats.searchTermsUsedKeywords ?? stats.searchedKeywords ?? 0}</strong></div>
     <div class="metric"><span>Active keywords already searched</span><strong>${stats.excludedAlreadySearchedKeywords ?? 0}</strong></div>
     <div class="metric"><span>Available keywords now</span><strong>${available}</strong></div>
@@ -2142,6 +2145,7 @@ async function refreshList() {
   updateActiveListLabel();
   listContent.innerHTML = "";
   await loadNextListPage();
+  await refreshListSearchMatches();
 }
 
 function updateActiveListLabel() {
@@ -2154,6 +2158,82 @@ function updateActiveListLabel() {
   }
   const total = listState.total ?? activeTotal;
   activeListLabel.textContent = `List: ${label} - ${total} active lines`;
+}
+
+async function refreshListSearchMatches() {
+  if (!listSearchMatches) return;
+  const query = listState.search.trim();
+  if (!query) {
+    listSearchMatches.innerHTML = "";
+    return;
+  }
+
+  listSearchMatches.innerHTML = '<div class="list-search-match-note">Searching other lists...</div>';
+  const params = new URLSearchParams({ q: query, limit: "6" });
+  const result = await jsonFetch(`/admin/lists/search?${params.toString()}`);
+  if (!result) return;
+  const groups = Array.isArray(result.groups) ? result.groups : [];
+  if (!groups.length) {
+    listSearchMatches.innerHTML = '<div class="list-search-match-note">No match in any editable list.</div>';
+    return;
+  }
+
+  const html = groups
+    .map((group) => {
+      const kind = String(group.kind || "");
+      const label = listKindLabel(kind);
+      const entries = Array.isArray(group.entries) ? group.entries : [];
+      const entryHtml = entries
+        .map((entry) => {
+          const value = entry.rawValue || "(empty line)";
+          const meta = entry.lineNumber ? `line ${entry.lineNumber}` : `#${entry.id}`;
+          return `<button class="list-search-match" type="button" data-search-match-kind="${escapeAttribute(kind)}" data-search-match-id="${escapeAttribute(entry.id)}" data-search-match-value="${escapeAttribute(value)}" title="Open ${escapeAttribute(label)} and select this match.">
+            <code>${highlightMatch(value, result.query || query)}</code>
+            <span>${escapeHtml(meta)}</span>
+          </button>`;
+        })
+        .join("");
+      const more = Number(group.total ?? 0) > entries.length ? `<span class="list-search-match-more">+${Number(group.total) - entries.length}</span>` : "";
+      return `<section class="list-search-match-group">
+        <header><strong>${escapeHtml(label)}</strong><span>${Number(group.total ?? 0)} match${Number(group.total ?? 0) === 1 ? "" : "es"}${more}</span></header>
+        <div>${entryHtml}</div>
+      </section>`;
+    })
+    .join("");
+
+  listSearchMatches.innerHTML = `<div class="list-search-match-title">Matches in lists</div>${html}`;
+}
+
+function listKindLabel(kind) {
+  const option = Array.from(editKind.options).find((item) => item.value === kind);
+  return option?.textContent?.trim() || kind;
+}
+
+function highlightMatch(value, query) {
+  const text = String(value);
+  const needle = String(query || "").trim();
+  if (!needle) {
+    return escapeHtml(text);
+  }
+  const index = text.toLocaleLowerCase().indexOf(needle.toLocaleLowerCase());
+  if (index === -1) {
+    return escapeHtml(text);
+  }
+  return `${escapeHtml(text.slice(0, index))}<mark>${escapeHtml(text.slice(index, index + needle.length))}</mark>${escapeHtml(
+    text.slice(index + needle.length)
+  )}`;
+}
+
+async function openListSearchMatch(button) {
+  const kind = button.dataset.searchMatchKind;
+  const entryId = Number(button.dataset.searchMatchId);
+  const value = button.dataset.searchMatchValue || "";
+  if (!kind || !Number.isFinite(entryId)) return;
+  editKind.value = kind;
+  listSearch.value = value;
+  listState.pendingEntryId = entryId;
+  await refreshList();
+  setStatus(`Opened ${listKindLabel(kind)} match: ${value}`);
 }
 
 function appendListRows(entries) {
@@ -2187,6 +2267,16 @@ function appendListRows(entries) {
     })
     .join("");
   listContent.insertAdjacentHTML("beforeend", html);
+  selectPendingListEntryIfVisible();
+}
+
+function selectPendingListEntryIfVisible() {
+  if (!listState.pendingEntryId) return;
+  const row = listContent.querySelector(`.list-row[data-entry-id="${listState.pendingEntryId}"]`);
+  if (!row) return;
+  selectEntry(row);
+  row.scrollIntoView({ block: "nearest" });
+  listState.pendingEntryId = null;
 }
 
 function renderListLoader() {
@@ -5018,6 +5108,11 @@ listSearch.addEventListener("input", () => {
   listSearchTimer = setTimeout(() => {
     refreshList().catch((error) => setStatus(error.message));
   }, 250);
+});
+listSearchMatches?.addEventListener("click", (event) => {
+  const matchButton = event.target.closest("[data-search-match-kind]");
+  if (!matchButton) return;
+  openListSearchMatch(matchButton).catch((error) => setStatus(error.message));
 });
 document.querySelectorAll("[data-admin-section-target]").forEach((button) => {
   button.addEventListener("click", () => {

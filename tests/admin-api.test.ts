@@ -2409,6 +2409,31 @@ describe("admin api", () => {
     expect(filteredListPage.json().entries.map((entry: { rawValue: string }) => entry.rawValue)).toEqual(["two"]);
     expect(filteredListPage.json().pagination.total).toBe(1);
 
+    const noResultEntry = await app.inject({
+      method: "POST",
+      url: "/admin/lists/no_result",
+      headers: authHeaders,
+      payload: { value: "two missing elsewhere" }
+    });
+    expect(noResultEntry.statusCode).toBe(200);
+
+    const globalListSearch = await app.inject({
+      method: "GET",
+      url: "/admin/lists/search?q=two",
+      headers: authHeaders
+    });
+    expect(globalListSearch.statusCode).toBe(200);
+    expect(globalListSearch.json().total).toBeGreaterThanOrEqual(2);
+    expect(globalListSearch.json().groups.map((group: { kind: string }) => group.kind)).toEqual(
+      expect.arrayContaining(["keyword", "no_result"])
+    );
+    const deletedNoResultEntry = await app.inject({
+      method: "DELETE",
+      url: `/admin/lists/no_result/${noResultEntry.json().entry.id}`,
+      headers: authHeaders
+    });
+    expect(deletedNoResultEntry.statusCode).toBe(200);
+
     const exportedKeywordList = await app.inject({
       method: "GET",
       url: "/admin/lists/keyword/export",
