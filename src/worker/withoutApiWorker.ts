@@ -273,6 +273,11 @@ async function main() {
         remainingKeywords: canReuseExistingPlan ? existingStats.remainingKeywords : keywords.length,
         resumedExistingPlan: canReuseExistingPlan,
         availableKeywords: canReuseExistingPlan ? existingStats.availableKeywords : keywordPlan.availableKeywords,
+        keywordTotal: canReuseExistingPlan ? undefined : keywordPlan.keywordTotal,
+        noResultKeywords: canReuseExistingPlan ? undefined : keywordPlan.noResultKeywords,
+        searchTermsUsedKeywords: canReuseExistingPlan ? undefined : keywordPlan.searchTermsUsedKeywords,
+        excludedNoResultKeywords: canReuseExistingPlan ? undefined : keywordPlan.excludedNoResultKeywords,
+        excludedAlreadySearchedKeywords: canReuseExistingPlan ? undefined : keywordPlan.excludedAlreadySearchedKeywords,
         sessionKeywordLimit: canReuseExistingPlan ? existingStats.sessionKeywordLimit : keywordPlan.configuredLimit,
         randomSessionKeywordLimit: canReuseExistingPlan ? existingStats.sessionKeywordLimitRandom : keywordPlan.randomized,
         randomizeKeywordOrder: canReuseExistingPlan ? existingStats.randomizeKeywordOrder : keywordPlan.orderRandomized,
@@ -281,6 +286,23 @@ async function main() {
         smokeKeywordPool: args.smoke ? SMOKE_KEYWORDS : undefined
       }
     );
+    if (!args.smoke && keywords.length === 0) {
+      await record(
+        "prob",
+        "browser.search.no_eligible_keywords",
+        "No eligible keyword remains. Active keywords are already in SearchTerms.Used or No.Result; clear one of those lists to search again.",
+        {
+          runId: run.id,
+          totalKeywords: keywordPlan.keywordTotal,
+          availableKeywords: keywordPlan.availableKeywords,
+          noResultKeywords: keywordPlan.noResultKeywords,
+          searchTermsUsedKeywords: keywordPlan.searchTermsUsedKeywords,
+          excludedNoResultKeywords: keywordPlan.excludedNoResultKeywords,
+          excludedAlreadySearchedKeywords: keywordPlan.excludedAlreadySearchedKeywords,
+          sessionKeywordLimit: keywordPlan.configuredLimit
+        }
+      );
+    }
 
     browser = await chromium.launch(browserLaunchOptions(config, record));
     const context = await browser.newContext({
@@ -1777,8 +1799,8 @@ function summarizeAlertDetails(details: Record<string, unknown>): Record<string,
 }
 
 function plannedBrowserKeywords(lists: ListService): string[] {
-  const noResults = new Set(lists.activeValues("no_result").map(normalizeValue));
-  const alreadyUsed = new Set(lists.activeValues("search_terms_used").map(normalizeValue));
+  const noResults = new Set(lists.activeValues("no_result").map(normalizeValue).filter(Boolean));
+  const alreadyUsed = new Set(lists.activeValues("search_terms_used").map(normalizeValue).filter(Boolean));
   return lists.activeValues("keyword").filter((keyword) => {
     const normalized = normalizeValue(keyword);
     return normalized.length > 0 && !noResults.has(normalized) && !alreadyUsed.has(normalized);
@@ -1786,6 +1808,7 @@ function plannedBrowserKeywords(lists: ListService): string[] {
 }
 
 function planBrowserKeywords(lists: ListService, config: ReturnType<typeof loadConfig>) {
+  const availability = browserKeywordAvailability(lists);
   const keywords = config.searchWithoutApiRandomizeKeywordOrder
     ? shuffleKeywords(plannedBrowserKeywords(lists))
     : plannedBrowserKeywords(lists);
@@ -1793,7 +1816,7 @@ function planBrowserKeywords(lists: ListService, config: ReturnType<typeof loadC
   if (configuredLimit === 0 || keywords.length === 0) {
     return {
       keywords,
-      availableKeywords: keywords.length,
+      ...availability,
       configuredLimit,
       randomized: false,
       orderRandomized: config.searchWithoutApiRandomizeKeywordOrder
@@ -1804,7 +1827,7 @@ function planBrowserKeywords(lists: ListService, config: ReturnType<typeof loadC
   const effectiveLimit = config.searchWithoutApiSessionKeywordLimitRandom ? randomInt(1, max) : max;
   return {
     keywords: keywords.slice(0, effectiveLimit),
-    availableKeywords: keywords.length,
+    ...availability,
     configuredLimit,
     randomized: config.searchWithoutApiSessionKeywordLimitRandom,
     orderRandomized: config.searchWithoutApiRandomizeKeywordOrder
@@ -1817,9 +1840,44 @@ async function planSmokeKeywords(cliKeyword?: string) {
   return {
     keywords: [keyword],
     availableKeywords: SMOKE_KEYWORDS.length,
+    keywordTotal: SMOKE_KEYWORDS.length,
+    noResultKeywords: 0,
+    searchTermsUsedKeywords: 0,
+    excludedNoResultKeywords: 0,
+    excludedAlreadySearchedKeywords: 0,
     configuredLimit: 1,
     randomized: false,
     orderRandomized: true
+  };
+}
+
+function browserKeywordAvailability(lists: ListService) {
+  const noResults = new Set(lists.activeValues("no_result").map(normalizeValue).filter(Boolean));
+  const alreadyUsed = new Set(lists.activeValues("search_terms_used").map(normalizeValue).filter(Boolean));
+  const keywords = Array.from(new Set(lists.activeValues("keyword").map((keyword) => normalizeValue(keyword)).filter(Boolean)));
+
+  let excludedNoResultKeywords = 0;
+  let excludedAlreadySearchedKeywords = 0;
+  let availableKeywords = 0;
+  for (const keyword of keywords) {
+    if (noResults.has(keyword)) {
+      excludedNoResultKeywords += 1;
+      continue;
+    }
+    if (alreadyUsed.has(keyword)) {
+      excludedAlreadySearchedKeywords += 1;
+      continue;
+    }
+    availableKeywords += 1;
+  }
+
+  return {
+    keywordTotal: keywords.length,
+    noResultKeywords: noResults.size,
+    searchTermsUsedKeywords: alreadyUsed.size,
+    excludedNoResultKeywords,
+    excludedAlreadySearchedKeywords,
+    availableKeywords
   };
 }
 

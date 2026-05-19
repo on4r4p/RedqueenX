@@ -8,18 +8,20 @@ import { TimelineTweetService } from "../src/admin/timelineTweetService";
 import type { XSearchClient } from "../src/x-client";
 
 describe("rss and crawler adapters", () => {
-  it("maps RSS parser items to title/link pairs", async () => {
+  it("maps RSS parser items to title, link, and published date", async () => {
     const client = new RssClient() as any;
     client.parser = {
       parseURL: vi.fn().mockResolvedValue({
         items: [
-          { title: "A", link: "https://a.example" },
+          { title: "A", link: "https://a.example", isoDate: "2026-05-18T08:00:00.000Z" },
           { title: "Missing link" }
         ]
       })
     };
 
-    await expect(client.fetch("https://feed.example/rss")).resolves.toEqual([{ title: "A", link: "https://a.example" }]);
+    await expect(client.fetch("https://feed.example/rss")).resolves.toEqual([
+      { title: "A", link: "https://a.example", publishedAt: "2026-05-18T08:00:00.000Z" }
+    ]);
   });
 
   it("scores tweets returned by an X search client", async () => {

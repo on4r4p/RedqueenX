@@ -1604,14 +1604,26 @@ function renderSearchWithoutApiMetrics(stats) {
   if (!stats?.enabled) return "";
   const noResultSaved = stats.noResultKeywords ?? 0;
   const noResultExcluded = stats.excludedNoResultKeywords ?? 0;
+  const available = stats.availableKeywords ?? 0;
+  const noEligibleWarning =
+    (stats.keywordTotal ?? 0) > 0 && available === 0
+      ? `<div class="metric metric-wide is-warning"><span>No eligible keywords remain</span><strong class="metric-text">${keywordExhaustionText(stats)}</strong></div>`
+      : "";
   return `
     <div class="metric"><span>Keywords per session</span><strong>${formatSessionKeywordLimit(stats)}</strong></div>
     <div class="metric"><span>Active keyword entries</span><strong>${stats.keywordTotal ?? 0}</strong></div>
     <div class="metric"><span>No.Result exclusions</span><strong class="metric-text">${noResultExcluded} active / ${noResultSaved} saved</strong></div>
     <div class="metric"><span>SearchTerms.Used saved</span><strong>${stats.searchTermsUsedKeywords ?? stats.searchedKeywords ?? 0}</strong></div>
     <div class="metric"><span>Active keywords already searched</span><strong>${stats.excludedAlreadySearchedKeywords ?? 0}</strong></div>
-    <div class="metric"><span>Available keywords now</span><strong>${stats.availableKeywords ?? 0}</strong></div>
+    <div class="metric"><span>Available keywords now</span><strong>${available}</strong></div>
+    ${noEligibleWarning}
   `;
+}
+
+function keywordExhaustionText(stats) {
+  const searched = stats.excludedAlreadySearchedKeywords ?? 0;
+  const noResult = stats.excludedNoResultKeywords ?? 0;
+  return `${searched} already in SearchTerms.Used, ${noResult} in No.Result. Clear one of those lists to search again.`;
 }
 
 function formatSessionKeywordLimit(stats) {
@@ -3105,7 +3117,7 @@ async function refreshSessionKeywords() {
     sessionKeywordsList.innerHTML =
       data.total > 0
         ? '<div class="empty-state">Keyword plan is queued but no keyword rows have been written yet. Refresh after the Docker worker starts.</div>'
-        : '<div class="empty-state">No keywords are planned for this run.</div>';
+        : '<div class="empty-state">No keywords are planned for this run. All active keywords may already be in SearchTerms.Used or No.Result; clear one of those lists before starting another search.</div>';
     return;
   }
   sessionKeywordsList.innerHTML = data.keywords
@@ -3130,7 +3142,8 @@ async function refreshRunPreview() {
   ].join(" - ");
   const sample = Array.isArray(data.sample) ? data.sample : [];
   if (!sample.length) {
-    runPreviewList.innerHTML = '<div class="empty-state">No eligible keyword for the next run.</div>';
+    runPreviewList.innerHTML =
+      '<div class="empty-state">No eligible keyword for the next run. SearchTerms.Used and/or No.Result currently exclude every active keyword.</div>';
     return;
   }
   runPreviewList.innerHTML = sample

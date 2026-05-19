@@ -14,8 +14,8 @@ describe("RSS fallback", () => {
     const record = vi.fn<RecordFn>().mockResolvedValue(undefined);
     const rssClient = {
       fetch: vi.fn().mockResolvedValue([
-        { title: "First advisory", link: "https://feed.example/1" },
-        { title: "Second advisory", link: "https://feed.example/2" }
+        { title: "First advisory", link: "https://feed.example/1", publishedAt: "2026-05-18T08:00:00.000Z" },
+        { title: "Second advisory", link: "https://feed.example/2", publishedAt: "2026-05-18T09:00:00.000Z" }
       ])
     };
 
@@ -36,6 +36,7 @@ describe("RSS fallback", () => {
     const savedItems = timelineItems.latest(10);
     expect(savedItems.map((item) => item.source)).toEqual(["rss", "rss"]);
     expect(savedItems.map((item) => item.text).sort()).toEqual(["First advisory", "Second advisory"]);
+    expect(savedItems.map((item) => item.tweetCreatedAt)).toEqual(["2026-05-18T09:00:00.000Z", "2026-05-18T08:00:00.000Z"]);
     expect(record).toHaveBeenCalledWith(
       "info",
       "rss.fallback.completed",

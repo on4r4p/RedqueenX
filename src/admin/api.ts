@@ -2691,6 +2691,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       }
 
       const keywords = plannedKeywords(lists, runtimeConfig);
+      const availability = keywordAvailability(lists);
       const run = runs.start(createInitialRunStats(lists, runtimeConfig, keywords));
       runs.replaceKeywords(run.id, keywords);
       await recordSession("info", "run.started", "Fresh run started from start action", {
@@ -2698,10 +2699,24 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         status: run.status,
         mode: "without_api",
         plannedKeywords: keywords.length,
+        ...keywordAvailabilityLogData(availability),
         accountId: blocked.account.id,
         xIdentifier: blocked.account.xIdentifier,
         vpnProfilePath: runtimeConfig.vpnConfig
       });
+      if (keywords.length === 0) {
+        await recordSession(
+          "prob",
+          "run.no_eligible_keywords",
+          "No eligible keyword remains. Active keywords are already in SearchTerms.Used or No.Result; clear one of those lists to search again.",
+          {
+            runId: run.id,
+            mode: "without_api",
+            sessionKeywordLimit: runtimeConfig.searchWithoutApiSessionKeywordLimit,
+            ...keywordAvailabilityLogData(availability)
+          }
+        );
+      }
       await startWithoutApiExecution(run);
       return { run };
     }
@@ -2727,14 +2742,28 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     }
 
     const keywords = plannedKeywords(lists, runtimeConfig);
+    const availability = keywordAvailability(lists);
     const run = runs.start(createInitialRunStats(lists, runtimeConfig, keywords));
     runs.replaceKeywords(run.id, keywords);
     await recordSession("info", "run.started", "Fresh run started from start action", {
       runId: run.id,
       status: run.status,
       plannedKeywords: keywords.length,
+      ...keywordAvailabilityLogData(availability),
       searchPacingApplied: true
     });
+    if (keywords.length === 0) {
+      await recordSession(
+        "prob",
+        "run.no_eligible_keywords",
+        "No eligible keyword remains. Active keywords are already in SearchTerms.Used or No.Result; clear one of those lists to search again.",
+        {
+          runId: run.id,
+          mode: "x_api",
+          ...keywordAvailabilityLogData(availability)
+        }
+      );
+    }
     startCrawlerLoop(run);
     return { run };
   });
@@ -5342,11 +5371,12 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const runtimeConfig = getXApiConfig();
     const keywords = plannedKeywords(lists, runtimeConfig);
     if (keywords.length === 0) {
-      await recordSession("info", "run.chain.empty", "Sequential runs stopped because no eligible keywords remain", {
+      await recordSession("info", "run.chain.empty", "Sequential runs stopped because no eligible keywords remain. Clear SearchTerms.Used and/or No.Result to continue searching.", {
         previousRunId: completedRunId,
         mode,
         chainIndex: chain.index,
-        chainTotal: chain.total
+        chainTotal: chain.total,
+        ...keywordAvailabilityLogData(keywordAvailability(lists))
       });
       return;
     }
@@ -7368,6 +7398,17 @@ function keywordAvailability(lists: ListService) {
     excludedByNoResult,
     excludedBySearchTermsUsed,
     availableKeywords
+  };
+}
+
+function keywordAvailabilityLogData(availability: ReturnType<typeof keywordAvailability>) {
+  return {
+    keywordTotal: availability.totalKeywords,
+    availableKeywords: availability.availableKeywords,
+    noResultKeywords: availability.noResultEntries,
+    searchTermsUsedKeywords: availability.searchTermsUsedEntries,
+    excludedNoResultKeywords: availability.excludedByNoResult,
+    excludedAlreadySearchedKeywords: availability.excludedBySearchTermsUsed
   };
 }
 

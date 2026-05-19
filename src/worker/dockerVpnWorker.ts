@@ -422,10 +422,11 @@ async function maybeStartNextChainedRun(
   }
   const keywords = plannedKeywords(lists, config);
   if (keywords.length === 0) {
-    await record("info", "docker_vpn.run.chain.empty", "Sequential Docker VPN runs stopped because no eligible keywords remain", {
+    await record("info", "docker_vpn.run.chain.empty", "Sequential Docker VPN runs stopped because no eligible keywords remain. Clear SearchTerms.Used and/or No.Result to continue searching.", {
       previousRunId: completedRunId,
       chainIndex: chain.index,
-      chainTotal: chain.total
+      chainTotal: chain.total,
+      ...keywordAvailabilityLogData(lists)
     });
     return;
   }
@@ -474,6 +475,36 @@ function plannedKeywords(
   const maxKeywords = configuredLimit > 0 ? Math.min(orderedKeywords.length, configuredLimit) : orderedKeywords.length;
   const totalKeywords = config.searchWithoutApiSessionKeywordLimitRandom && maxKeywords > 0 ? randomInt(1, maxKeywords) : maxKeywords;
   return orderedKeywords.slice(0, totalKeywords);
+}
+
+function keywordAvailabilityLogData(lists: ListService) {
+  const noResults = new Set(lists.activeValues("no_result").map(normalizeValue).filter(Boolean));
+  const alreadyUsed = new Set(lists.activeValues("search_terms_used").map(normalizeValue).filter(Boolean));
+  const keywords = Array.from(new Set(lists.activeValues("keyword").map((keyword) => normalizeValue(keyword)).filter(Boolean)));
+
+  let excludedNoResultKeywords = 0;
+  let excludedAlreadySearchedKeywords = 0;
+  let availableKeywords = 0;
+  for (const keyword of keywords) {
+    if (noResults.has(keyword)) {
+      excludedNoResultKeywords += 1;
+      continue;
+    }
+    if (alreadyUsed.has(keyword)) {
+      excludedAlreadySearchedKeywords += 1;
+      continue;
+    }
+    availableKeywords += 1;
+  }
+
+  return {
+    keywordTotal: keywords.length,
+    availableKeywords,
+    noResultKeywords: noResults.size,
+    searchTermsUsedKeywords: alreadyUsed.size,
+    excludedNoResultKeywords,
+    excludedAlreadySearchedKeywords
+  };
 }
 
 function shuffleKeywordList(keywords: string[]): string[] {

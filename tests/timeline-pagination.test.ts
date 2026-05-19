@@ -29,7 +29,7 @@ describe("timeline pagination", () => {
     expect(page.items.map((item) => item.source)).toEqual(["tweet", "legacy"]);
   });
 
-  it("paginates external timeline items before accepted tweets and legacy entries", () => {
+  it("paginates timeline sources by their display date instead of source blocks", () => {
     const database = openMemoryDatabase();
     const lists = new ListService(database);
     const external = new TimelineItemService(database);
@@ -52,7 +52,7 @@ describe("timeline pagination", () => {
     const page = timeline.page({ limit: 3, offset: 0 });
 
     expect(page.total).toBe(3);
-    expect(page.items.map((item) => item.source)).toEqual(["rss", "tweet", "legacy"]);
+    expect(page.items.map((item) => item.source)).toEqual(["tweet", "rss", "legacy"]);
   });
 
   it("filters timeline items by source", () => {

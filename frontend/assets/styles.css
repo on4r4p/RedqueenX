@@ -937,6 +937,15 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.metric.metric-wide {
+  grid-column: 1 / -1;
+}
+
+.metric.is-warning {
+  border-color: rgba(255, 184, 77, 0.72);
+  background: rgba(78, 48, 11, 0.28);
+}
+
 .list-panel {
   margin-top: 0;
 }

@@ -77,6 +77,7 @@ export async function runRssFallback(options: RssFallbackOptions): Promise<RssFa
 
 function saveRssItem(lists: ListService, timelineItems: TimelineItemService | undefined, feed: string, item: RssItem, importedAt: string): void {
   const source = `runtime:rss:${feed}`;
+  const acceptedAt = item.publishedAt ?? importedAt;
   lists.add("rss_sent", item.link, source, null, importedAt);
   if (!timelineItems) {
     lists.add("text_sent", `${item.title} ${item.link}`.trim(), source, null, importedAt);
@@ -90,13 +91,13 @@ function saveRssItem(lists: ListService, timelineItems: TimelineItemService | un
     text: item.title,
     authorName: feed,
     itemUrl: item.link,
-    externalCreatedAt: null,
+    externalCreatedAt: item.publishedAt ?? null,
     score: 0,
     engagementScore: 0,
     commentsCount: 0,
     reasons: ["rss_fallback"],
     urls: item.link ? [item.link] : [],
     metadata: { feed },
-    acceptedAt: importedAt
+    acceptedAt
   });
 }

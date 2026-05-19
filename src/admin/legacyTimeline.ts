@@ -66,16 +66,13 @@ export class LegacyTimelineService {
     const itemTotal = this.timelineItems.count(itemSources);
     const runtimeTotal = includeTweets ? this.timelineTweets.count() : 0;
     const legacyTotal = includeLegacyRss ? this.countLegacy({ rssOnly: sourceSet.has("rss") }) : 0;
-    const itemOffset = Math.min(offset, itemTotal);
-    const itemLimit = Math.max(0, Math.min(limit, itemTotal - itemOffset));
-    const runtimeOffset = Math.max(0, Math.min(offset - itemTotal, runtimeTotal));
-    const runtimeLimit = Math.max(0, Math.min(limit - itemLimit, runtimeTotal - runtimeOffset));
-    const legacyOffset = Math.max(0, offset - itemTotal - runtimeTotal);
-    const legacyLimit = Math.max(0, Math.min(limit - itemLimit - runtimeLimit, legacyTotal - legacyOffset));
-    const timelineItems = itemLimit > 0 ? this.timelineItems.latest(itemLimit, itemOffset, itemSources) : [];
-    const runtimeTweets = runtimeLimit > 0 ? this.timelineTweets.latest(runtimeLimit, runtimeOffset) : [];
-    const legacyItems = legacyLimit > 0 ? this.latestLegacy(legacyLimit, legacyOffset, { rssOnly: sourceSet.has("rss") }) : [];
-    const items = [...timelineItems, ...runtimeTweets, ...legacyItems];
+    const windowSize = offset + limit;
+    const timelineItems = itemTotal > 0 ? this.timelineItems.latest(windowSize, 0, itemSources) : [];
+    const runtimeTweets = runtimeTotal > 0 ? this.timelineTweets.latest(windowSize, 0) : [];
+    const legacyItems = legacyTotal > 0 ? this.latestLegacy(windowSize, 0, { rssOnly: sourceSet.has("rss") }) : [];
+    const items = [...timelineItems, ...runtimeTweets, ...legacyItems]
+      .sort(compareTimelineItems)
+      .slice(offset, offset + limit);
     const total = itemTotal + runtimeTotal + legacyTotal;
     return {
       items,
@@ -159,6 +156,35 @@ export class LegacyTimelineService {
       .get() as { total: number };
     return row.total;
   }
+}
+
+function compareTimelineItems(
+  left: LegacyTimelineItem | TimelineTweetItem | TimelineItem,
+  right: LegacyTimelineItem | TimelineTweetItem | TimelineItem
+): number {
+  const dateDiff = timelineSortTime(right) - timelineSortTime(left);
+  if (dateDiff !== 0) return dateDiff;
+  const sourceDiff = sourcePriority(left.source) - sourcePriority(right.source);
+  if (sourceDiff !== 0) return sourceDiff;
+  return String(right.id).localeCompare(String(left.id));
+}
+
+function timelineSortTime(item: LegacyTimelineItem | TimelineTweetItem | TimelineItem): number {
+  const date =
+    item.source === "rss"
+      ? item.tweetCreatedAt ?? item.acceptedAt
+      : item.source === "tweet" || item.source === "from test"
+        ? item.acceptedAt ?? item.tweetCreatedAt
+        : item.acceptedAt ?? item.tweetCreatedAt;
+  if (!date) return 0;
+  const time = new Date(date).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function sourcePriority(source: string): number {
+  if (source === "tweet" || source === "from test") return 0;
+  if (source === "rss") return 1;
+  return 2;
 }
 
 function normalizeTimelineSources(sources: TimelineSourceFilter[] | undefined): Set<TimelineSourceFilter> {
