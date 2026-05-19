@@ -288,6 +288,7 @@ const xApiUpdateSchema = z.object({
       "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT",
       "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM",
       "SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER",
+      "SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT",
       "SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT",
       "SEARCH_WITHOUT_API_MAX_RETRIES",
       "SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS",
@@ -395,6 +396,7 @@ export interface AdminApiOptions {
     | "searchWithoutApiSessionKeywordLimit"
     | "searchWithoutApiSessionKeywordLimitRandom"
     | "searchWithoutApiRandomizeKeywordOrder"
+    | "searchWithoutApiUserKeywordPercent"
     | "searchWithoutApiAutoIgnoreAlert"
     | "searchWithoutApiMaxRetries"
     | "searchWithoutApiAutoRestartDelaySeconds"
@@ -3122,6 +3124,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       searchWithoutApiSessionKeywordLimit: options.config.searchWithoutApiSessionKeywordLimit,
       searchWithoutApiSessionKeywordLimitRandom: options.config.searchWithoutApiSessionKeywordLimitRandom,
       searchWithoutApiRandomizeKeywordOrder: options.config.searchWithoutApiRandomizeKeywordOrder,
+      searchWithoutApiUserKeywordPercent: options.config.searchWithoutApiUserKeywordPercent,
       searchWithoutApiAutoIgnoreAlert: options.config.searchWithoutApiAutoIgnoreAlert,
       searchWithoutApiMaxRetries: options.config.searchWithoutApiMaxRetries,
       searchWithoutApiAutoRestartDelaySeconds: options.config.searchWithoutApiAutoRestartDelaySeconds,
@@ -3325,6 +3328,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       sessionKeywordLimit: xApiConfig.searchWithoutApiSessionKeywordLimit,
       sessionKeywordLimitRandom: xApiConfig.searchWithoutApiSessionKeywordLimitRandom,
       randomizeKeywordOrder: xApiConfig.searchWithoutApiRandomizeKeywordOrder,
+      userKeywordPercent: xApiConfig.searchWithoutApiUserKeywordPercent,
       searchedKeywords: availability.searchTermsUsedEntries,
       requestsBeforePauseMin: xApiConfig.searchWithoutApiRequestsBeforePauseMin,
       pauseMinMinutes: xApiConfig.searchWithoutApiPauseMinMinutes,
@@ -3376,6 +3380,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       previousConfig.searchWithoutApiSessionKeywordLimit === config.searchWithoutApiSessionKeywordLimit &&
       previousConfig.searchWithoutApiSessionKeywordLimitRandom === config.searchWithoutApiSessionKeywordLimitRandom &&
       previousConfig.searchWithoutApiRandomizeKeywordOrder === config.searchWithoutApiRandomizeKeywordOrder &&
+      previousConfig.searchWithoutApiUserKeywordPercent === config.searchWithoutApiUserKeywordPercent &&
       previousConfig.searchWithoutApiRequestsBeforePauseMin === config.searchWithoutApiRequestsBeforePauseMin
     ) {
       return { replanned: false, reason: "search_pacing_unchanged" };
@@ -7294,6 +7299,7 @@ function createInitialRunStats(
         | "searchWithoutApiSessionKeywordLimit"
         | "searchWithoutApiSessionKeywordLimitRandom"
         | "searchWithoutApiRandomizeKeywordOrder"
+        | "searchWithoutApiUserKeywordPercent"
         | "searchWithoutApiAutoIgnoreAlert"
         | "searchWithoutApiMaxRetries"
         | "searchWithoutApiAutoRestartDelaySeconds"
@@ -7307,7 +7313,7 @@ function createInitialRunStats(
   runChain = initialRunChainState(config)
 ): RunStats {
   const apiWindowMinutes = searchPauseWindowMaxMinutesForConfig(config);
-  const availableKeywords = plannedKeywords(lists).length;
+  const availableKeywords = plannedKeywords(lists, config).length;
   const keywords = plannedKeywordList ?? plannedKeywords(lists, config);
   const configuredLimit = config.searchWithoutApiSessionKeywordLimit ?? 0;
   const totalKeywords = keywords.length;
@@ -7323,6 +7329,7 @@ function createInitialRunStats(
     sessionKeywordLimit: config.searchWithoutApiEnabled ? configuredLimit : null,
     sessionKeywordLimitRandom: config.searchWithoutApiSessionKeywordLimitRandom ?? false,
     randomizeKeywordOrder: config.searchWithoutApiRandomizeKeywordOrder ?? false,
+    userKeywordPercent: config.searchWithoutApiUserKeywordPercent ?? 100,
     runChainTotal: runChain.total,
     runChainIndex: runChain.index,
     runChainRemaining: runChain.remaining,
@@ -7400,6 +7407,7 @@ function plannedKeywords(
     searchWithoutApiSessionKeywordLimit?: number;
     searchWithoutApiSessionKeywordLimitRandom?: boolean;
     searchWithoutApiRandomizeKeywordOrder?: boolean;
+    searchWithoutApiUserKeywordPercent?: number;
   }
 ): string[] {
   const noResults = new Set(lists.activeValues("no_result").map(normalizeValue));
@@ -7415,7 +7423,33 @@ function plannedKeywords(
   const maxKeywords = configuredLimit > 0 ? Math.min(orderedKeywords.length, configuredLimit) : orderedKeywords.length;
   const totalKeywords =
     config?.searchWithoutApiSessionKeywordLimitRandom && maxKeywords > 0 ? randomInt(1, maxKeywords) : maxKeywords;
-  return orderedKeywords.slice(0, totalKeywords);
+  return applyUserKeywordPercent(orderedKeywords, totalKeywords, config?.searchWithoutApiUserKeywordPercent);
+}
+
+function applyUserKeywordPercent(keywords: string[], totalKeywords: number, configuredPercent = 100): string[] {
+  const total = Math.max(0, Math.min(keywords.length, Math.floor(totalKeywords)));
+  const percent = Math.max(0, Math.min(100, Math.floor(configuredPercent)));
+  if (total === 0 || percent >= 100) {
+    return keywords.slice(0, total);
+  }
+
+  const indexedKeywords = keywords.map((keyword, index) => ({ keyword, index }));
+  const userKeywords = indexedKeywords.filter(({ keyword }) => isHandleSearchKeyword(keyword));
+  const regularKeywords = indexedKeywords.filter(({ keyword }) => !isHandleSearchKeyword(keyword));
+  const targetUsers = Math.floor((total * percent) / 100);
+  const targetRegular = total - targetUsers;
+
+  const selected = [...regularKeywords.slice(0, targetRegular), ...userKeywords.slice(0, targetUsers)];
+  if (selected.length < total) {
+    const selectedIndexes = new Set(selected.map(({ index }) => index));
+    const fallback = indexedKeywords.filter(({ index }) => !selectedIndexes.has(index)).slice(0, total - selected.length);
+    selected.push(...fallback);
+  }
+
+  return selected
+    .sort((left, right) => left.index - right.index)
+    .slice(0, total)
+    .map(({ keyword }) => keyword);
 }
 
 function shuffleKeywordList(keywords: string[]): string[] {
@@ -8207,6 +8241,7 @@ type XApiEnvKey =
   | "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT"
   | "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM"
   | "SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER"
+  | "SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT"
   | "SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT"
   | "SEARCH_WITHOUT_API_MAX_RETRIES"
   | "SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS"
@@ -8295,6 +8330,7 @@ const xApiEnvMap: Array<[XApiEnvKey, keyof XApiRuntimeConfig]> = [
   ["SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT", "searchWithoutApiSessionKeywordLimit"],
   ["SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM", "searchWithoutApiSessionKeywordLimitRandom"],
   ["SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER", "searchWithoutApiRandomizeKeywordOrder"],
+  ["SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT", "searchWithoutApiUserKeywordPercent"],
   ["SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT", "searchWithoutApiAutoIgnoreAlert"],
   ["SEARCH_WITHOUT_API_MAX_RETRIES", "searchWithoutApiMaxRetries"],
   ["SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS", "searchWithoutApiAutoRestartDelaySeconds"],

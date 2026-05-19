@@ -57,6 +57,16 @@ else
   run git pull --ff-only origin "$branch"
 fi
 
+if [[ -f package.json && -f scripts/sync-env.cjs ]]; then
+  if command -v npm >/dev/null 2>&1; then
+    run npm run env:sync
+  else
+    log "npm is not available; skipping .env sync."
+  fi
+else
+  log "env sync script not found; skipping .env sync."
+fi
+
 compose -f "$compose_file" pull
 compose -f "$compose_file" up -d --remove-orphans
 

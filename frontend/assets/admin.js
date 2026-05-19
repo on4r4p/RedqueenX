@@ -353,6 +353,7 @@ const generalSettingsFields = [
   "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT",
   "SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM",
   "SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER",
+  "SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT",
   "SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT",
   "SEARCH_WITHOUT_API_MAX_RETRIES",
   "SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS",
@@ -550,6 +551,8 @@ const adminTooltipByName = {
     "When true, each session randomly chooses a keyword count between 1 and the configured session limit.",
   SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER:
     "Shuffle eligible keywords before applying the session limit so each run does not always start with the same entries.",
+  SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT:
+    "Target percentage of @user keywords in each session. The planner adapts when one keyword type runs out, so runs do not stop just because the ratio cannot be met exactly.",
   SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT:
     "When Search without Api is stopped by an X session alert, mark that alert ignored automatically and resume the same run.",
   SEARCH_WITHOUT_API_MAX_RETRIES:
@@ -1620,6 +1623,7 @@ function renderSearchWithoutApiMetrics(stats) {
       : "";
   return `
     <div class="metric"><span>Keywords per session</span><strong>${formatSessionKeywordLimit(stats)}</strong></div>
+    <div class="metric"><span>@user keyword target</span><strong>${stats.userKeywordPercent ?? 100}%</strong></div>
     <div class="metric"><span>Active keyword entries</span><strong>${stats.keywordTotal ?? 0}</strong></div>
     <div class="metric"><span>SearchTerms.Used saved</span><strong>${stats.searchTermsUsedKeywords ?? stats.searchedKeywords ?? 0}</strong></div>
     <div class="metric"><span>Active keywords already searched</span><strong>${stats.excludedAlreadySearchedKeywords ?? 0}</strong></div>

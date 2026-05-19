@@ -56,6 +56,7 @@ export interface RunStats {
   sessionKeywordLimit?: number | null;
   sessionKeywordLimitRandom?: boolean;
   randomizeKeywordOrder?: boolean;
+  userKeywordPercent?: number;
   runChainTotal?: number | null;
   runChainIndex?: number | null;
   runChainRemaining?: number | null;

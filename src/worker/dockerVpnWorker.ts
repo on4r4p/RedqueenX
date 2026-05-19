@@ -13,7 +13,7 @@ import { parseRunStats, RunService } from "../admin/runService";
 import { SettingsService } from "../admin/settingsService";
 import { XBrowserAccountService } from "../admin/xBrowserAccountService";
 import { XSessionAlertService } from "../admin/xSessionAlertService";
-import { normalizeValue } from "../text";
+import { isHandleSearchKeyword, normalizeValue } from "../text";
 import type { RunRecord, RunStats } from "../types";
 import { assertVpnRuntime } from "./vpnGuard";
 
@@ -460,7 +460,13 @@ function nextRunChainState(stats: RunStats): RunChainState | null {
 
 function plannedKeywords(
   lists: ListService,
-  config: Pick<AppConfig, "searchWithoutApiSessionKeywordLimit" | "searchWithoutApiSessionKeywordLimitRandom" | "searchWithoutApiRandomizeKeywordOrder">
+  config: Pick<
+    AppConfig,
+    | "searchWithoutApiSessionKeywordLimit"
+    | "searchWithoutApiSessionKeywordLimitRandom"
+    | "searchWithoutApiRandomizeKeywordOrder"
+    | "searchWithoutApiUserKeywordPercent"
+  >
 ): string[] {
   const noResults = new Set(lists.activeValues("no_result").map(normalizeValue));
   const alreadyUsed = new Set(lists.activeValues("search_terms_used").map(normalizeValue));
@@ -474,7 +480,32 @@ function plannedKeywords(
   const configuredLimit = Math.max(0, Math.floor(config.searchWithoutApiSessionKeywordLimit));
   const maxKeywords = configuredLimit > 0 ? Math.min(orderedKeywords.length, configuredLimit) : orderedKeywords.length;
   const totalKeywords = config.searchWithoutApiSessionKeywordLimitRandom && maxKeywords > 0 ? randomInt(1, maxKeywords) : maxKeywords;
-  return orderedKeywords.slice(0, totalKeywords);
+  return applyUserKeywordPercent(orderedKeywords, totalKeywords, config.searchWithoutApiUserKeywordPercent);
+}
+
+function applyUserKeywordPercent(keywords: string[], totalKeywords: number, configuredPercent = 100): string[] {
+  const total = Math.max(0, Math.min(keywords.length, Math.floor(totalKeywords)));
+  const percent = Math.max(0, Math.min(100, Math.floor(configuredPercent)));
+  if (total === 0 || percent >= 100) {
+    return keywords.slice(0, total);
+  }
+
+  const indexedKeywords = keywords.map((keyword, index) => ({ keyword, index }));
+  const userKeywords = indexedKeywords.filter(({ keyword }) => isHandleSearchKeyword(keyword));
+  const regularKeywords = indexedKeywords.filter(({ keyword }) => !isHandleSearchKeyword(keyword));
+  const targetUsers = Math.floor((total * percent) / 100);
+  const targetRegular = total - targetUsers;
+  const selected = [...regularKeywords.slice(0, targetRegular), ...userKeywords.slice(0, targetUsers)];
+
+  if (selected.length < total) {
+    const selectedIndexes = new Set(selected.map(({ index }) => index));
+    selected.push(...indexedKeywords.filter(({ index }) => !selectedIndexes.has(index)).slice(0, total - selected.length));
+  }
+
+  return selected
+    .sort((left, right) => left.index - right.index)
+    .slice(0, total)
+    .map(({ keyword }) => keyword);
 }
 
 function keywordAvailabilityLogData(lists: ListService) {

@@ -168,6 +168,7 @@ describe("admin api", () => {
         searchWithoutApiSessionKeywordLimit: 50,
         searchWithoutApiSessionKeywordLimitRandom: false,
         searchWithoutApiRandomizeKeywordOrder: false,
+        searchWithoutApiUserKeywordPercent: 100,
         searchWithoutApiAutoIgnoreAlert: false,
         searchWithoutApiMaxRetries: 3,
         searchWithoutApiAutoRestartDelaySeconds: 10,
@@ -709,6 +710,7 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="open-skipped-keyword-users-button"');
     expect(adminPage.body).toContain('id="prune-stale-keyword-users-button"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER"');
+    expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_MAX_RETRIES"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS"');
@@ -1614,6 +1616,7 @@ describe("admin api", () => {
           SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: "12",
           SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: "true",
           SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: "true",
+          SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT: "25",
           SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN: "7",
           SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: "true",
           SEARCH_WITHOUT_API_MAX_RETRIES: "4",
@@ -1639,6 +1642,7 @@ describe("admin api", () => {
       SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: "12",
       SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: "true",
       SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: "true",
+      SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT: "25",
       SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN: "7",
       SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: "true",
       SEARCH_WITHOUT_API_MAX_RETRIES: "4",
@@ -1659,6 +1663,7 @@ describe("admin api", () => {
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT=12");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM=true");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER=true");
+    expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT=25");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_REQUESTS_BEFORE_PAUSE_MIN=7");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT=true");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_MAX_RETRIES=4");

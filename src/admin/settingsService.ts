@@ -114,6 +114,7 @@ export const xApiConfigSchema = z.object({
     if (value === "false") return false;
     return value;
   }, z.boolean()),
+  searchWithoutApiUserKeywordPercent: z.coerce.number().int().min(0).max(100),
   searchWithoutApiAutoIgnoreAlert: booleanSettingSchema,
   searchWithoutApiMaxRetries: z.coerce.number().int().min(0).max(20),
   searchWithoutApiAutoRestartDelaySeconds: z.coerce.number().int().min(0).max(3600),

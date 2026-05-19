@@ -69,6 +69,7 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT: z.coerce.number().int().min(0).max(100).default(100),
   SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: z
     .enum(["true", "false"])
     .default("false")
@@ -228,6 +229,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     searchWithoutApiSessionKeywordLimit: parsed.SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT,
     searchWithoutApiSessionKeywordLimitRandom: parsed.SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM,
     searchWithoutApiRandomizeKeywordOrder: parsed.SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER,
+    searchWithoutApiUserKeywordPercent: parsed.SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT,
     searchWithoutApiAutoIgnoreAlert: parsed.SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT,
     searchWithoutApiMaxRetries: parsed.SEARCH_WITHOUT_API_MAX_RETRIES,
     searchWithoutApiAutoRestartDelaySeconds: parsed.SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS,
