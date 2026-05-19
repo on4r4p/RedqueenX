@@ -53,6 +53,7 @@ services:
       ADMIN_IPV4_BLACKLIST: ${ADMIN_IPV4_BLACKLIST:-}
       DATABASE_URL: /app/runtime/redqueenx.sqlite
       CURRENT_SESSION_FILE: /app/runtime/current-session.log
+      VPS_HEALTH_REPORT_PATH: /app/runtime/vps-health.json
       SEARCH_WITHOUT_API_ISOLATION: docker_vpn
       SEARCH_WITHOUT_API_PROFILE_DIR: /app/runtime/playwright-profile
       SEARCH_WITHOUT_API_MEDIA_CACHE_DIR: /app/runtime/media-cache

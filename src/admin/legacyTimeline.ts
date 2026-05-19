@@ -68,10 +68,9 @@ export class LegacyTimelineService {
     const runtimeTotal = includeTweets ? this.timelineTweets.count(archived) : 0;
     const legacyRssOnly = sourceSet.size === 1 && sourceSet.has("rss");
     const legacyTotal = includeLegacyRss ? this.countLegacy({ rssOnly: legacyRssOnly, archived }) : 0;
-    const windowSize = offset + limit;
-    const timelineItems = itemTotal > 0 ? this.timelineItems.latest(windowSize, 0, itemSources, archived) : [];
-    const runtimeTweets = runtimeTotal > 0 ? this.timelineTweets.latest(windowSize, 0, archived) : [];
-    const legacyItems = legacyTotal > 0 ? this.latestLegacy(windowSize, 0, { rssOnly: legacyRssOnly, archived }) : [];
+    const timelineItems = itemTotal > 0 ? this.timelineItems.latest(itemTotal, 0, itemSources, archived) : [];
+    const runtimeTweets = runtimeTotal > 0 ? this.timelineTweets.latest(runtimeTotal, 0, archived) : [];
+    const legacyItems = legacyTotal > 0 ? this.latestLegacy(legacyTotal, 0, { rssOnly: legacyRssOnly, archived }) : [];
     const items = [...timelineItems, ...runtimeTweets, ...legacyItems]
       .sort(compareTimelineItems)
       .slice(offset, offset + limit);

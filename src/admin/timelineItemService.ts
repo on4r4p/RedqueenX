@@ -157,7 +157,7 @@ export class TimelineItemService {
   }
 
   latest(limit = 50, offset = 0, sources?: TimelineItemSource[], archived = false): TimelineItem[] {
-    const safeLimit = Math.max(1, Math.min(limit, 200));
+    const safeLimit = Math.max(1, Math.floor(limit));
     const safeOffset = Math.max(0, Math.floor(offset));
     const activeSources = normalizeSources(sources);
     if (sources && activeSources.length === 0) {

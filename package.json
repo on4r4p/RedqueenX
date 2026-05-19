@@ -42,6 +42,7 @@
     "test:watch": "node scripts/session-command.cjs test:watch -- vitest",
     "env:sync": "node scripts/session-command.cjs env:sync -- node scripts/sync-env.cjs",
     "security:check": "node scripts/session-command.cjs security:check -- node scripts/security-check.cjs",
+    "vps:health": "node scripts/session-command.cjs vps:health -- node scripts/vps-health-collect.cjs",
     "typecheck": "node scripts/session-command.cjs typecheck -- tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

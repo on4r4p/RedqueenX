@@ -7815,6 +7815,50 @@ type IpCount = {
 
 async function systemHealthReport() {
   const since = "30 days ago";
+  const hostReport = await readVpsHealthReport();
+  if (hostReport) {
+    return {
+      ...hostReport,
+      environment: {
+        ...(typeof hostReport.environment === "object" && hostReport.environment ? hostReport.environment : {}),
+        inDocker: fsSync.existsSync("/.dockerenv"),
+        containerHost: os.hostname(),
+        source: "host-collector"
+      }
+    };
+  }
+
+  if (fsSync.existsSync("/.dockerenv")) {
+    const unavailableMessage =
+      "Host health collector not configured. Run node scripts/vps-health-collect.cjs /opt/RedqueenX/runtime/docker/vps-health.json on the VPS host.";
+    return {
+      generatedAt: new Date().toISOString(),
+      environment: {
+        inDocker: true,
+        cwd: process.cwd(),
+        host: os.hostname(),
+        source: "container-fallback",
+        reportPath: vpsHealthReportPath()
+      },
+      services: ["docker", "caddy", "redqueenx-webhook"].map((name) => ({
+        name,
+        available: false,
+        status: "host collector required",
+        error: unavailableMessage
+      })),
+      ssh: { available: false, window: since, failedAttempts: 0, acceptedLogins: 0, topIps: [] as IpCount[], loginIps: [] as IpCount[], error: unavailableMessage },
+      fail2ban: {
+        available: false,
+        jails: [] as string[],
+        sshd: { currentlyBanned: 0, totalBanned: 0, bannedIps: [] as string[] },
+        error: unavailableMessage
+      },
+      caddy: { available: false, window: since, suspiciousRequests: 0, topIps: [] as IpCount[], error: unavailableMessage },
+      webhook: { available: false, window: since, posts: 0, invalidSignatures: 0, errors: 0, topIps: [] as IpCount[], error: unavailableMessage },
+      docker: { available: false, services: [] as Array<{ name: string; status: string }>, error: unavailableMessage }
+    };
+  }
+
   const [docker, caddy, webhook, ssh, fail2ban, dockerCompose] = await Promise.all([
     serviceStatus("docker"),
     serviceStatus("caddy"),
@@ -7840,6 +7884,28 @@ async function systemHealthReport() {
     webhook: webhookActivity,
     docker: dockerCompose
   };
+}
+
+async function readVpsHealthReport(): Promise<Record<string, unknown> | null> {
+  const reportPath = vpsHealthReportPath();
+  try {
+    const content = await fs.readFile(reportPath, "utf8");
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.generatedAt !== "string") {
+      return null;
+    }
+    return parsed;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      console.warn("Failed to read VPS health report", { reportPath, error: commandErrorSummary(error) });
+    }
+    return null;
+  }
+}
+
+function vpsHealthReportPath(): string {
+  return path.resolve(process.env.VPS_HEALTH_REPORT_PATH || path.join(process.cwd(), "runtime/vps-health.json"));
 }
 
 async function serviceStatus(name: string) {

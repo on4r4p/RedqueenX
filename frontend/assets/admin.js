@@ -1308,7 +1308,12 @@ async function refreshSystemHealth() {
   if (!data) return;
 
   if (systemHealthUpdated) {
-    systemHealthUpdated.textContent = `Updated ${new Date(data.generatedAt).toLocaleString()}. Host checks use the last 30 days when journalctl is available.`;
+    const source = data.environment?.source === "host-collector"
+      ? "Host checks loaded from VPS collector."
+      : data.environment?.source === "container-fallback"
+        ? "Host collector missing; Docker containers cannot read VPS systemd logs directly."
+        : "Host checks use the last 30 days when journalctl is available.";
+    systemHealthUpdated.textContent = `Updated ${new Date(data.generatedAt).toLocaleString()}. ${source}`;
   }
 
   systemHealthSummary.innerHTML = [

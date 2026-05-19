@@ -252,7 +252,7 @@ export class TimelineTweetService {
   }
 
   latest(limit = 50, offset = 0, archived = false): TimelineTweetItem[] {
-    const safeLimit = Math.max(1, Math.min(limit, 200));
+    const safeLimit = Math.max(1, Math.floor(limit));
     const safeOffset = Math.max(0, Math.floor(offset));
     const rows = this.database
       .prepare(`

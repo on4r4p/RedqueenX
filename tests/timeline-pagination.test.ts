@@ -72,6 +72,22 @@ describe("timeline pagination", () => {
     expect(timeline.page({ sources: ["rss"], limit: 10 }).items.map((item) => item.source)).toEqual(["rss", "rss"]);
   });
 
+  it("keeps high offset pages reachable after globally sorting sources", () => {
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+    const timeline = new LegacyTimelineService(database);
+
+    for (let index = 1; index <= 1050; index += 1) {
+      lists.add("text_sent", `legacy rss ${index}`, "runtime:rss:https://feed.example/rss", index);
+    }
+
+    const page = timeline.page({ sources: ["rss"], limit: 50, offset: 950 });
+
+    expect(page.total).toBe(1050);
+    expect(page.items).toHaveLength(50);
+    expect(page.hasMore).toBe(true);
+  });
+
   it("archives timeline items without deleting their rows", () => {
     const database = openMemoryDatabase();
     const lists = new ListService(database);
