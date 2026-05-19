@@ -5,7 +5,7 @@ const countersUpdatedAt = document.getElementById("counters-updated-at");
 const runPreviewRefreshButton = document.getElementById("run-preview-refresh-button");
 const runPreviewSummary = document.getElementById("run-preview-summary");
 const runPreviewList = document.getElementById("run-preview-list");
-const runPreviewOpenState = new Set(["1"]);
+const runPreviewOpenState = new Set();
 const systemHealthRefreshButton = document.getElementById("system-health-refresh-button");
 const systemHealthUpdated = document.getElementById("system-health-updated");
 const systemHealthSummary = document.getElementById("system-health-summary");
@@ -3257,7 +3257,7 @@ function renderRunPreviewPanel(preview) {
   const runIndex = String(preview.runIndex ?? 1);
   const sample = Array.isArray(preview.sample) ? preview.sample : [];
   const plannedCount = Number.isFinite(Number(preview.plannedKeywords)) ? Number(preview.plannedKeywords) : sample.length;
-  const isOpen = runPreviewOpenState.has(runIndex) || (runIndex === "1" && runPreviewOpenState.size === 0);
+  const isOpen = runPreviewOpenState.has(runIndex);
   const rows = sample.length
     ? sample
         .map((keyword, index) => `<div class="session-keyword-row">
