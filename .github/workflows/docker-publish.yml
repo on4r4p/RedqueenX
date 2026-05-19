@@ -35,6 +35,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Resolve build metadata
+        shell: bash
+        run: |
+          {
+            echo "BUILD_COMMIT_DATE=$(git show -s --format=%cI "${DEPLOY_SHA}")"
+            echo "BUILD_COMMIT_SHA=${DEPLOY_SHA}"
+          } >> "${GITHUB_ENV}"
+
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -59,6 +67,9 @@ jobs:
             ${{ env.DOCKERHUB_NAMESPACE }}/redqueenx-x-login:sha-${{ env.DEPLOY_SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            REDQUEENX_BUILD_COMMIT_DATE=${{ env.BUILD_COMMIT_DATE }}
+            REDQUEENX_BUILD_COMMIT_SHA=${{ env.BUILD_COMMIT_SHA }}
 
   deploy:
     runs-on: ubuntu-latest
