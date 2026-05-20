@@ -32,7 +32,7 @@ import {
   type ManualVerificationDetection
 } from "./browserSearch";
 import { shouldDisableChromiumSandbox } from "./chromiumSandbox";
-import { randomDelayMs, type HumanPacingConfig, typeWithPacing } from "./humanPacing";
+import { focusLocatorForTyping, randomDelayMs, type HumanPacingConfig, typeWithPacing } from "./humanPacing";
 import { assertVpnRuntime } from "./vpnGuard";
 
 export type KeywordUserPruneMode = "without_api" | "x_api";
@@ -1187,7 +1187,15 @@ async function openUserSearch(
   await page.waitForTimeout(500);
   const searchInput = page.locator('[data-testid="SearchBox_Search_Input"]').first();
   if ((await searchInput.count().catch(() => 0)) > 0 && (await searchInput.isVisible().catch(() => false))) {
-    await searchInput.click({ timeout: 5_000 });
+    const focusMethod = await focusLocatorForTyping(searchInput);
+    if (focusMethod !== "click") {
+      await record("prob", "keyword_user_prune.search_input.click_fallback", "Search input click timed out; using focus fallback", {
+        keyword: candidate.keyword,
+        handle: candidate.handle,
+        focusMethod,
+        ...progress
+      });
+    }
     await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
     await page.keyboard.press("Backspace");
     await typeWithPacing(page, candidate.searchQuery, pacing);

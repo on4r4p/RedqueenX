@@ -41,6 +41,32 @@ export async function typeWithPacing(page: Page, text: string, config: HumanPaci
   }
 }
 
+export async function focusLocatorForTyping(
+  locator: Locator,
+  options: { clickTimeoutMs?: number; focusTimeoutMs?: number } = {}
+): Promise<"click" | "focus" | "dom_focus"> {
+  try {
+    await locator.click({ timeout: options.clickTimeoutMs ?? 5_000 });
+    return "click";
+  } catch {
+    try {
+      await locator.focus({ timeout: options.focusTimeoutMs ?? 3_000 });
+      return "focus";
+    } catch {
+      await locator.evaluate((element) => {
+        const target = element as { focus?: () => void; select?: () => void };
+        if (typeof target.focus === "function") {
+          target.focus();
+        }
+        if (typeof target.select === "function") {
+          target.select();
+        }
+      });
+      return "dom_focus";
+    }
+  }
+}
+
 export async function moveToLocator(page: Page, locator: Locator, profile: MouseProfile): Promise<boolean> {
   const box = await locator.boundingBox().catch(() => null);
   if (!box) {

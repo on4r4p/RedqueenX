@@ -38,6 +38,7 @@ import {
 import { shouldDisableChromiumSandbox } from "./chromiumSandbox";
 import {
   hoverVisibleTweets,
+  focusLocatorForTyping,
   nextMouseProfile,
   randomDelayMs,
   randomInt,
@@ -1313,7 +1314,14 @@ async function searchOneKeyword(
       latestModeWillBeForcedAfterSubmit: true,
       retweetFilterApplied
     });
-    await searchInput.click({ timeout: 5_000 });
+    const focusMethod = await focusLocatorForTyping(searchInput);
+    if (focusMethod !== "click") {
+      await options.record?.("prob", "browser.search_input.click_fallback", "Search input click timed out; using focus fallback", {
+        runId: options.runId,
+        keyword,
+        focusMethod
+      });
+    }
     await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
     await page.keyboard.press("Backspace");
     await typeWithPacing(page, searchQuery, pacing);
