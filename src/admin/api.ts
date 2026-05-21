@@ -1488,7 +1488,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const previews = plannedKeywordBatches(lists, runtimeConfig, runCount).map((preview) => ({
       runIndex: preview.runIndex,
       plannedKeywords: preview.keywords.length,
-      sample: preview.keywords.slice(0, 80)
+      sample: preview.keywords
     }));
     const firstPreview = previews[0] ?? { plannedKeywords: 0, sample: [] };
     return {

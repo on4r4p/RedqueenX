@@ -3255,11 +3255,11 @@ async function refreshRunPreview() {
 
 function renderRunPreviewPanel(preview) {
   const runIndex = String(preview.runIndex ?? 1);
-  const sample = Array.isArray(preview.sample) ? preview.sample : [];
-  const plannedCount = Number.isFinite(Number(preview.plannedKeywords)) ? Number(preview.plannedKeywords) : sample.length;
+  const keywords = Array.isArray(preview.sample) ? preview.sample : [];
+  const plannedCount = Number.isFinite(Number(preview.plannedKeywords)) ? Number(preview.plannedKeywords) : keywords.length;
   const isOpen = runPreviewOpenState.has(runIndex);
-  const rows = sample.length
-    ? sample
+  const rows = keywords.length
+    ? keywords
         .map((keyword, index) => `<div class="session-keyword-row">
           <span>#${index + 1}</span>
           <strong>${escapeHtml(keyword)}</strong>
@@ -3270,7 +3270,7 @@ function renderRunPreviewPanel(preview) {
   return `<details class="run-preview-panel" data-run-preview-index="${escapeAttribute(runIndex)}"${isOpen ? " open" : ""}>
     <summary>
       <strong>Run ${escapeHtml(runIndex)}</strong>
-      <span>${escapeHtml(String(plannedCount))} planned${sample.length < plannedCount ? ` - ${escapeHtml(String(sample.length))} shown` : ""}</span>
+      <span>${escapeHtml(String(plannedCount))} planned</span>
     </summary>
     <div class="session-keywords-list">${rows}</div>
   </details>`;

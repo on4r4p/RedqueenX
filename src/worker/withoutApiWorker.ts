@@ -467,16 +467,53 @@ async function runBrowserSearchLoop(input: {
 
     const scoringConfig = input.settings.getScoringConfig();
     const retweetFilterApplied = shouldApplyBrowserRetweetFilter(scoringConfig);
-    const search = await searchOneKeyword(input.page, keyword, previousMouseProfile, pacing, input.config, input.publicIpv4, {
-      smoke: input.smoke,
-      runId: input.runId,
-      position: completedKeywords + 1,
-      saveSnapshots: Boolean(input.smoke || input.config.searchWithoutApiSaveSnapshots),
-      retweetFilterApplied,
-      minimumRetweetsEnabled: scoringConfig.enableMinimumTweetRetweets,
-      minimumTweetRetweets: scoringConfig.minimumTweetRetweets,
-      record: input.record
-    });
+    let search: Awaited<ReturnType<typeof searchOneKeyword>>;
+    try {
+      search = await searchOneKeyword(input.page, keyword, previousMouseProfile, pacing, input.config, input.publicIpv4, {
+        smoke: input.smoke,
+        runId: input.runId,
+        position: completedKeywords + 1,
+        saveSnapshots: Boolean(input.smoke || input.config.searchWithoutApiSaveSnapshots),
+        retweetFilterApplied,
+        minimumRetweetsEnabled: scoringConfig.enableMinimumTweetRetweets,
+        minimumTweetRetweets: scoringConfig.minimumTweetRetweets,
+        record: input.record
+      });
+    } catch (error) {
+      if (error instanceof ManualVerificationRequiredError || !isRecoverableBrowserTimeoutError(error)) {
+        throw error;
+      }
+      completedKeywords += 1;
+      searchesInWindow += 1;
+      input.runs.updateStats(input.runId, {
+        currentKeyword: null,
+        totalKeywords: input.keywords.length,
+        completedKeywords,
+        remainingKeywords: Math.max(0, input.keywords.length - completedKeywords),
+        apiCallsUsed: searchesInWindow,
+        apiCallLimit: searchesBeforePause,
+        apiCallsRemaining: Math.max(0, searchesBeforePause - searchesInWindow),
+        acceptedTweets: acceptedTotal,
+        rejectedTweets: rejectedTotal
+      });
+      await input.record("prob", "browser.search.keyword.timeout_skipped", "Browser keyword search timed out; skipping keyword and continuing", {
+        runId: input.runId,
+        keyword,
+        position: completedKeywords,
+        totalKeywords: input.keywords.length,
+        error: error instanceof Error ? error.message : String(error),
+        searchTermsUsedSaved: false,
+        noResultSaved: false
+      });
+      if (completedKeywords < input.keywords.length) {
+        const delayMs = randomDelayMs(
+          input.config.searchWithoutApiSearchDelayMinSeconds * 1000,
+          input.config.searchWithoutApiSearchDelayMaxSeconds * 1000
+        );
+        await interruptibleDelay(input.runs, input.runId, Math.floor(delayMs / 2));
+      }
+      continue;
+    }
     const tweets = search.tweets;
     const rawTimelineEnabled = input.settings.getXApiConfig(input.config).rawTimelineEnabled;
     if (rawTimelineEnabled) {
@@ -525,21 +562,35 @@ async function runBrowserSearchLoop(input: {
     rejectedTotal += rejected;
     const prefilterReasonCounts = countReasonOccurrences(prefilterRejected.flatMap((result) => result.decision.reasons));
     const scoringReasonCounts = countReasonOccurrences(scoringRejected.flatMap((result) => result.decision.reasons));
-    const staleKeywordUserMoved = await maybeMoveStaleKeywordUserFromTooOldResults({
-      page: input.page,
-      keyword,
-      visibleTweets: tweets.length,
-      tooOldTweets: countReasonsByPrefix(prefilterReasonCounts, "tweet_too_old"),
-      mouseProfile: previousMouseProfile,
-      pacing,
-      config: input.config,
-      publicIpv4: input.publicIpv4,
-      lists: input.lists,
-      runId: input.runId,
-      position: completedKeywords + 1,
-      smoke: input.smoke,
-      record: input.record
-    });
+    let staleKeywordUserMoved = false;
+    try {
+      staleKeywordUserMoved = await maybeMoveStaleKeywordUserFromTooOldResults({
+        page: input.page,
+        keyword,
+        visibleTweets: tweets.length,
+        tooOldTweets: countReasonsByPrefix(prefilterReasonCounts, "tweet_too_old"),
+        mouseProfile: previousMouseProfile,
+        pacing,
+        config: input.config,
+        publicIpv4: input.publicIpv4,
+        lists: input.lists,
+        runId: input.runId,
+        position: completedKeywords + 1,
+        smoke: input.smoke,
+        record: input.record
+      });
+    } catch (error) {
+      if (error instanceof ManualVerificationRequiredError || !isRecoverableBrowserTimeoutError(error)) {
+        throw error;
+      }
+      await input.record("prob", "browser.keyword_user_stale_check.timeout_skipped", "Keyword user stale check timed out; keeping keyword for now", {
+        runId: input.runId,
+        keyword,
+        position: completedKeywords + 1,
+        totalKeywords: input.keywords.length,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
     await input.record("debug", "browser.scoring.summary", "Browser scoring summary for keyword", {
       runId: input.runId,
       keyword,
@@ -1196,6 +1247,12 @@ function isMissingKeywordUserText(value: string): boolean {
 
 function indentBlock(value: string, prefix: string): string[] {
   return value.split("\n").map((line) => `${prefix}${line}`);
+}
+
+function isRecoverableBrowserTimeoutError(error: unknown): boolean {
+  const name = error instanceof Error ? error.name : "";
+  const message = error instanceof Error ? error.message : String(error);
+  return name === "TimeoutError" || /\bTimeout\b|timed out|Timeout \d+ms exceeded/i.test(message);
 }
 
 async function searchOneKeyword(
