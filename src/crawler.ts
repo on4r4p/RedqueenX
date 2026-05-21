@@ -1,5 +1,13 @@
 import { ListService } from "./admin/listService";
-import { findSimilarSentText, isAllowedLanguage, normalizeLanguageCode, scoreTweet, type ScoreLists, DEFAULT_SCORING_CONFIG } from "./scoring";
+import {
+  DEFAULT_SCORING_CONFIG,
+  effectiveMinimumPopularityThresholds,
+  findSimilarSentText,
+  isAllowedLanguage,
+  normalizeLanguageCode,
+  scoreTweet,
+  type ScoreLists
+} from "./scoring";
 import type { ScoreDecision, ScoringConfig, TweetCandidate } from "./types";
 import { isHandleSearchKeyword, normalizeHandle, normalizeSearchText, textContainsBannedTerm } from "./text";
 import type { XSearchClient, XSearchMode } from "./x-client";
@@ -164,7 +172,7 @@ export function explainTweetPrefilter(
 ): TweetPrefilterDecision {
   const reasons: string[] = [];
   const normalizedText = normalizeSearchText(tweet.text);
-  const relaxMinimumPopularity = config.relaxMinimumPopularityForHandleSearch && isHandleSearchKeyword(keyword);
+  const minimumPopularity = effectiveMinimumPopularityThresholds(config, keyword);
   if (config.enableMinimumTweetLength && tweet.text.length < config.minimumTweetLength) {
     reasons.push("tweet_too_short");
   }
@@ -224,7 +232,7 @@ export function explainTweetPrefilter(
   }
 
   const retweets = tweet.retweetCount ?? 0;
-  if (!relaxMinimumPopularity && config.enableMinimumTweetRetweets && retweets < config.minimumTweetRetweets) {
+  if (minimumPopularity.retweets !== null && retweets < minimumPopularity.retweets) {
     reasons.push(`not_enough_retweets:${retweets}`);
   }
 

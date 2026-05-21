@@ -86,6 +86,13 @@ select {
   padding: 10px 12px;
 }
 
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
 .secret-input-wrap {
   position: relative;
 }
@@ -815,13 +822,16 @@ h2 {
 .inline-check {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-height: 40px;
-  white-space: nowrap;
+  line-height: 1.35;
 }
 
-.inline-check input {
-  width: auto;
+.inline-check input[type="checkbox"] {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
 }
 
 .scoring-field {
@@ -829,7 +839,7 @@ h2 {
   gap: 6px;
 }
 
-.scoring-field > label:first-child {
+.scoring-field > label:first-child:not(.inline-check) {
   display: grid;
   gap: 8px;
 }
@@ -837,6 +847,16 @@ h2 {
 .scoring-check-toggle {
   min-height: 28px;
   color: var(--muted);
+}
+
+.scoring-field > .scoring-check-toggle:first-child {
+  align-self: end;
+  min-height: 58px;
+}
+
+.scoring-check-toggle .label-help-row {
+  width: auto;
+  min-width: 0;
 }
 
 .scoring-field.is-check-disabled > label:first-child {

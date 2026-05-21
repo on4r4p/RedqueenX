@@ -35,6 +35,8 @@ export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
   similarTweetTextThreshold: 0.52
 };
 
+const handleSearchMinimumPopularityRatio = 0.5;
+
 export interface ScoreLists {
   queryKeyword?: string;
   keywords: string[];
@@ -46,6 +48,23 @@ export interface ScoreLists {
   sentTweetIds: string[];
   sentTexts: string[];
   tweetsByUser?: Record<string, number>;
+}
+
+export interface MinimumPopularityThresholds {
+  retweets: number | null;
+  favorites: number | null;
+}
+
+export function effectiveMinimumPopularityThresholds(config: ScoringConfig, keyword?: string): MinimumPopularityThresholds {
+  const relaxed = config.relaxMinimumPopularityForHandleSearch && isHandleSearchKeyword(keyword ?? "");
+  return {
+    retweets: config.enableMinimumTweetRetweets
+      ? effectiveMinimumPopularityThreshold(config.minimumTweetRetweets, relaxed)
+      : null,
+    favorites: config.enableMinimumTweetFavorites
+      ? effectiveMinimumPopularityThreshold(config.minimumTweetFavorites, relaxed)
+      : null
+  };
 }
 
 export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: ScoringConfig = DEFAULT_SCORING_CONFIG): ScoreDecision {
@@ -63,8 +82,7 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
     scoreBreakdown.push({ label, points: -points });
   };
   const normalizedText = normalizeSearchText(tweet.text);
-  const relaxMinimumPopularity =
-    config.relaxMinimumPopularityForHandleSearch && isHandleSearchKeyword(lists.queryKeyword ?? "");
+  const minimumPopularity = effectiveMinimumPopularityThresholds(config, lists.queryKeyword);
   const userHandle = normalizeHandle(tweet.user.screenName) ?? tweet.user.screenName.toLowerCase();
   const following = new Set(lists.following.map((value) => normalizeHandle(value) ?? value.toLowerCase()));
   const friends = new Set(lists.friends.map((value) => normalizeHandle(value) ?? value.toLowerCase()));
@@ -143,7 +161,7 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
   }
 
   const retweets = tweet.retweetCount ?? 0;
-  if (!relaxMinimumPopularity && config.enableMinimumTweetRetweets && retweets < config.minimumTweetRetweets) {
+  if (minimumPopularity.retweets !== null && retweets < minimumPopularity.retweets) {
     reasons.push("not_enough_retweets");
   }
   if (config.enableMaximumTweetRetweets && retweets > config.maximumTweetRetweets && !following.has(userHandle) && !friends.has(userHandle)) {
@@ -152,10 +170,10 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
   addScore(boundedPopularityScore(retweets), "retweets");
 
   const favorites = tweet.favoriteCount ?? 0;
-  if (!relaxMinimumPopularity && config.enableMinimumTweetFavorites && favorites < config.minimumTweetFavorites) {
+  if (minimumPopularity.favorites !== null && favorites < minimumPopularity.favorites) {
     reasons.push("not_enough_favorites");
   }
-  if (favorites > 0 && (!config.enableMinimumTweetFavorites || favorites > config.minimumTweetFavorites)) {
+  if (favorites > 0 && (minimumPopularity.favorites === null || favorites > minimumPopularity.favorites)) {
     addScore(1 + boundedPopularityScore(favorites), "favorites");
   }
   if (config.enableMaximumTweetFavorites && favorites > config.maximumTweetFavorites && !following.has(userHandle) && !friends.has(userHandle)) {
@@ -210,6 +228,11 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
     reasons,
     normalizedText
   };
+}
+
+function effectiveMinimumPopularityThreshold(value: number, relaxed: boolean): number {
+  if (!relaxed || value <= 0) return value;
+  return Math.max(1, Math.ceil(value * handleSearchMinimumPopularityRatio));
 }
 
 function scoreKeywordRelevance(

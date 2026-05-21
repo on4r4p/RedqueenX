@@ -132,13 +132,13 @@ describe("scoreTweet", () => {
     expect(decision.reasons).toContain("banned_word:course");
   });
 
-  it("can relax minimum popularity checks for @user searches", () => {
+  it("softens minimum popularity checks for @user searches without disabling them", () => {
     const tweet: TweetCandidate = {
       id: "handle-popularity",
       text: "Fresh vulnerability research with detailed exploit analysis and mitigation notes for defenders",
       lang: "en",
-      retweetCount: 0,
-      favoriteCount: 0,
+      retweetCount: 1,
+      favoriteCount: 1,
       user: {
         screenName: "maldevel",
         followersCount: 1000
@@ -159,8 +159,8 @@ describe("scoreTweet", () => {
     const strictDecision = scoreTweet(tweet, lists, {
       ...DEFAULT_SCORING_CONFIG,
       enableMinimumTweetScore: false,
-      minimumTweetRetweets: 1,
-      minimumTweetFavorites: 1,
+      minimumTweetRetweets: 2,
+      minimumTweetFavorites: 2,
       relaxMinimumPopularityForHandleSearch: false
     });
     expect(strictDecision.reasons).toEqual(expect.arrayContaining(["not_enough_retweets", "not_enough_favorites"]));
@@ -168,12 +168,30 @@ describe("scoreTweet", () => {
     const relaxedDecision = scoreTweet(tweet, lists, {
       ...DEFAULT_SCORING_CONFIG,
       enableMinimumTweetScore: false,
-      minimumTweetRetweets: 1,
-      minimumTweetFavorites: 1,
+      minimumTweetRetweets: 2,
+      minimumTweetFavorites: 2,
       relaxMinimumPopularityForHandleSearch: true
     });
     expect(relaxedDecision.reasons).not.toContain("not_enough_retweets");
     expect(relaxedDecision.reasons).not.toContain("not_enough_favorites");
+
+    const zeroEngagementDecision = scoreTweet(
+      {
+        ...tweet,
+        id: "handle-popularity-zero",
+        retweetCount: 0,
+        favoriteCount: 0
+      },
+      lists,
+      {
+        ...DEFAULT_SCORING_CONFIG,
+        enableMinimumTweetScore: false,
+        minimumTweetRetweets: 1,
+        minimumTweetFavorites: 1,
+        relaxMinimumPopularityForHandleSearch: true
+      }
+    );
+    expect(zeroEngagementDecision.reasons).toEqual(expect.arrayContaining(["not_enough_retweets", "not_enough_favorites"]));
   });
 
   it("rejects tweets that are too similar to already accepted text", () => {

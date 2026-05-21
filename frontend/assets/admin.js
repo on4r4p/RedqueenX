@@ -516,7 +516,7 @@ const adminTooltipByName = {
   maximumTweetFavorites: "Reject tweets above this favorite count.",
   enableMaximumTweetFavorites: "Enable or disable the maximum favorite rejection check.",
   relaxMinimumPopularityForHandleSearch:
-    "Ignore minimum retweet and favorite checks when the searched keyword is an @user handle.",
+    "Use 50% of the configured minimum retweet and favorite thresholds for @user searches, rounded up.",
   minimumUserFollowers: "Minimum author follower count required by the scoring rules.",
   enableMinimumUserFollowers: "Enable or disable the minimum follower rejection check.",
   minimumTweetScore: "Minimum final score required before a tweet is accepted.",
