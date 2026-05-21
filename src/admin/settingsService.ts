@@ -29,6 +29,9 @@ export const scoringConfigSchema = z.object({
   enableMaximumTweetRetweets: booleanSettingSchema.default(DEFAULT_SCORING_CONFIG.enableMaximumTweetRetweets),
   enableMinimumTweetFavorites: booleanSettingSchema.default(DEFAULT_SCORING_CONFIG.enableMinimumTweetFavorites),
   enableMaximumTweetFavorites: booleanSettingSchema.default(DEFAULT_SCORING_CONFIG.enableMaximumTweetFavorites),
+  relaxMinimumPopularityForHandleSearch: booleanSettingSchema.default(
+    DEFAULT_SCORING_CONFIG.relaxMinimumPopularityForHandleSearch
+  ),
   enableMinimumUserFollowers: booleanSettingSchema.default(DEFAULT_SCORING_CONFIG.enableMinimumUserFollowers),
   enableMinimumTweetScore: booleanSettingSchema.default(DEFAULT_SCORING_CONFIG.enableMinimumTweetScore),
   enableMaximumTweetAgeDays: booleanSettingSchema.default(DEFAULT_SCORING_CONFIG.enableMaximumTweetAgeDays),

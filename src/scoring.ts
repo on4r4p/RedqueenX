@@ -17,6 +17,7 @@ export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
   enableMaximumMentions: true,
   enableMaximumTweetsByUser: true,
   enableSimilarTweetText: true,
+  relaxMinimumPopularityForHandleSearch: false,
   minimumSearchResults: 3,
   luckFactorDenominator: 200,
   allowedLanguages: ["en", "fr"],
@@ -62,6 +63,8 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
     scoreBreakdown.push({ label, points: -points });
   };
   const normalizedText = normalizeSearchText(tweet.text);
+  const relaxMinimumPopularity =
+    config.relaxMinimumPopularityForHandleSearch && isHandleSearchKeyword(lists.queryKeyword ?? "");
   const userHandle = normalizeHandle(tweet.user.screenName) ?? tweet.user.screenName.toLowerCase();
   const following = new Set(lists.following.map((value) => normalizeHandle(value) ?? value.toLowerCase()));
   const friends = new Set(lists.friends.map((value) => normalizeHandle(value) ?? value.toLowerCase()));
@@ -140,7 +143,7 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
   }
 
   const retweets = tweet.retweetCount ?? 0;
-  if (config.enableMinimumTweetRetweets && retweets < config.minimumTweetRetweets) {
+  if (!relaxMinimumPopularity && config.enableMinimumTweetRetweets && retweets < config.minimumTweetRetweets) {
     reasons.push("not_enough_retweets");
   }
   if (config.enableMaximumTweetRetweets && retweets > config.maximumTweetRetweets && !following.has(userHandle) && !friends.has(userHandle)) {
@@ -149,7 +152,7 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
   addScore(boundedPopularityScore(retweets), "retweets");
 
   const favorites = tweet.favoriteCount ?? 0;
-  if (config.enableMinimumTweetFavorites && favorites < config.minimumTweetFavorites) {
+  if (!relaxMinimumPopularity && config.enableMinimumTweetFavorites && favorites < config.minimumTweetFavorites) {
     reasons.push("not_enough_favorites");
   }
   if (favorites > 0 && (!config.enableMinimumTweetFavorites || favorites > config.minimumTweetFavorites)) {

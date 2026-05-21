@@ -311,6 +311,7 @@ const scoringBooleanFields = [
   "enableMaximumTweetRetweets",
   "enableMinimumTweetFavorites",
   "enableMaximumTweetFavorites",
+  "relaxMinimumPopularityForHandleSearch",
   "enableMinimumUserFollowers",
   "enableMinimumTweetScore",
   "enableMaximumTweetAgeDays",
@@ -514,6 +515,8 @@ const adminTooltipByName = {
   enableMinimumTweetFavorites: "Enable or disable the minimum favorite rejection check.",
   maximumTweetFavorites: "Reject tweets above this favorite count.",
   enableMaximumTweetFavorites: "Enable or disable the maximum favorite rejection check.",
+  relaxMinimumPopularityForHandleSearch:
+    "Ignore minimum retweet and favorite checks when the searched keyword is an @user handle.",
   minimumUserFollowers: "Minimum author follower count required by the scoring rules.",
   enableMinimumUserFollowers: "Enable or disable the minimum follower rejection check.",
   minimumTweetScore: "Minimum final score required before a tweet is accepted.",

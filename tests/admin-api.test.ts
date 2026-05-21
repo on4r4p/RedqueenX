@@ -711,6 +711,7 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('id="prune-stale-keyword-users-button"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT"');
+    expect(adminPage.body).toContain('name="relaxMinimumPopularityForHandleSearch"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_MAX_RETRIES"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS"');
@@ -1337,6 +1338,7 @@ describe("admin api", () => {
         maximumTweetRetweets: 500,
         minimumTweetFavorites: 1,
         maximumTweetFavorites: 250,
+        relaxMinimumPopularityForHandleSearch: true,
         minimumUserFollowers: 300,
         minimumTweetScore: 20,
         maximumTweetAgeDays: 3,
@@ -1352,7 +1354,8 @@ describe("admin api", () => {
       minimumSearchResults: 2,
       luckFactorDenominator: 100,
       minimumTweetScore: 20,
-      maximumTweetAgeDays: 3
+      maximumTweetAgeDays: 3,
+      relaxMinimumPopularityForHandleSearch: true
     });
 
     const xApiDefaults = await app.inject({

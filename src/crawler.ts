@@ -164,6 +164,7 @@ export function explainTweetPrefilter(
 ): TweetPrefilterDecision {
   const reasons: string[] = [];
   const normalizedText = normalizeSearchText(tweet.text);
+  const relaxMinimumPopularity = config.relaxMinimumPopularityForHandleSearch && isHandleSearchKeyword(keyword);
   if (config.enableMinimumTweetLength && tweet.text.length < config.minimumTweetLength) {
     reasons.push("tweet_too_short");
   }
@@ -223,7 +224,7 @@ export function explainTweetPrefilter(
   }
 
   const retweets = tweet.retweetCount ?? 0;
-  if (config.enableMinimumTweetRetweets && retweets < config.minimumTweetRetweets) {
+  if (!relaxMinimumPopularity && config.enableMinimumTweetRetweets && retweets < config.minimumTweetRetweets) {
     reasons.push(`not_enough_retweets:${retweets}`);
   }
 

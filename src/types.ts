@@ -128,6 +128,7 @@ export interface ScoringConfig {
   enableMaximumTweetRetweets: boolean;
   enableMinimumTweetFavorites: boolean;
   enableMaximumTweetFavorites: boolean;
+  relaxMinimumPopularityForHandleSearch: boolean;
   enableMinimumUserFollowers: boolean;
   enableMinimumTweetScore: boolean;
   enableMaximumTweetAgeDays: boolean;

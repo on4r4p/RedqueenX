@@ -132,6 +132,50 @@ describe("scoreTweet", () => {
     expect(decision.reasons).toContain("banned_word:course");
   });
 
+  it("can relax minimum popularity checks for @user searches", () => {
+    const tweet: TweetCandidate = {
+      id: "handle-popularity",
+      text: "Fresh vulnerability research with detailed exploit analysis and mitigation notes for defenders",
+      lang: "en",
+      retweetCount: 0,
+      favoriteCount: 0,
+      user: {
+        screenName: "maldevel",
+        followersCount: 1000
+      }
+    };
+
+    const lists = {
+      queryKeyword: "@maldevel",
+      keywords: ["vulnerability"],
+      following: [],
+      friends: [],
+      bannedUsers: [],
+      bannedWords: [],
+      sentTweetIds: [],
+      sentTexts: []
+    };
+
+    const strictDecision = scoreTweet(tweet, lists, {
+      ...DEFAULT_SCORING_CONFIG,
+      enableMinimumTweetScore: false,
+      minimumTweetRetweets: 1,
+      minimumTweetFavorites: 1,
+      relaxMinimumPopularityForHandleSearch: false
+    });
+    expect(strictDecision.reasons).toEqual(expect.arrayContaining(["not_enough_retweets", "not_enough_favorites"]));
+
+    const relaxedDecision = scoreTweet(tweet, lists, {
+      ...DEFAULT_SCORING_CONFIG,
+      enableMinimumTweetScore: false,
+      minimumTweetRetweets: 1,
+      minimumTweetFavorites: 1,
+      relaxMinimumPopularityForHandleSearch: true
+    });
+    expect(relaxedDecision.reasons).not.toContain("not_enough_retweets");
+    expect(relaxedDecision.reasons).not.toContain("not_enough_favorites");
+  });
+
   it("rejects tweets that are too similar to already accepted text", () => {
     const previousText =
       "A threat actor on a cybercrime forum is claiming to sell an alleged unpatched Boolean-based Blind SQL Injection vulnerability targeting a French government-related imports website. According to the post, the vulnerability allegedly affects a high-traffic backend system.";
