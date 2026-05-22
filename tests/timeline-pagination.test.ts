@@ -64,11 +64,13 @@ describe("timeline pagination", () => {
     const decision = { accepted: true, score: 10, reasons: ["test"], normalizedText: "accepted" };
 
     external.save({ source: "rss", externalId: "rss-1", text: "rss item", acceptedAt: "2026-05-18T09:00:00.000Z" });
+    external.save({ source: "reddit", externalId: "reddit-1", text: "reddit item", acceptedAt: "2026-05-18T10:00:00.000Z" });
     runtime.saveAccepted("xss", { id: "tweet-1", text: "accepted one", user: { screenName: "@one" } }, decision);
     lists.add("text_sent", "legacy rss https://feed.example/1", "runtime:rss:https://feed.example/rss", 1);
     lists.add("text_sent", "legacy one", "uploaded:Text.Sent", 2);
 
     expect(timeline.page({ sources: ["tweet"], limit: 10 }).items.map((item) => item.source)).toEqual(["tweet"]);
+    expect(timeline.page({ sources: ["reddit"], limit: 10 }).items.map((item) => item.source)).toEqual(["reddit"]);
     expect(timeline.page({ sources: ["rss"], limit: 10 }).items.map((item) => item.source)).toEqual(["rss", "rss"]);
   });
 
@@ -97,23 +99,29 @@ describe("timeline pagination", () => {
     const decision = { accepted: true, score: 10, reasons: ["test"], normalizedText: "accepted" };
 
     external.save({ source: "rss", externalId: "rss-1", text: "rss item", acceptedAt: "2026-05-18T09:00:00.000Z" });
+    external.save({ source: "reddit", externalId: "reddit-1", text: "reddit item", acceptedAt: "2026-05-18T10:00:00.000Z" });
     runtime.saveAccepted("xss", { id: "tweet-1", text: "accepted one", user: { screenName: "@one" } }, decision);
     lists.add("text_sent", "legacy one", "uploaded:Text.Sent", 1);
 
-    const archived = timeline.archiveAll(["tweet", "rss"], "2026-05-19T10:00:00.000Z");
+    const archived = timeline.archiveAll(["tweet", "rss", "reddit"], "2026-05-19T10:00:00.000Z");
 
-    expect(archived).toEqual({ tweets: 1, items: 1, legacy: 1 });
+    expect(archived).toEqual({ tweets: 1, items: 2, legacy: 1 });
     expect(timeline.page({ limit: 10 }).items).toEqual([]);
-    expect(timeline.page({ archived: true, limit: 10 }).items.map((item) => item.source).sort()).toEqual(["legacy", "rss", "tweet"]);
+    expect(timeline.page({ archived: true, limit: 10 }).items.map((item) => item.source).sort()).toEqual([
+      "legacy",
+      "reddit",
+      "rss",
+      "tweet"
+    ]);
     expect(database.prepare("SELECT COUNT(*) AS total FROM timeline_tweets").get()).toEqual({ total: 1 });
-    expect(database.prepare("SELECT COUNT(*) AS total FROM timeline_items").get()).toEqual({ total: 1 });
+    expect(database.prepare("SELECT COUNT(*) AS total FROM timeline_items").get()).toEqual({ total: 2 });
     expect(database.prepare("SELECT COUNT(*) AS total FROM list_entries WHERE kind = 'text_sent'").get()).toEqual({ total: 1 });
 
-    const restored = timeline.restoreAll(["tweet", "rss"]);
+    const restored = timeline.restoreAll(["tweet", "rss", "reddit"]);
 
-    expect(restored).toEqual({ tweets: 1, items: 1, legacy: 1 });
+    expect(restored).toEqual({ tweets: 1, items: 2, legacy: 1 });
     expect(timeline.page({ archived: true, limit: 10 }).items).toEqual([]);
-    expect(timeline.page({ limit: 10 }).items.map((item) => item.source).sort()).toEqual(["legacy", "rss", "tweet"]);
+    expect(timeline.page({ limit: 10 }).items.map((item) => item.source).sort()).toEqual(["legacy", "reddit", "rss", "tweet"]);
   });
 
   it("exposes luck factor reasons for accepted tweets", () => {

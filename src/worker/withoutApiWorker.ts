@@ -10,6 +10,8 @@ import { Crawler } from "../crawler";
 import { openDatabase } from "../db/database";
 import { formatDiagnosticsReport, runVpnDiagnostics, type VpnDiagnosticsReport } from "../diagnostics/vpn";
 import { runRssFallback as runSharedRssFallback } from "../rssFallback";
+import { RedditCrawler } from "../reddit/redditCrawler";
+import { crawlRedditKeywords } from "../reddit/redditTimeline";
 import { CurrentSessionService, type CurrentSessionLevel } from "../admin/currentSessionService";
 import { ListService } from "../admin/listService";
 import { RunService, parseRunStats } from "../admin/runService";
@@ -770,6 +772,7 @@ async function runBrowserSearchLoop(input: {
       },
       source: input.smoke ? "test" : "tweet"
     });
+    await runBrowserRedditCrawl(input, [keyword]);
     if (searchesInWindow >= searchesBeforePause && completedKeywords < input.keywords.length) {
       const pauseMinutes = randomInt(input.config.searchWithoutApiPauseMinMinutes, input.config.searchWithoutApiPauseMaxMinutes);
       const nextResetAt = new Date(Date.now() + pauseMinutes * 60_000).toISOString();
@@ -850,6 +853,43 @@ async function runBrowserRssFallback(input: {
     reason,
     record: input.record
   });
+}
+
+async function runBrowserRedditCrawl(input: {
+  runId: string;
+  config: ReturnType<typeof loadConfig>;
+  timelineItems: TimelineItemService;
+  smoke?: boolean;
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>;
+}, keywords: string[]): Promise<void> {
+  if (input.smoke || !input.config.redditCrawlEnabled) {
+    return;
+  }
+
+  try {
+    const crawler = new RedditCrawler({
+      enabled: input.config.redditCrawlEnabled,
+      userAgent: input.config.redditCrawlUserAgent,
+      subreddits: input.config.redditCrawlSubreddits,
+      limitPerKeyword: input.config.redditCrawlLimitPerKeyword,
+      sort: input.config.redditCrawlSort,
+      timeRange: input.config.redditCrawlTimeRange,
+      minScore: input.config.redditCrawlMinScore
+    });
+
+    await crawlRedditKeywords({
+      runId: input.runId,
+      keywords,
+      crawler,
+      timelineItems: input.timelineItems,
+      record: input.record
+    });
+  } catch (error) {
+    await input.record("prob", "reddit.search.failed", error instanceof Error ? error.message : "Reddit crawl failed", {
+      runId: input.runId,
+      keywords
+    });
+  }
 }
 
 function formatBrowserRunSummary(input: {

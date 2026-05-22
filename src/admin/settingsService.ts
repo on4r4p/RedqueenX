@@ -221,7 +221,14 @@ export const xApiConfigSchema = z.object({
   xCostUserReadUsd: z.coerce.number().min(0),
   xCostMediaReadUsd: z.coerce.number().min(0),
   xCostUserInteractionUsd: z.coerce.number().min(0),
-  xCostCountCallUsd: z.coerce.number().min(0)
+  xCostCountCallUsd: z.coerce.number().min(0),
+  redditCrawlEnabled: booleanSettingSchema,
+  redditCrawlUserAgent: z.string().trim().min(1),
+  redditCrawlSubreddits: z.array(z.string().trim().min(1)),
+  redditCrawlLimitPerKeyword: z.coerce.number().int().min(1).max(100),
+  redditCrawlSort: z.enum(["relevance", "hot", "top", "new", "comments"]),
+  redditCrawlTimeRange: z.enum(["hour", "day", "week", "month", "year", "all"]),
+  redditCrawlMinScore: z.coerce.number().int().min(0)
 });
 
 export type XApiRuntimeConfig = z.infer<typeof xApiConfigSchema> & XBudgetConfig;

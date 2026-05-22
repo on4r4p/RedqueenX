@@ -2,7 +2,7 @@ import type { Database } from "better-sqlite3";
 import { TimelineItemService, type TimelineItem, type TimelineItemSource } from "./timelineItemService";
 import { TimelineTweetService, type TimelineTweetItem } from "./timelineTweetService";
 
-export type TimelineSourceFilter = "tweet" | "rss";
+export type TimelineSourceFilter = "tweet" | "rss" | "reddit";
 
 export interface LegacyTimelineItem {
   id: number;
@@ -256,13 +256,14 @@ function sourcePriority(source: string): number {
 
 function normalizeTimelineSources(sources: TimelineSourceFilter[] | undefined): Set<TimelineSourceFilter> {
   if (!sources) return new Set();
-  return new Set(sources.filter((source) => source === "tweet" || source === "rss"));
+  return new Set(sources.filter((source) => source === "tweet" || source === "rss" || source === "reddit"));
 }
 
 function timelineItemSources(sources: Set<TimelineSourceFilter>): TimelineItemSource[] | undefined {
   if (sources.size === 0) return undefined;
   const itemSources: TimelineItemSource[] = [];
   if (sources.has("rss")) itemSources.push("rss");
+  if (sources.has("reddit")) itemSources.push("reddit");
   return itemSources;
 }
 

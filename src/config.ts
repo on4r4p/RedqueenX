@@ -178,6 +178,16 @@ const envSchema = z.object({
   X_COST_USER_INTERACTION_USD: z.coerce.number().min(0).default(0.015),
   X_COST_COUNT_CALL_USD: z.coerce.number().min(0).default(0),
   RSS_FALLBACK_FEED_LIMIT: z.coerce.number().int().positive().default(25),
+  REDDIT_CRAWL_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  REDDIT_CRAWL_USER_AGENT: z.string().default("RedqueenX/0.1.0"),
+  REDDIT_CRAWL_SUBREDDITS: z.string().default("cybersecurity,netsec,blueteamsec,osint,privacy"),
+  REDDIT_CRAWL_LIMIT_PER_KEYWORD: z.coerce.number().int().min(1).max(100).default(10),
+  REDDIT_CRAWL_SORT: z.enum(["relevance", "hot", "top", "new", "comments"]).default("relevance"),
+  REDDIT_CRAWL_TIME_RANGE: z.enum(["hour", "day", "week", "month", "year", "all"]).default("month"),
+  REDDIT_CRAWL_MIN_SCORE: z.coerce.number().int().min(0).default(2),
   ENABLE_X_WRITE: z
     .enum(["true", "false"])
     .default("false")
@@ -298,6 +308,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     xCostUserInteractionUsd: parsed.X_COST_USER_INTERACTION_USD,
     xCostCountCallUsd: parsed.X_COST_COUNT_CALL_USD,
     rssFallbackFeedLimit: parsed.RSS_FALLBACK_FEED_LIMIT,
+    redditCrawlEnabled: parsed.REDDIT_CRAWL_ENABLED,
+    redditCrawlUserAgent: parsed.REDDIT_CRAWL_USER_AGENT,
+    redditCrawlSubreddits: parseCsvList(parsed.REDDIT_CRAWL_SUBREDDITS),
+    redditCrawlLimitPerKeyword: parsed.REDDIT_CRAWL_LIMIT_PER_KEYWORD,
+    redditCrawlSort: parsed.REDDIT_CRAWL_SORT,
+    redditCrawlTimeRange: parsed.REDDIT_CRAWL_TIME_RANGE,
+    redditCrawlMinScore: parsed.REDDIT_CRAWL_MIN_SCORE,
     enableXWrite: parsed.ENABLE_X_WRITE,
     x: {
       apiKey: parsed.X_API_KEY,
@@ -309,4 +326,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       clientSecret: parsed.X_CLIENT_SECRET
     }
   };
+}
+
+function parseCsvList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }

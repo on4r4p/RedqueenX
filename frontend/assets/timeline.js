@@ -11,7 +11,7 @@ const restoreArchiveTimelineButton = document.getElementById("restore-archive-ti
 const timelineDefaultPageSize = 50;
 const timelineMaxPageSize = 200;
 const timelineQueryLimit = readOptionalBoundedQueryInt("limit", 1, timelineMaxPageSize);
-const defaultTimelineSources = ["tweet", "rss"];
+const defaultTimelineSources = ["tweet", "rss", "reddit"];
 const timelineState = {
   offset: readBoundedQueryInt("offset", 0, 0, Number.MAX_SAFE_INTEGER),
   limit: timelineQueryLimit ?? timelineDefaultPageSize,
@@ -296,9 +296,11 @@ function renderMetrics(item) {
   const favorites = item.favoriteCount ?? 0;
   const score = item.score ?? "legacy";
   const createdAt = item.tweetCreatedAt || item.acceptedAt;
+  const engagementLabel = item.source === "reddit" ? "Reddit score" : "Retweets";
+  const commentsLabel = item.source === "reddit" ? "Comments" : "Favorites";
   return `<div class="tweet-actions">
     ${item.keyword ? `<span>Keyword: ${escapeHtml(item.keyword)}</span>` : ""}
-    <span>Retweets: ${retweets}</span><span>Favorites: ${favorites}</span>
+    <span>${engagementLabel}: ${retweets}</span><span>${commentsLabel}: ${favorites}</span>
     <span>Score: ${score}</span>
     ${createdAt ? `<span>${formatDate(createdAt)}</span>` : ""}
   </div>`;
@@ -356,7 +358,7 @@ async function refreshTimeline() {
   timeline.innerHTML = items
     .map((item) => {
       const author = item.author || "legacy";
-      const externalLabel = item.source === "rss" ? "RSS link hidden" : "Tweet link hidden";
+      const externalLabel = item.source === "rss" ? "RSS link hidden" : item.source === "reddit" ? "Reddit link hidden" : "Tweet link hidden";
       const tweetLink = item.tweetUrl
         ? `<span class="tweet-link external-link-disabled" data-external-url="${escapeAttr(item.tweetUrl)}" title="Click to show a warning before opening this link.">${externalLabel}</span>`
         : "";

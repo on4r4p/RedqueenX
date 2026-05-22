@@ -43,6 +43,8 @@ import { Crawler } from "../crawler";
 import { XApiClient } from "../x-client";
 import { XActionClient } from "../x-actions";
 import { runRssFallback as runSharedRssFallback } from "../rssFallback";
+import { RedditCrawler } from "../reddit/redditCrawler";
+import { crawlRedditKeywords } from "../reddit/redditTimeline";
 import { TimelineTweetService, type TimelineTweetExportRecord } from "./timelineTweetService";
 import { TimelineItemService } from "./timelineItemService";
 import { normalizeRawTimelineReasonGroupIds, RawTimelineTweetService } from "./rawTimelineTweetService";
@@ -154,12 +156,12 @@ const timelineQuerySchema = z.object({
         ? value
             .split(",")
             .map((source) => source.trim())
-            .filter((source): source is "tweet" | "rss" => source === "tweet" || source === "rss")
+            .filter((source): source is "tweet" | "rss" | "reddit" => source === "tweet" || source === "rss" || source === "reddit")
         : undefined
     )
 });
 const timelineArchiveSchema = z.object({
-  sources: z.array(z.enum(["tweet", "rss"])).optional()
+  sources: z.array(z.enum(["tweet", "rss", "reddit"])).optional()
 });
 const rawTimelineQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(300).optional(),
@@ -341,6 +343,13 @@ const xApiUpdateSchema = z.object({
       "VPN_DIAGNOSTIC_PLAYWRIGHT",
       "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
       "PLAYWRIGHT_DISABLE_SANDBOX",
+      "REDDIT_CRAWL_ENABLED",
+      "REDDIT_CRAWL_USER_AGENT",
+      "REDDIT_CRAWL_SUBREDDITS",
+      "REDDIT_CRAWL_LIMIT_PER_KEYWORD",
+      "REDDIT_CRAWL_SORT",
+      "REDDIT_CRAWL_TIME_RANGE",
+      "REDDIT_CRAWL_MIN_SCORE",
       "X_SEARCH_API_CALL_LIMIT",
       "X_SEARCH_API_WINDOW_MINUTES",
       "X_API_CREDIT_USD",
@@ -466,6 +475,13 @@ export interface AdminApiOptions {
     | "xCostUserInteractionUsd"
     | "xCostCountCallUsd"
     | "rssFallbackFeedLimit"
+    | "redditCrawlEnabled"
+    | "redditCrawlUserAgent"
+    | "redditCrawlSubreddits"
+    | "redditCrawlLimitPerKeyword"
+    | "redditCrawlSort"
+    | "redditCrawlTimeRange"
+    | "redditCrawlMinScore"
     | "enableXWrite"
     | "x"
   > &
@@ -1032,7 +1048,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const archived = timeline.archiveAll(body.sources, archivedAt);
     await recordSession("info", "timeline.archive", "Timeline entries archived", {
       archivedAt,
-      sources: body.sources ?? ["tweet", "rss"],
+      sources: body.sources ?? ["tweet", "rss", "reddit"],
       ...archived
     });
     return { archivedAt, archived, total: archived.tweets + archived.items + archived.legacy };
@@ -1042,7 +1058,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const body = timelineArchiveSchema.parse(request.body ?? {});
     const restored = timeline.restoreAll(body.sources);
     await recordSession("info", "timeline.archive.restore", "Timeline archive entries restored", {
-      sources: body.sources ?? ["tweet", "rss"],
+      sources: body.sources ?? ["tweet", "rss", "reddit"],
       ...restored
     });
     return { restored, total: restored.tweets + restored.items + restored.legacy };
@@ -3199,7 +3215,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       xCostUserReadUsd: options.config.xCostUserReadUsd,
       xCostMediaReadUsd: options.config.xCostMediaReadUsd,
       xCostUserInteractionUsd: options.config.xCostUserInteractionUsd,
-      xCostCountCallUsd: options.config.xCostCountCallUsd
+      xCostCountCallUsd: options.config.xCostCountCallUsd,
+      redditCrawlEnabled: options.config.redditCrawlEnabled,
+      redditCrawlUserAgent: options.config.redditCrawlUserAgent,
+      redditCrawlSubreddits: options.config.redditCrawlSubreddits,
+      redditCrawlLimitPerKeyword: options.config.redditCrawlLimitPerKeyword,
+      redditCrawlSort: options.config.redditCrawlSort,
+      redditCrawlTimeRange: options.config.redditCrawlTimeRange,
+      redditCrawlMinScore: options.config.redditCrawlMinScore
     });
   }
 
@@ -5904,6 +5927,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
             for (const keyword of keywordGroup) {
               await saveNoResultKeyword(keyword, count, config.minimumSearchResults);
             }
+            await runRedditCrawl(runId, keywordGroup, xApiConfig);
             completedKeywords += keywordGroup.length;
             runs.updateStats(runId, {
               completedKeywords,
@@ -5979,6 +6003,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
           noResultSaved: isNoResultSearch,
           apiCallsRemaining
         });
+        await runRedditCrawl(runId, keywordGroup, xApiConfig);
         if (apiCallsRemaining <= 0) {
           const nextApiResetAt = await pauseForApiWindow(runId, "Search paused until the next API window", {
             apiCallsRemaining
@@ -6088,6 +6113,37 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       reason,
       record: recordSession
     });
+  }
+
+  async function runRedditCrawl(runId: string, keywords: string[], config = getXApiConfig()): Promise<void> {
+    if (!config.redditCrawlEnabled) {
+      return;
+    }
+
+    try {
+      const crawler = new RedditCrawler({
+        enabled: config.redditCrawlEnabled,
+        userAgent: config.redditCrawlUserAgent,
+        subreddits: config.redditCrawlSubreddits,
+        limitPerKeyword: config.redditCrawlLimitPerKeyword,
+        sort: config.redditCrawlSort,
+        timeRange: config.redditCrawlTimeRange,
+        minScore: config.redditCrawlMinScore
+      });
+
+      await crawlRedditKeywords({
+        runId,
+        keywords,
+        crawler,
+        timelineItems,
+        record: recordSession
+      });
+    } catch (error) {
+      await recordSession("prob", "reddit.search.failed", error instanceof Error ? error.message : "Reddit crawl failed", {
+        runId,
+        keywords
+      });
+    }
   }
 
   async function pauseForApiWindow(
@@ -7622,7 +7678,8 @@ function xApiEnvValuesToConfig(
       configKey === "vpnCheckIpv6" ||
       configKey === "vpnDiagnosticStrict" ||
       configKey === "vpnDiagnosticPlaywright" ||
-      configKey === "playwrightDisableSandbox"
+      configKey === "playwrightDisableSandbox" ||
+      configKey === "redditCrawlEnabled"
     ) {
       config[configKey] = value === "true";
     } else if (configKey === "searchWithoutApiMouseProfile") {
@@ -7635,6 +7692,15 @@ function xApiEnvValuesToConfig(
       config[configKey] = z.enum(["chrome", "firefox"]).parse(value);
     } else if (configKey === "vpnRemoteProto") {
       config[configKey] = z.enum(["udp", "tcp"]).parse(value);
+    } else if (configKey === "redditCrawlSort") {
+      config[configKey] = z.enum(["relevance", "hot", "top", "new", "comments"]).parse(value);
+    } else if (configKey === "redditCrawlTimeRange") {
+      config[configKey] = z.enum(["hour", "day", "week", "month", "year", "all"]).parse(value);
+    } else if (configKey === "redditCrawlSubreddits") {
+      config[configKey] = value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
     } else if (
       configKey === "searchWithoutApiProfileDir" ||
       configKey === "searchWithoutApiStartUrl" ||
@@ -7648,7 +7714,8 @@ function xApiEnvValuesToConfig(
       configKey === "vpnNetnsGuestIp" ||
       configKey === "vpnRemoteHost" ||
       configKey === "vpnConfig" ||
-      configKey === "playwrightChromiumExecutablePath"
+      configKey === "playwrightChromiumExecutablePath" ||
+      configKey === "redditCrawlUserAgent"
     ) {
       config[configKey] = value;
     } else {
@@ -8352,6 +8419,13 @@ type XApiEnvKey =
   | "VPN_DIAGNOSTIC_PLAYWRIGHT"
   | "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
   | "PLAYWRIGHT_DISABLE_SANDBOX"
+  | "REDDIT_CRAWL_ENABLED"
+  | "REDDIT_CRAWL_USER_AGENT"
+  | "REDDIT_CRAWL_SUBREDDITS"
+  | "REDDIT_CRAWL_LIMIT_PER_KEYWORD"
+  | "REDDIT_CRAWL_SORT"
+  | "REDDIT_CRAWL_TIME_RANGE"
+  | "REDDIT_CRAWL_MIN_SCORE"
   | "X_SEARCH_API_CALL_LIMIT"
   | "X_SEARCH_API_WINDOW_MINUTES"
   | "X_API_CREDIT_USD"
@@ -8441,6 +8515,13 @@ const xApiEnvMap: Array<[XApiEnvKey, keyof XApiRuntimeConfig]> = [
   ["VPN_DIAGNOSTIC_PLAYWRIGHT", "vpnDiagnosticPlaywright"],
   ["PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "playwrightChromiumExecutablePath"],
   ["PLAYWRIGHT_DISABLE_SANDBOX", "playwrightDisableSandbox"],
+  ["REDDIT_CRAWL_ENABLED", "redditCrawlEnabled"],
+  ["REDDIT_CRAWL_USER_AGENT", "redditCrawlUserAgent"],
+  ["REDDIT_CRAWL_SUBREDDITS", "redditCrawlSubreddits"],
+  ["REDDIT_CRAWL_LIMIT_PER_KEYWORD", "redditCrawlLimitPerKeyword"],
+  ["REDDIT_CRAWL_SORT", "redditCrawlSort"],
+  ["REDDIT_CRAWL_TIME_RANGE", "redditCrawlTimeRange"],
+  ["REDDIT_CRAWL_MIN_SCORE", "redditCrawlMinScore"],
   ["X_SEARCH_API_CALL_LIMIT", "xSearchApiCallLimit"],
   ["X_SEARCH_API_WINDOW_MINUTES", "xSearchApiWindowMinutes"],
   ["X_API_CREDIT_USD", "xApiCreditUsd"],

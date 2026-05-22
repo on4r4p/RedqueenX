@@ -1,7 +1,7 @@
 import type { Database } from "better-sqlite3";
 import type { TweetMedia } from "../types";
 
-export type TimelineItemSource = "rss";
+export type TimelineItemSource = "rss" | "reddit";
 
 export interface TimelineItemInput {
   source: TimelineItemSource;
@@ -217,7 +217,7 @@ export class TimelineItemService {
 
 function normalizeSources(sources: TimelineItemSource[] | undefined): TimelineItemSource[] {
   if (!sources) return [];
-  return Array.from(new Set(sources.filter((source) => source === "rss")));
+  return Array.from(new Set(sources.filter((source) => source === "rss" || source === "reddit")));
 }
 
 function mapTimelineItemRow(row: TimelineItemRow): TimelineItem {

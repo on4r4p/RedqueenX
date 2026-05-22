@@ -367,7 +367,14 @@ const generalSettingsFields = [
   "SEARCH_WITHOUT_API_SCROLL_DELAY_MIN_MS",
   "SEARCH_WITHOUT_API_SCROLL_DELAY_MAX_MS",
   "SEARCH_WITHOUT_API_SCROLLS_MIN",
-  "SEARCH_WITHOUT_API_SCROLLS_MAX"
+  "SEARCH_WITHOUT_API_SCROLLS_MAX",
+  "REDDIT_CRAWL_ENABLED",
+  "REDDIT_CRAWL_USER_AGENT",
+  "REDDIT_CRAWL_SUBREDDITS",
+  "REDDIT_CRAWL_LIMIT_PER_KEYWORD",
+  "REDDIT_CRAWL_SORT",
+  "REDDIT_CRAWL_TIME_RANGE",
+  "REDDIT_CRAWL_MIN_SCORE"
 ];
 
 const xApiFields = [
@@ -452,6 +459,13 @@ const envFields = [
   "ADMIN_IPV4_WHITELIST",
   "ADMIN_IPV4_BLACKLIST",
   "RSS_FALLBACK_FEED_LIMIT",
+  "REDDIT_CRAWL_ENABLED",
+  "REDDIT_CRAWL_USER_AGENT",
+  "REDDIT_CRAWL_SUBREDDITS",
+  "REDDIT_CRAWL_LIMIT_PER_KEYWORD",
+  "REDDIT_CRAWL_SORT",
+  "REDDIT_CRAWL_TIME_RANGE",
+  "REDDIT_CRAWL_MIN_SCORE",
   "X_BEARER_TOKEN",
   "X_API_KEY",
   "X_API_SECRET",
@@ -557,6 +571,13 @@ const adminTooltipByName = {
     "Shuffle eligible keywords before applying the session limit so each run does not always start with the same entries.",
   SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT:
     "Target percentage of @user keywords in each session. The planner adapts when one keyword type runs out, so runs do not stop just because the ratio cannot be met exactly.",
+  REDDIT_CRAWL_ENABLED: "Search Reddit for normal, non-@user keywords after each X keyword search.",
+  REDDIT_CRAWL_USER_AGENT: "User-Agent sent to Reddit's public JSON endpoint.",
+  REDDIT_CRAWL_SUBREDDITS: "Comma-separated subreddits to search. Leave empty to search all Reddit.",
+  REDDIT_CRAWL_LIMIT_PER_KEYWORD: "Maximum Reddit posts saved for one keyword.",
+  REDDIT_CRAWL_SORT: "Reddit search sort mode.",
+  REDDIT_CRAWL_TIME_RANGE: "Reddit search time range used with the configured sort mode.",
+  REDDIT_CRAWL_MIN_SCORE: "Minimum Reddit post score required before saving the post to Timeline.",
   SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT:
     "When Search without Api is stopped by an X session alert, mark that alert ignored automatically and resume the same run.",
   SEARCH_WITHOUT_API_MAX_RETRIES:

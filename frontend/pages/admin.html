@@ -849,6 +849,60 @@
                   <button type="submit" data-settings-section>Save search pacing</button>
                 </div>
               </fieldset>
+              <fieldset class="settings-subsection">
+                <legend>Reddit crawl</legend>
+                <div class="settings-grid">
+                  <label>
+                    <span>Reddit crawl</span>
+                    <select name="REDDIT_CRAWL_ENABLED">
+                      <option value="false">Disabled</option>
+                      <option value="true">Enabled</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>User agent</span>
+                    <input name="REDDIT_CRAWL_USER_AGENT" type="text" placeholder="RedqueenX/0.1.0" />
+                  </label>
+                  <label>
+                    <span>Subreddits</span>
+                    <input name="REDDIT_CRAWL_SUBREDDITS" type="text"
+                      placeholder="cybersecurity,netsec,blueteamsec,osint,privacy" />
+                  </label>
+                  <label>
+                    <span>Posts per keyword</span>
+                    <input name="REDDIT_CRAWL_LIMIT_PER_KEYWORD" type="number" min="1" max="100" step="1"
+                      placeholder="10" />
+                  </label>
+                  <label>
+                    <span>Sort</span>
+                    <select name="REDDIT_CRAWL_SORT">
+                      <option value="relevance">relevance</option>
+                      <option value="hot">hot</option>
+                      <option value="top">top</option>
+                      <option value="new">new</option>
+                      <option value="comments">comments</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Time range</span>
+                    <select name="REDDIT_CRAWL_TIME_RANGE">
+                      <option value="hour">hour</option>
+                      <option value="day">day</option>
+                      <option value="week">week</option>
+                      <option value="month">month</option>
+                      <option value="year">year</option>
+                      <option value="all">all</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Minimum Reddit score</span>
+                    <input name="REDDIT_CRAWL_MIN_SCORE" type="number" min="0" step="1" placeholder="2" />
+                  </label>
+                </div>
+                <div class="settings-subsection-actions">
+                  <button type="submit" data-settings-section>Save Reddit crawl</button>
+                </div>
+              </fieldset>
               <button type="submit" class="secondary-button">Save all general settings</button>
             </form>
           </section>
@@ -1378,6 +1432,56 @@
                 <label>
                   <span>SESSION_SECRET</span>
                   <input name="SESSION_SECRET" type="password" autocomplete="new-password" />
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset class="env-section">
+              <legend>Reddit env</legend>
+              <div class="settings-grid">
+                <label>
+                  <span>REDDIT_CRAWL_ENABLED</span>
+                  <select name="REDDIT_CRAWL_ENABLED">
+                    <option value="false">false</option>
+                    <option value="true">true</option>
+                  </select>
+                </label>
+                <label>
+                  <span>REDDIT_CRAWL_USER_AGENT</span>
+                  <input name="REDDIT_CRAWL_USER_AGENT" type="text" autocomplete="off" />
+                </label>
+                <label class="wide-field">
+                  <span>REDDIT_CRAWL_SUBREDDITS</span>
+                  <input name="REDDIT_CRAWL_SUBREDDITS" type="text" autocomplete="off" />
+                </label>
+                <label>
+                  <span>REDDIT_CRAWL_LIMIT_PER_KEYWORD</span>
+                  <input name="REDDIT_CRAWL_LIMIT_PER_KEYWORD" type="number" min="1" max="100" step="1" />
+                </label>
+                <label>
+                  <span>REDDIT_CRAWL_SORT</span>
+                  <select name="REDDIT_CRAWL_SORT">
+                    <option value="relevance">relevance</option>
+                    <option value="hot">hot</option>
+                    <option value="top">top</option>
+                    <option value="new">new</option>
+                    <option value="comments">comments</option>
+                  </select>
+                </label>
+                <label>
+                  <span>REDDIT_CRAWL_TIME_RANGE</span>
+                  <select name="REDDIT_CRAWL_TIME_RANGE">
+                    <option value="hour">hour</option>
+                    <option value="day">day</option>
+                    <option value="week">week</option>
+                    <option value="month">month</option>
+                    <option value="year">year</option>
+                    <option value="all">all</option>
+                  </select>
+                </label>
+                <label>
+                  <span>REDDIT_CRAWL_MIN_SCORE</span>
+                  <input name="REDDIT_CRAWL_MIN_SCORE" type="number" min="0" step="1" />
                 </label>
               </div>
             </fieldset>
