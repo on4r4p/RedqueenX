@@ -252,10 +252,42 @@ function renderLuckFactorBadge(reasons) {
   return `<span class="score-pill luck-factor-pill" title="This tweet was accepted by the random luck factor after normal scoring rejected it.">${formatLuckFactorLabel(reason)}</span>`;
 }
 
+function renderSourceBadge(item) {
+  const source = String(item.source || "legacy");
+  const labels = {
+    tweet: "X",
+    rss: "RSS",
+    reddit: "Reddit"
+  };
+  const normalizedSource = source.toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "legacy";
+  const label = labels[source] || source;
+  return `<span class="score-pill source-pill source-pill-${escapeAttr(normalizedSource)}">${escapeHtml(label)}</span>`;
+}
+
 function applyRawTimelineLinkState(enabled) {
   rawTimelineLinks.forEach((link) => {
     link.hidden = enabled === false;
   });
+}
+
+function timelineItemExternalId(item) {
+  if (item.externalId) return String(item.externalId);
+  const source = String(item.source || "");
+  const id = String(item.id || "");
+  const prefix = `${source}:`;
+  return id.startsWith(prefix) ? id.slice(prefix.length) : "";
+}
+
+function renderRedditTimelineItemButton(item) {
+  if (item.source !== "reddit") return "";
+  const externalId = timelineItemExternalId(item);
+  if (!externalId) return "";
+  const action = timelineState.archived ? "restore" : "archive";
+  const label = timelineState.archived ? "Add Reddit" : "Ignore Reddit";
+  const title = timelineState.archived
+    ? "Restore this Reddit post to the active Timeline."
+    : "Archive this Reddit post so it stays out of the active Timeline.";
+  return `<button type="button" class="tweet-action-button tweet-list-button" data-timeline-item-action="${action}" data-timeline-item-source="reddit" data-timeline-item-id="${escapeAttr(externalId)}" title="${title}">${label}</button>`;
 }
 
 function renderListButtons(item) {
@@ -271,6 +303,7 @@ function renderListButtons(item) {
     ${renderBanWordsPromptButton(false)}
     ${renderBannedWordExceptionPromptButton()}
     ${loadMedia}
+    ${renderRedditTimelineItemButton(item)}
   </div>`;
 }
 
@@ -369,7 +402,7 @@ async function refreshTimeline() {
             <strong>${escapeHtml(author)}</strong>
             ${item.authorName ? `<span>${escapeHtml(item.authorName)}</span>` : ""}
             ${item.lineNumber ? `<span>Text.Sent line ${item.lineNumber}</span>` : ""}
-            <span class="score-pill">${escapeHtml(item.source || "legacy")}</span>
+            ${renderSourceBadge(item)}
             ${renderLuckFactorBadge(item.reasons)}
           </div>
           <p>${linkify(item.text)} ${tweetLink}</p>
@@ -763,6 +796,44 @@ async function mutateList(kind, action, value, button) {
   }
 }
 
+async function mutateTimelineItemArchive(button) {
+  const action = button.dataset.timelineItemAction;
+  const source = button.dataset.timelineItemSource;
+  const externalId = button.dataset.timelineItemId;
+  if (!source || !externalId || (action !== "archive" && action !== "restore")) {
+    timelineStatus.textContent = "Missing timeline item action.";
+    return;
+  }
+  const previousText = button.textContent;
+  button.disabled = true;
+  button.textContent = action === "restore" ? "Adding..." : "Ignoring...";
+  timelineStatus.textContent = action === "restore" ? "Adding Reddit post back to Timeline..." : "Ignoring Reddit post...";
+  try {
+    const response = await csrfFetch(
+      `/timeline/items/${encodeURIComponent(source)}/${encodeURIComponent(externalId)}/${action === "restore" ? "restore" : "archive"}`,
+      { method: "POST" }
+    );
+    if (response.status === 401) {
+      timelineStatus.textContent = "Timeline login required before editing Reddit items.";
+      location.href = "/timeline/login";
+      return;
+    }
+    const result = await response.json().catch(() => ({ error: "Reddit timeline update failed" }));
+    if (!response.ok) {
+      throw new Error(result.error || "Reddit timeline update failed.");
+    }
+    timelineStatus.textContent = action === "restore" ? "Reddit post added back to Timeline." : "Reddit post ignored.";
+    await refreshTimeline();
+  } catch (error) {
+    timelineStatus.textContent = error instanceof Error ? error.message : "Reddit timeline update failed.";
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
+  }
+}
+
 async function mutateListBatch(kind, action, values, button) {
   const normalizedValues = Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
   if (normalizedValues.length === 0) {
@@ -1062,6 +1133,12 @@ timeline.addEventListener("click", async (event) => {
       listButton.disabled = false;
       timelineStatus.textContent = error instanceof Error ? error.message : "List update failed.";
     }
+    return;
+  }
+
+  const timelineItemButton = event.target.closest("[data-timeline-item-action]");
+  if (timelineItemButton) {
+    await mutateTimelineItemArchive(timelineItemButton);
     return;
   }
 

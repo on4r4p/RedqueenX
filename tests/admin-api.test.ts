@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createAdminApi } from "../src/admin/api";
 import { openMemoryDatabase } from "../src/db/database";
 import { RunService } from "../src/admin/runService";
+import { TimelineItemService } from "../src/admin/timelineItemService";
 import { TimelineTweetService } from "../src/admin/timelineTweetService";
 import { XBrowserAccountService } from "../src/admin/xBrowserAccountService";
 import { XSessionAlertService } from "../src/admin/xSessionAlertService";
@@ -413,6 +414,44 @@ describe("admin api", () => {
         .prepare("SELECT raw_value FROM list_entries WHERE kind = 'banned_word_exception' AND raw_value = ? AND is_deleted = 0")
         .get("of course")
     ).toEqual({ raw_value: "of course" });
+
+    const timelineItems = new TimelineItemService(database);
+    timelineItems.save({
+      source: "reddit",
+      externalId: "reddit-ignore-1",
+      text: "reddit item to ignore",
+      acceptedAt: "2026-05-18T10:00:00.000Z"
+    });
+    const timelineUserIgnoresReddit = await app.inject({
+      method: "POST",
+      url: "/timeline/items/reddit/reddit-ignore-1/archive",
+      headers: timelineHeaders
+    });
+    expect(timelineUserIgnoresReddit.statusCode).toBe(200);
+    expect(timelineUserIgnoresReddit.json()).toMatchObject({ source: "reddit", externalId: "reddit-ignore-1", archived: 1 });
+    const activeRedditAfterIgnore = await app.inject({
+      method: "GET",
+      url: "/timeline/data?sources=reddit",
+      headers: timelineHeaders
+    });
+    expect(activeRedditAfterIgnore.json().items).toEqual([]);
+    const archivedRedditAfterIgnore = await app.inject({
+      method: "GET",
+      url: "/timeline/data?sources=reddit&archived=1",
+      headers: timelineHeaders
+    });
+    expect(archivedRedditAfterIgnore.json().items[0]).toMatchObject({
+      source: "reddit",
+      externalId: "reddit-ignore-1",
+      text: "reddit item to ignore"
+    });
+    const timelineUserAddsRedditBack = await app.inject({
+      method: "POST",
+      url: "/timeline/items/reddit/reddit-ignore-1/restore",
+      headers: timelineHeaders
+    });
+    expect(timelineUserAddsRedditBack.statusCode).toBe(200);
+    expect(timelineUserAddsRedditBack.json()).toMatchObject({ source: "reddit", externalId: "reddit-ignore-1", restored: 1 });
 
     const timelineUserAdminDeleteDenied = await app.inject({
       method: "DELETE",

@@ -46,7 +46,7 @@ import { runRssFallback as runSharedRssFallback } from "../rssFallback";
 import { RedditCrawler } from "../reddit/redditCrawler";
 import { crawlRedditKeywords } from "../reddit/redditTimeline";
 import { TimelineTweetService, type TimelineTweetExportRecord } from "./timelineTweetService";
-import { TimelineItemService } from "./timelineItemService";
+import { TimelineItemService, type TimelineItemSource } from "./timelineItemService";
 import { normalizeRawTimelineReasonGroupIds, RawTimelineTweetService } from "./rawTimelineTweetService";
 import { MediaCacheService, type MediaCacheConfig } from "./mediaCacheService";
 import { MediaCacheJobService } from "./mediaCacheJobService";
@@ -162,6 +162,10 @@ const timelineQuerySchema = z.object({
 });
 const timelineArchiveSchema = z.object({
   sources: z.array(z.enum(["tweet", "rss", "reddit"])).optional()
+});
+const timelineItemParamsSchema = z.object({
+  source: z.enum(["rss", "reddit"]),
+  externalId: z.string().trim().min(1).max(500)
 });
 const rawTimelineQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(300).optional(),
@@ -1062,6 +1066,30 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       ...restored
     });
     return { restored, total: restored.tweets + restored.items + restored.legacy };
+  });
+
+  app.post("/timeline/items/:source/:externalId/archive", async (request) => {
+    const params = timelineItemParamsSchema.parse(request.params);
+    const archivedAt = new Date().toISOString();
+    const archived = timelineItems.archiveOne(params.source as TimelineItemSource, params.externalId, archivedAt);
+    await recordSession("info", "timeline.item.archive", "Timeline item archived", {
+      source: params.source,
+      externalId: params.externalId,
+      archivedAt,
+      archived
+    });
+    return { source: params.source, externalId: params.externalId, archivedAt, archived };
+  });
+
+  app.post("/timeline/items/:source/:externalId/restore", async (request) => {
+    const params = timelineItemParamsSchema.parse(request.params);
+    const restored = timelineItems.restoreOne(params.source as TimelineItemSource, params.externalId);
+    await recordSession("info", "timeline.item.restore", "Timeline item restored", {
+      source: params.source,
+      externalId: params.externalId,
+      restored
+    });
+    return { source: params.source, externalId: params.externalId, restored };
   });
 
   app.get("/admin/timeline/export", async (_request, reply) => {
@@ -6553,6 +6581,7 @@ function isTimelineProtectedPath(pathName: string): boolean {
     pathName === "/timeline/data" ||
     pathName === "/timeline/archive" ||
     pathName === "/timeline/archive/restore" ||
+    pathName.startsWith("/timeline/items/") ||
     pathName === "/raw-timeline/data" ||
     pathName === "/rejected-timeline/data" ||
     pathName === "/timeline/auth" ||

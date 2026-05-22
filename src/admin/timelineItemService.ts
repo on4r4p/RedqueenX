@@ -27,6 +27,7 @@ export interface TimelineItemInput {
 export interface TimelineItem {
   id: string;
   source: TimelineItemSource;
+  externalId: string;
   keyword: string | null;
   title: string | null;
   text: string;
@@ -213,6 +214,20 @@ export class TimelineItemService {
       .run(...activeSources);
     return Number(result.changes ?? 0);
   }
+
+  archiveOne(source: TimelineItemSource, externalId: string, archivedAt = new Date().toISOString()): number {
+    const result = this.database
+      .prepare("UPDATE timeline_items SET archived_at = ? WHERE source = ? AND external_id = ? AND archived_at IS NULL")
+      .run(archivedAt, source, externalId);
+    return Number(result.changes ?? 0);
+  }
+
+  restoreOne(source: TimelineItemSource, externalId: string): number {
+    const result = this.database
+      .prepare("UPDATE timeline_items SET archived_at = NULL WHERE source = ? AND external_id = ? AND archived_at IS NOT NULL")
+      .run(source, externalId);
+    return Number(result.changes ?? 0);
+  }
 }
 
 function normalizeSources(sources: TimelineItemSource[] | undefined): TimelineItemSource[] {
@@ -226,6 +241,7 @@ function mapTimelineItemRow(row: TimelineItemRow): TimelineItem {
   return {
     id: `${row.source}:${row.external_id}`,
     source: row.source,
+    externalId: row.external_id,
     keyword: row.keyword,
     title: row.title,
     text: body,

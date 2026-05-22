@@ -74,6 +74,24 @@ describe("timeline pagination", () => {
     expect(timeline.page({ sources: ["rss"], limit: 10 }).items.map((item) => item.source)).toEqual(["rss", "rss"]);
   });
 
+  it("archives and restores one Reddit timeline item without recrawl reactivating it", () => {
+    const database = openMemoryDatabase();
+    const external = new TimelineItemService(database);
+
+    external.save({ source: "reddit", externalId: "reddit-1", text: "reddit item", acceptedAt: "2026-05-18T10:00:00.000Z" });
+
+    expect(external.archiveOne("reddit", "reddit-1", "2026-05-19T10:00:00.000Z")).toBe(1);
+    expect(external.latest(10, 0, ["reddit"])).toEqual([]);
+    expect(external.latest(10, 0, ["reddit"], true)[0]).toMatchObject({ source: "reddit", externalId: "reddit-1" });
+
+    external.save({ source: "reddit", externalId: "reddit-1", text: "updated reddit item", acceptedAt: "2026-05-20T10:00:00.000Z" });
+
+    expect(external.latest(10, 0, ["reddit"])).toEqual([]);
+    expect(external.latest(10, 0, ["reddit"], true)[0]).toMatchObject({ text: "updated reddit item" });
+    expect(external.restoreOne("reddit", "reddit-1")).toBe(1);
+    expect(external.latest(10, 0, ["reddit"])[0]).toMatchObject({ text: "updated reddit item" });
+  });
+
   it("keeps high offset pages reachable after globally sorting sources", () => {
     const database = openMemoryDatabase();
     const lists = new ListService(database);
