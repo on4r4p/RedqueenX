@@ -5426,12 +5426,18 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return;
     }
 
-    const chain = nextRunChainState(parseRunStats(completedRun.statsJson));
+    const runtimeConfig = getXApiConfig();
+    const completedStats = parseRunStats(completedRun.statsJson);
+    const chain = nextRunChainState(completedStats, runtimeConfig);
     if (!chain) {
+      await recordSession("info", "run.chain.completed", "Sequential run chain completed", {
+        previousRunId: completedRunId,
+        mode,
+        ...runChainLogData(completedStats, runtimeConfig)
+      });
       return;
     }
 
-    const runtimeConfig = getXApiConfig();
     const keywords = plannedKeywords(lists, runtimeConfig);
     if (keywords.length === 0) {
       await recordSession("info", "run.chain.empty", "Sequential runs stopped because no eligible keywords remain. Clear SearchTerms.Used and/or No.Result to continue searching.", {
@@ -7278,14 +7284,26 @@ function initialRunChainState(config: { runChainCount?: number }): RunChainState
   return { total, index: 1, remaining: total - 1 };
 }
 
-function nextRunChainState(stats: RunStats): RunChainState | null {
-  const remaining = Math.max(0, Math.floor(stats.runChainRemaining ?? 0));
+function nextRunChainState(stats: RunStats, config: { runChainCount?: number }): RunChainState | null {
+  const fallback = initialRunChainState(config);
+  const currentIndex = Math.max(1, Math.floor(stats.runChainIndex ?? fallback.index));
+  const remaining = Math.max(0, Math.floor(stats.runChainRemaining ?? fallback.remaining));
   if (remaining <= 0) {
     return null;
   }
-  const total = Math.max(1, Math.floor(stats.runChainTotal ?? remaining + 1));
-  const index = Math.max(1, Math.floor(stats.runChainIndex ?? 1)) + 1;
+  const total = Math.max(1, Math.floor(stats.runChainTotal ?? fallback.total));
+  const index = currentIndex + 1;
   return { total, index, remaining: remaining - 1 };
+}
+
+function runChainLogData(stats: RunStats, config: { runChainCount?: number }): Record<string, number | null> {
+  const fallback = initialRunChainState(config);
+  const index = stats.runChainIndex ?? fallback.index;
+  return {
+    runChainTotal: stats.runChainTotal ?? fallback.total,
+    runChainIndex: index,
+    runChainRemaining: stats.runChainRemaining ?? Math.max(0, fallback.total - index)
+  };
 }
 
 function runChainStateFromStats(stats: RunStats, config: { runChainCount?: number }): RunChainState {

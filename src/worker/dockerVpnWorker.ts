@@ -408,16 +408,26 @@ async function maybeStartNextChainedRun(
   config: AppConfig,
   record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>
 ): Promise<void> {
-  const completedRun = runs.get(completedRunId);
-  if (!completedRun || completedRun.status !== "completed") {
+  const completedRun = await waitForCompletedRun(completedRunId, runs, record);
+  if (!completedRun) {
     return;
   }
-  if (runs.current()) {
+  const activeRun = runs.current();
+  if (activeRun) {
+    await record("prob", "docker_vpn.run.chain.skipped", "Sequential Docker VPN run was not queued because another run is active", {
+      previousRunId: completedRunId,
+      activeRunId: activeRun.id,
+      activeRunStatus: activeRun.status
+    });
     return;
   }
 
-  const chain = nextRunChainState(parseRunStats(completedRun.statsJson));
+  const chain = nextRunChainState(parseRunStats(completedRun.statsJson), config);
   if (!chain) {
+    await record("info", "docker_vpn.run.chain.completed", "Sequential Docker VPN run chain completed", {
+      previousRunId: completedRunId,
+      ...runChainLogData(parseRunStats(completedRun.statsJson), config)
+    });
     return;
   }
   const keywords = plannedKeywords(lists, config);
@@ -448,14 +458,53 @@ async function maybeStartNextChainedRun(
   });
 }
 
-function nextRunChainState(stats: RunStats): RunChainState | null {
-  const remaining = Math.max(0, Math.floor(stats.runChainRemaining ?? 0));
+async function waitForCompletedRun(
+  runId: string,
+  runs: RunService,
+  record: (level: CurrentSessionLevel, type: string, message: string, data?: Record<string, unknown>) => Promise<void>
+): Promise<RunRecord | null> {
+  let latest = runs.get(runId);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (!latest || latest.status === "completed") {
+      return latest;
+    }
+    if (latest.status === "stopped") {
+      await record("prob", "docker_vpn.run.chain.skipped", "Sequential Docker VPN run was not queued because the previous run stopped", {
+        previousRunId: runId,
+        previousRunStatus: latest.status
+      });
+      return null;
+    }
+    await delay(250);
+    latest = runs.get(runId);
+  }
+  await record("prob", "docker_vpn.run.chain.skipped", "Sequential Docker VPN run was not queued because the previous run did not become completed", {
+    previousRunId: runId,
+    previousRunStatus: latest?.status ?? "missing"
+  });
+  return null;
+}
+
+function nextRunChainState(stats: RunStats, config: Pick<AppConfig, "runChainCount">): RunChainState | null {
+  const fallbackTotal = Math.max(1, Math.floor(config.runChainCount ?? 1));
+  const currentIndex = Math.max(1, Math.floor(stats.runChainIndex ?? 1));
+  const remaining = Math.max(0, Math.floor(stats.runChainRemaining ?? fallbackTotal - currentIndex));
   if (remaining <= 0) {
     return null;
   }
-  const total = Math.max(1, Math.floor(stats.runChainTotal ?? remaining + 1));
-  const index = Math.max(1, Math.floor(stats.runChainIndex ?? 1)) + 1;
+  const total = Math.max(1, Math.floor(stats.runChainTotal ?? fallbackTotal));
+  const index = currentIndex + 1;
   return { total, index, remaining: remaining - 1 };
+}
+
+function runChainLogData(stats: RunStats, config: Pick<AppConfig, "runChainCount">): Record<string, number | null> {
+  const fallbackTotal = Math.max(1, Math.floor(config.runChainCount ?? 1));
+  const index = stats.runChainIndex ?? 1;
+  return {
+    runChainTotal: stats.runChainTotal ?? fallbackTotal,
+    runChainIndex: index,
+    runChainRemaining: stats.runChainRemaining ?? Math.max(0, fallbackTotal - index)
+  };
 }
 
 function plannedKeywords(
