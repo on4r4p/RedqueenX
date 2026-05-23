@@ -415,6 +415,27 @@ describe("admin api", () => {
         .get("of course")
     ).toEqual({ raw_value: "of course" });
 
+    const timelineUserSuggestsKeyword = await app.inject({
+      method: "POST",
+      url: "/timeline/lists/suggested_keyword",
+      headers: timelineHeaders,
+      payload: { value: "timeline suggestion" }
+    });
+    expect(timelineUserSuggestsKeyword.statusCode).toBe(200);
+    expect(
+      database
+        .prepare("SELECT raw_value FROM list_entries WHERE kind = 'suggested_keyword' AND raw_value = ? AND is_deleted = 0")
+        .get("timeline suggestion")
+    ).toEqual({ raw_value: "timeline suggestion" });
+
+    const timelineUserCannotAddKeywordDirectly = await app.inject({
+      method: "POST",
+      url: "/timeline/lists/keyword",
+      headers: timelineHeaders,
+      payload: { value: "direct timeline keyword" }
+    });
+    expect(timelineUserCannotAddKeywordDirectly.statusCode).toBe(404);
+
     const timelineItems = new TimelineItemService(database);
     timelineItems.save({
       source: "reddit",
@@ -2253,6 +2274,66 @@ describe("admin api", () => {
     });
     expect(staleAfterSkippedMove.statusCode).toBe(200);
     expect(staleAfterSkippedMove.json().entries.map((entry: { rawValue: string }) => entry.rawValue)).toContain("@skip_to_stale");
+
+    const suggestedKeyword = await app.inject({
+      method: "POST",
+      url: "/admin/lists/suggested_keyword",
+      headers: authHeaders,
+      payload: { value: "suggested exploit" }
+    });
+    expect(suggestedKeyword.statusCode).toBe(200);
+    const promotedSuggestedKeyword = await app.inject({
+      method: "POST",
+      url: `/admin/lists/suggested_keyword/${suggestedKeyword.json().entry.id}/promote-keyword`,
+      headers: authHeaders
+    });
+    expect(promotedSuggestedKeyword.statusCode).toBe(200);
+    expect(promotedSuggestedKeyword.json().entry.rawValue).toBe("suggested exploit");
+    expect(promotedSuggestedKeyword.json().deletedFromSuggestedList).toBe(1);
+    expect(
+      database.prepare("SELECT raw_value FROM list_entries WHERE kind = 'keyword' AND raw_value = ? AND is_deleted = 0").get(
+        "suggested exploit"
+      )
+    ).toEqual({ raw_value: "suggested exploit" });
+
+    const suggestedKeywordOne = await app.inject({
+      method: "POST",
+      url: "/admin/lists/suggested_keyword",
+      headers: authHeaders,
+      payload: { value: "suggested one" }
+    });
+    expect(suggestedKeywordOne.statusCode).toBe(200);
+    const suggestedKeywordTwo = await app.inject({
+      method: "POST",
+      url: "/admin/lists/suggested_keyword",
+      headers: authHeaders,
+      payload: { value: "suggested two" }
+    });
+    expect(suggestedKeywordTwo.statusCode).toBe(200);
+    const promotedAllSuggestedKeywords = await app.inject({
+      method: "POST",
+      url: "/admin/lists/suggested_keyword/promote-all",
+      headers: authHeaders
+    });
+    expect(promotedAllSuggestedKeywords.statusCode).toBe(200);
+    expect(promotedAllSuggestedKeywords.json()).toMatchObject({ promoted: 3, deletedFromSuggestedList: 3 });
+    const suggestedAfterPromoteAll = await app.inject({
+      method: "GET",
+      url: "/admin/lists/suggested_keyword",
+      headers: authHeaders
+    });
+    expect(suggestedAfterPromoteAll.statusCode).toBe(200);
+    expect(suggestedAfterPromoteAll.json().entries).toEqual([]);
+    for (const promotedKeyword of ["timeline suggestion", "suggested exploit", "suggested one", "suggested two"]) {
+      const deletedPromotedKeyword = await app.inject({
+        method: "DELETE",
+        url: "/admin/lists/keyword",
+        headers: authHeaders,
+        payload: { value: promotedKeyword }
+      });
+      expect(deletedPromotedKeyword.statusCode).toBe(200);
+      expect(deletedPromotedKeyword.json().deleted).toBe(1);
+    }
 
     const activeCleanupKeyword = await app.inject({
       method: "POST",

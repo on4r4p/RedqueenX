@@ -2632,6 +2632,43 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return { entry: staleEntry, deletedFromKeywords, deletedFromSkippedList };
   });
 
+  app.post("/admin/lists/suggested_keyword/:id/promote-keyword", async (request, reply) => {
+    const entryId = getEntryIdParam(request.params);
+    const suggestedEntry = lists.getById("suggested_keyword", entryId);
+    if (!suggestedEntry) {
+      reply.code(404).send({ error: "Suggested keyword entry not found" });
+      return;
+    }
+
+    const promotedAt = new Date().toISOString();
+    const keywordEntry = lists.add("keyword", suggestedEntry.rawValue, "runtime:suggested-keyword-promote", null, promotedAt);
+    const deletedFromSuggestedList = lists.markDeletedById("suggested_keyword", entryId);
+    await recordSession("info", "suggested_keyword.promote", "Suggested keyword promoted into keywords", {
+      suggestedEntryId: entryId,
+      keywordEntryId: keywordEntry.id,
+      keyword: suggestedEntry.rawValue,
+      deletedFromSuggestedList
+    });
+    return { entry: keywordEntry, deletedFromSuggestedList };
+  });
+
+  app.post("/admin/lists/suggested_keyword/promote-all", async () => {
+    const suggestions = lists.list("suggested_keyword");
+    const promotedAt = new Date().toISOString();
+    let promoted = 0;
+    let deletedFromSuggestedList = 0;
+    for (const suggestion of suggestions) {
+      lists.add("keyword", suggestion.rawValue, "runtime:suggested-keyword-promote", null, promotedAt);
+      deletedFromSuggestedList += lists.markDeletedById("suggested_keyword", suggestion.id);
+      promoted += 1;
+    }
+    await recordSession("info", "suggested_keyword.promote_all", "Suggested keywords promoted into keywords", {
+      promoted,
+      deletedFromSuggestedList
+    });
+    return { promoted, deletedFromSuggestedList };
+  });
+
   app.post("/admin/lists/:kind", async (request, reply) => {
     const kind = getKindParam(request.params);
     if (!kind) {
@@ -2684,7 +2721,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.post("/timeline/lists/:kind", async (request, reply) => {
-    const kind = getTimelineListKindParam(request.params);
+    const kind = getTimelineListKindParam(request.params, Boolean(readAdminAuth(request)));
     if (!kind) {
       reply.code(404).send({ error: "Unknown timeline list action" });
       return;
@@ -2694,7 +2731,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   });
 
   app.delete("/timeline/lists/:kind", async (request, reply) => {
-    const kind = getTimelineListKindParam(request.params);
+    const kind = getTimelineListKindParam(request.params, Boolean(readAdminAuth(request)));
     if (!kind) {
       reply.code(404).send({ error: "Unknown timeline list action" });
       return;
@@ -8574,9 +8611,12 @@ function getKindParam(params: unknown) {
   return isListKind(kind) ? kind : null;
 }
 
-function getTimelineListKindParam(params: unknown): ListKind | null {
+function getTimelineListKindParam(params: unknown, adminAuthenticated: boolean): ListKind | null {
   const kind = getKindParam(params);
-  return kind === "banned_user" || kind === "banned_word" || kind === "banned_word_exception" ? kind : null;
+  if (kind === "banned_user" || kind === "banned_word" || kind === "banned_word_exception" || kind === "suggested_keyword") {
+    return kind;
+  }
+  return kind === "keyword" && adminAuthenticated ? kind : null;
 }
 
 function getIdParam(params: unknown): string {

@@ -234,9 +234,9 @@ function renderRejectedListButtons(item) {
 
 function renderRawBanWordsPromptButton(compact = false) {
   const title = compact
-    ? "Add another word or phrase to banned words."
+    ? "Add some word to ban."
     : "Add one word or phrase to banned words.";
-  return `<button type="button" class="tweet-action-button tweet-list-button${compact ? " tweet-list-plus-button" : ""}" data-list-action="add" data-list-kind="banned_word" data-list-source="prompt" data-list-prompt-button="true"${compact ? ' data-list-add-more-word="true"' : ""} title="${title}">${compact ? "+" : "Ban some words"}</button>`;
+  return `<button type="button" class="tweet-action-button tweet-list-button${compact ? " tweet-list-plus-button" : ""}" data-list-action="add" data-list-kind="banned_word" data-list-source="prompt" data-list-prompt-button="true"${compact ? ' data-list-add-more-word="true" aria-label="Add some word to ban"' : ""} title="${title}">${compact ? "+" : "Ban some words"}</button>`;
 }
 
 function suggestBannedWordException(word, text) {
@@ -821,15 +821,16 @@ async function mutateListBatch(kind, action, values, button) {
 
 rawTimelinePaginations.forEach((paginationNav) => {
   paginationNav.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-page-action]");
+    if (button && !button.disabled) {
+      event.preventDefault();
+      await changeRawTimelinePage(button.dataset.pageAction);
+      return;
+    }
     const scrollTop = event.target.closest("[data-scroll-top]");
     if (scrollTop) {
       scrollRawTimelineToTop("smooth");
-      return;
     }
-    const button = event.target.closest("[data-page-action]");
-    if (!button || button.disabled) return;
-    event.preventDefault();
-    await changeRawTimelinePage(button.dataset.pageAction);
   });
 
   paginationNav.addEventListener("change", async (event) => {

@@ -43,6 +43,7 @@ const clearSelectionButton = document.getElementById("clear-selection-button");
 const downloadListButton = document.getElementById("download-list-button");
 const cleanupListsButton = document.getElementById("cleanup-lists-button");
 const deleteAllListButton = document.getElementById("delete-all-list-button");
+const promoteAllSuggestedKeywordsButton = document.getElementById("promote-all-suggested-keywords-button");
 const activeListLabel = document.getElementById("active-list-label");
 const listSearch = document.getElementById("list-search");
 const listSearchMatches = document.getElementById("list-search-matches");
@@ -250,6 +251,8 @@ const legacyKindByFilename = new Map([
   ["Tweets.Sent", "tweet_sent"],
   ["Text.Sent", "text_sent"],
   ["No.Result", "no_result"],
+  ["Suggested.Keywords", "suggested_keyword"],
+  ["suggested_keyword.txt", "suggested_keyword"],
   ["Request.log", "request_log"],
   ["TotalApi.Call", "total_api_call"],
   ["UpdateStatus.Call", "update_status_call"],
@@ -273,6 +276,7 @@ const metricDefinitions = [
   ["rss_feed", "RSS feeds"],
   ["rss_sent", "RssSave"],
   ["no_result", "No.Result"],
+  ["suggested_keyword", "Suggested keywords"],
   ["search_terms_used", "SearchTerms.Used"],
   ["stale_keyword_user", "Stale keyword users"],
   ["skipped_keyword_user", "Skipped keyword users"],
@@ -1586,6 +1590,7 @@ async function refreshStats() {
   applyAdminAuthModeUi();
   openXSessionAlerts = data.xSessionAlerts || [];
   latestListCounts = data.lists || {};
+  updateSuggestedKeywordControls();
   renderXSessionAlertHeader();
 
   const listCounts = data.lists || {};
@@ -2144,6 +2149,7 @@ async function loadNextListPage() {
     if (!data) return;
     listState.total = data.pagination.total;
     updateActiveListLabel();
+    updateSuggestedKeywordControls();
 
     if (!data.entries.length && listState.offset === 0) {
       listContent.innerHTML = '<div class="empty-state">Empty list.</div>';
@@ -2172,6 +2178,7 @@ async function refreshList() {
   listState.total = null;
   clearSelection();
   updateActiveListLabel();
+  updateSuggestedKeywordControls();
   listContent.innerHTML = "";
   await loadNextListPage();
   await refreshListSearchMatches();
@@ -2270,6 +2277,15 @@ function appendListRows(entries) {
     .map((entry) => {
       const value = entry.rawValue || "(empty line)";
       const line = entry.lineNumber ? `line ${entry.lineNumber}` : `#${entry.id}`;
+      if (entry.kind === "suggested_keyword") {
+        return `<div class="list-row list-row-with-actions" data-entry-id="${entry.id}" data-entry-kind="${entry.kind}" data-entry-value="${encodeURIComponent(entry.rawValue)}">
+          <button class="list-row-main" type="button" title="Select this suggested keyword so it can be edited or deleted.">
+            <code>${escapeHtml(value)}</code>
+            <span>${line}</span>
+          </button>
+          <button class="list-row-action secondary-button" type="button" data-promote-suggested-keyword="${entry.id}" title="Move this suggestion into Keywords and remove it from Suggested keywords.">Add to keywords</button>
+        </div>`;
+      }
       if (entry.kind === "stale_keyword_user") {
         return `<div class="list-row list-row-with-actions" data-entry-id="${entry.id}" data-entry-kind="${entry.kind}" data-entry-value="${encodeURIComponent(entry.rawValue)}">
           <button class="list-row-main" type="button" title="Select this list entry so it can be edited or deleted.">
@@ -2297,6 +2313,14 @@ function appendListRows(entries) {
     .join("");
   listContent.insertAdjacentHTML("beforeend", html);
   selectPendingListEntryIfVisible();
+}
+
+function updateSuggestedKeywordControls() {
+  if (!promoteAllSuggestedKeywordsButton) return;
+  const isSuggestedKeywordList = listState.kind === "suggested_keyword";
+  const total = Number(listState.total ?? latestListCounts.suggested_keyword ?? 0);
+  promoteAllSuggestedKeywordsButton.classList.toggle("is-hidden", !isSuggestedKeywordList);
+  promoteAllSuggestedKeywordsButton.disabled = !isSuggestedKeywordList || total <= 0;
 }
 
 function selectPendingListEntryIfVisible() {
@@ -2375,6 +2399,39 @@ async function moveSkippedKeywordUserToStale(entryId, button) {
   if (activeAdminSection() !== "lists") {
     await refreshStaleKeywordUserPruneStatus();
   }
+}
+
+async function promoteSuggestedKeyword(entryId, button) {
+  const result = await jsonFetch(`/admin/lists/suggested_keyword/${encodeURIComponent(entryId)}/promote-keyword`, {
+    method: "POST"
+  });
+  if (!result) return;
+  showButtonFeedback(button, "Added.");
+  await refreshStats();
+  if (activeAdminSection() === "lists") {
+    await refreshList();
+  }
+}
+
+async function promoteAllSuggestedKeywords() {
+  if (!promoteAllSuggestedKeywordsButton) return;
+  const total = Number(listState.total ?? latestListCounts.suggested_keyword ?? 0);
+  const confirmed = window.confirm(`Add ${total} suggested keyword${total === 1 ? "" : "s"} to Keywords?\n\nSuggestions will be removed from Suggested keywords.`);
+  if (!confirmed) {
+    setStatus("Suggested keyword promotion cancelled.");
+    return;
+  }
+  promoteAllSuggestedKeywordsButton.disabled = true;
+  const result = await jsonFetch("/admin/lists/suggested_keyword/promote-all", {
+    method: "POST"
+  });
+  if (!result) {
+    updateSuggestedKeywordControls();
+    return;
+  }
+  showButtonFeedback(promoteAllSuggestedKeywordsButton, `Added ${result.promoted ?? 0}.`);
+  await refreshStats();
+  await refreshList();
 }
 
 async function openStaleKeywordUsersList() {
@@ -4866,6 +4923,10 @@ cleanupListsButton?.addEventListener("click", () => {
   cleanupLists().catch((error) => setStatus(error.message));
 });
 
+promoteAllSuggestedKeywordsButton?.addEventListener("click", () => {
+  promoteAllSuggestedKeywords().catch((error) => setStatus(error.message));
+});
+
 deleteAllListButton?.addEventListener("click", () => {
   deleteAllSelectedListEntries().catch((error) => setStatus(error.message));
 });
@@ -5349,6 +5410,15 @@ clearSelectionButton.addEventListener("click", () => {
   clearSelection();
 });
 listContent.addEventListener("click", (event) => {
+  const promoteSuggestedButton = event.target.closest("[data-promote-suggested-keyword]");
+  if (promoteSuggestedButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    promoteSuggestedKeyword(promoteSuggestedButton.dataset.promoteSuggestedKeyword, promoteSuggestedButton).catch((error) =>
+      setStatus(error.message)
+    );
+    return;
+  }
   const restoreButton = event.target.closest("[data-restore-stale-keyword-user]");
   if (restoreButton) {
     event.preventDefault();

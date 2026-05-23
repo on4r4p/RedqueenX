@@ -48,6 +48,7 @@ export const EDITABLE_LIST_KINDS: ListKind[] = [
   "banned_word_exception",
   "rss_feed",
   "no_result",
+  "suggested_keyword",
   "search_terms_used",
   "stale_keyword_user",
   "skipped_keyword_user"

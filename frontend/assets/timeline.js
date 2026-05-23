@@ -21,6 +21,7 @@ const timelineState = {
   total: 0,
   hasMore: false
 };
+let timelineAuthRole = "timeline";
 
 function cookieValue(name) {
   const prefix = `${name}=`;
@@ -52,6 +53,17 @@ async function applyPublicConfig() {
     });
   } catch {
     // Keep the local /admin link when public config cannot be loaded.
+  }
+}
+
+async function applyTimelineAuth() {
+  try {
+    const response = await fetch("/timeline/auth");
+    if (!response.ok) return;
+    const data = await response.json();
+    timelineAuthRole = data.user?.role === "admin" ? "admin" : "timeline";
+  } catch {
+    timelineAuthRole = "timeline";
   }
 }
 
@@ -302,6 +314,7 @@ function renderListButtons(item) {
     ${banUser}
     ${renderBanWordsPromptButton(false)}
     ${renderBannedWordExceptionPromptButton()}
+    ${renderKeywordPromptButton()}
     ${loadMedia}
     ${renderRedditTimelineItemButton(item)}
   </div>`;
@@ -309,13 +322,21 @@ function renderListButtons(item) {
 
 function renderBanWordsPromptButton(compact = false) {
   const title = compact
-    ? "Add another word or phrase to banned words."
+    ? "Add some word to ban."
     : "Add one word or phrase to banned words.";
-  return `<button type="button" class="tweet-action-button tweet-list-button${compact ? " tweet-list-plus-button" : ""}" data-list-action="add" data-list-kind="banned_word" data-list-source="prompt" data-list-prompt-button="true"${compact ? ' data-list-add-more-word="true"' : ""} title="${title}">${compact ? "+" : "Ban some words"}</button>`;
+  return `<button type="button" class="tweet-action-button tweet-list-button${compact ? " tweet-list-plus-button" : ""}" data-list-action="add" data-list-kind="banned_word" data-list-source="prompt" data-list-prompt-button="true"${compact ? ' data-list-add-more-word="true" aria-label="Add some word to ban"' : ""} title="${title}">${compact ? "+" : "Ban some words"}</button>`;
 }
 
 function renderBannedWordExceptionPromptButton() {
   return `<button type="button" class="tweet-action-button tweet-list-button" data-list-action="add" data-list-kind="banned_word_exception" data-list-source="prompt" data-list-prompt-button="true" title="Add an allowed phrase that contains a banned word.">Add exception</button>`;
+}
+
+function renderKeywordPromptButton() {
+  const isAdmin = timelineAuthRole === "admin";
+  const kind = isAdmin ? "keyword" : "suggested_keyword";
+  const label = isAdmin ? "Add keyword" : "Suggest keyword";
+  const title = isAdmin ? "Add a search keyword directly to Keywords." : "Suggest a search keyword for admin review.";
+  return `<button type="button" class="tweet-action-button tweet-list-button" data-list-action="add" data-list-kind="${kind}" data-list-source="prompt" data-list-prompt-button="true" title="${title}">${label}</button>`;
 }
 
 function needsMediaReload(item) {
@@ -417,10 +438,14 @@ async function refreshTimeline() {
 }
 
 applyPublicConfig().catch(() => undefined);
-refreshTimeline().catch((error) => {
-  timelineStatus.textContent = error instanceof Error ? error.message : "Timeline failed to load.";
-  timeline.innerHTML = '<div class="empty-state">Timeline failed to load.</div>';
-});
+applyTimelineAuth()
+  .catch(() => undefined)
+  .finally(() => {
+    refreshTimeline().catch((error) => {
+      timelineStatus.textContent = error instanceof Error ? error.message : "Timeline failed to load.";
+      timeline.innerHTML = '<div class="empty-state">Timeline failed to load.</div>';
+    });
+  });
 
 function pageSummary(pagination, itemCount) {
   if (!pagination.total) return "";
@@ -598,11 +623,43 @@ function selectedTextInside(button) {
 }
 
 function listActionText(kind, action) {
-  const target = kind === "banned_user" ? "user" : kind === "banned_word_exception" ? "exception" : "word";
+  const target = listTargetName(kind);
+  if ((kind === "keyword" || kind === "suggested_keyword") && action === "add") return "Add keyword";
+  if ((kind === "keyword" || kind === "suggested_keyword") && action === "delete") return "Remove keyword";
   if (kind === "banned_word_exception" && action === "add") return "Add exception";
   if (kind === "banned_word_exception" && action === "delete") return "Remove exception";
   if (action === "delete") return `Unban ${target}`;
   return `Ban ${target}`;
+}
+
+function listTargetName(kind) {
+  if (kind === "banned_user") return "user";
+  if (kind === "banned_word_exception") return "exception";
+  if (kind === "keyword" || kind === "suggested_keyword") return "keyword";
+  return "word";
+}
+
+function listCollectionLabel(kind) {
+  if (kind === "banned_user") return "banned users";
+  if (kind === "banned_word_exception") return "banned word exceptions";
+  if (kind === "keyword") return "keywords";
+  if (kind === "suggested_keyword") return "suggested keywords";
+  return "banned words";
+}
+
+function listPendingFeedback(kind, action, wasReadd = false) {
+  if (action === "delete") return "Removing...";
+  if (kind === "keyword") return "Adding keyword...";
+  if (kind === "suggested_keyword") return "Suggesting...";
+  return wasReadd ? "Rebanning..." : "Banning...";
+}
+
+function listSuccessFeedback(kind, action, wasReadd = false, count = 1) {
+  if (kind === "keyword") return action === "delete" ? "Keyword removed." : "Keyword added.";
+  if (kind === "suggested_keyword") return action === "delete" ? "Suggestion removed." : "Keyword suggested.";
+  if (kind === "banned_word_exception") return action === "delete" ? "Exception removed." : count > 1 ? `Added ${count} exceptions.` : "Exception added.";
+  if (action === "delete") return "Unbanned.";
+  return wasReadd ? "Rebanned." : count > 1 ? `Banned ${count}.` : "Banned.";
 }
 
 function shortListButtonValue(value) {
@@ -612,9 +669,17 @@ function shortListButtonValue(value) {
 }
 
 function listButtonText(button, kind, action, value = "") {
-  const target = kind === "banned_user" ? "user" : kind === "banned_word_exception" ? "exception" : "word";
+  const target = listTargetName(kind);
   const displayValue = shortListButtonValue(value || button.dataset.listValue);
   if (action === "add" && kind === "banned_word" && !displayValue && button.dataset.listPromptButton === "true") return "Ban some words";
+  if (kind === "keyword") {
+    if (action === "delete") return displayValue ? `Remove keyword ${displayValue}` : "Remove keyword";
+    return displayValue ? `Add keyword ${displayValue}` : "Add keyword";
+  }
+  if (kind === "suggested_keyword") {
+    if (action === "delete") return displayValue ? `Remove suggestion ${displayValue}` : "Remove suggestion";
+    return displayValue ? `Suggest ${displayValue}` : "Suggest keyword";
+  }
   if (kind === "banned_word_exception") {
     if (action === "delete") return displayValue ? `Remove exception ${displayValue}` : "Remove exception";
     return displayValue ? `Allow ${displayValue}` : "Add exception";
@@ -680,7 +745,7 @@ function setListButtonAction(button, kind, action, value, options = {}) {
     button.dataset.listValue = normalizedValue;
     delete button.dataset.listValues;
     delete button.dataset.listSource;
-  } else if (kind === "banned_word" || kind === "banned_word_exception") {
+  } else if (kind === "banned_word" || kind === "banned_word_exception" || kind === "keyword" || kind === "suggested_keyword") {
     delete button.dataset.listValue;
     delete button.dataset.listValues;
     button.dataset.listSource = "prompt";
@@ -688,7 +753,7 @@ function setListButtonAction(button, kind, action, value, options = {}) {
   button.textContent = listButtonText(button, kind, action, normalizedValue);
   button.disabled = false;
 
-  const label = kind === "banned_user" ? "banned users" : kind === "banned_word_exception" ? "banned word exceptions" : "banned words";
+  const label = listCollectionLabel(kind);
   if (action === "delete" && normalizedValue) {
     button.title = `Remove ${normalizedValue} from ${label}.`;
   } else if (action === "add" && normalizedValue && options.readd) {
@@ -701,6 +766,10 @@ function setListButtonAction(button, kind, action, value, options = {}) {
         ? "Add one allowed phrase to banned word exceptions."
         : kind === "banned_word"
           ? "Add one word or phrase to banned words."
+          : kind === "keyword"
+            ? "Add a search keyword directly to Keywords."
+            : kind === "suggested_keyword"
+              ? "Suggest a search keyword for admin review."
           : `Add this user to ${label}.`;
   }
 }
@@ -717,10 +786,12 @@ function setListButtonBatchDeleteAction(button, kind, values) {
   button.textContent =
     kind === "banned_word_exception"
       ? `Remove ${normalizedValues.length} exceptions`
-      : `Unban ${normalizedValues.length} ${kind === "banned_user" ? "users" : "words"}`;
-  button.title = `Remove ${normalizedValues.join(", ")} from ${
-    kind === "banned_user" ? "banned users" : kind === "banned_word_exception" ? "banned word exceptions" : "banned words"
-  }.`;
+      : kind === "keyword"
+        ? `Remove ${normalizedValues.length} keywords`
+        : kind === "suggested_keyword"
+          ? `Remove ${normalizedValues.length} suggestions`
+          : `Unban ${normalizedValues.length} ${kind === "banned_user" ? "users" : "words"}`;
+  button.title = `Remove ${normalizedValues.join(", ")} from ${listCollectionLabel(kind)}.`;
   button.disabled = false;
 }
 
@@ -753,8 +824,9 @@ async function mutateList(kind, action, value, button) {
   }
   const wasReadd = action === "add" && button.dataset.listReadd === "true";
   button.disabled = true;
-  timelineStatus.textContent = action === "delete" ? `Removing ${normalizedValue} from ${kind}...` : `Adding ${normalizedValue} to ${kind}...`;
-  setListButtonFeedback(button, action === "delete" ? "Removing..." : wasReadd ? "Rebanning..." : "Banning...");
+  const label = listCollectionLabel(kind);
+  timelineStatus.textContent = action === "delete" ? `Removing ${normalizedValue} from ${label}...` : `Adding ${normalizedValue} to ${label}...`;
+  setListButtonFeedback(button, listPendingFeedback(kind, action, wasReadd));
   const response = await csrfFetch(`/timeline/lists/${encodeURIComponent(kind)}`, {
     method: action === "delete" ? "DELETE" : "POST",
     headers: { "content-type": "application/json" },
@@ -773,24 +845,13 @@ async function mutateList(kind, action, value, button) {
     setListButtonFeedback(button, error.error || "List update failed.", "error");
     return;
   }
-  const label = kind === "banned_user" ? "banned users" : kind === "banned_word_exception" ? "banned word exceptions" : "banned words";
   timelineStatus.textContent = action === "delete" ? `Removed ${normalizedValue} from ${label}.` : `Added ${normalizedValue} to ${label}.`;
   if (action === "delete" && kind === "banned_word" && button.dataset.listPromptButton === "true") {
     removePromptBanWordButton(button);
     return;
   }
   setListButtonAction(button, kind, action === "delete" ? "add" : "delete", normalizedValue, { readd: action === "delete" });
-  const successMessage =
-    kind === "banned_word_exception"
-      ? action === "delete"
-        ? "Exception removed."
-        : "Exception added."
-      : action === "delete"
-        ? "Unbanned."
-        : wasReadd
-          ? "Rebanned."
-          : "Banned.";
-  setListButtonFeedback(button, successMessage, "success");
+  setListButtonFeedback(button, listSuccessFeedback(kind, action, wasReadd), "success");
   if (action === "add" && kind === "banned_word" && button.dataset.listPromptButton === "true") {
     ensureAdditionalBanWordButton(button);
   }
@@ -842,9 +903,9 @@ async function mutateListBatch(kind, action, values, button) {
     return;
   }
   button.disabled = true;
-  const label = kind === "banned_user" ? "banned users" : kind === "banned_word_exception" ? "banned word exceptions" : "banned words";
-  timelineStatus.textContent = action === "delete" ? `Removing ${normalizedValues.length} values from ${kind}...` : `Adding ${normalizedValues.length} values to ${kind}...`;
-  setListButtonFeedback(button, action === "delete" ? "Removing..." : "Banning...");
+  const label = listCollectionLabel(kind);
+  timelineStatus.textContent = action === "delete" ? `Removing ${normalizedValues.length} values from ${label}...` : `Adding ${normalizedValues.length} values to ${label}...`;
+  setListButtonFeedback(button, listPendingFeedback(kind, action));
   for (const value of normalizedValues) {
     const response = await csrfFetch(`/timeline/lists/${encodeURIComponent(kind)}`, {
       method: action === "delete" ? "DELETE" : "POST",
@@ -872,12 +933,12 @@ async function mutateListBatch(kind, action, values, button) {
     } else {
       button.disabled = false;
     }
-    setListButtonFeedback(button, kind === "banned_word_exception" ? "Exceptions removed." : "Unbanned.", "success");
+    setListButtonFeedback(button, listSuccessFeedback(kind, action, false, normalizedValues.length), "success");
     return;
   }
   timelineStatus.textContent = `Added ${normalizedValues.length} values to ${label}.`;
   setListButtonBatchDeleteAction(button, kind, normalizedValues);
-  setListButtonFeedback(button, kind === "banned_word_exception" ? `Added ${normalizedValues.length} exceptions.` : `Banned ${normalizedValues.length}.`, "success");
+  setListButtonFeedback(button, listSuccessFeedback(kind, action, false, normalizedValues.length), "success");
   if (kind === "banned_word" && button.dataset.listPromptButton === "true") {
     ensureAdditionalBanWordButton(button);
   }
@@ -885,15 +946,16 @@ async function mutateListBatch(kind, action, values, button) {
 
 timelinePaginations.forEach((paginationNav) => {
   paginationNav.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-page-action]");
+    if (button && !button.disabled) {
+      event.preventDefault();
+      await changeTimelinePage(button.dataset.pageAction);
+      return;
+    }
     const scrollTop = event.target.closest("[data-scroll-top]");
     if (scrollTop) {
       scrollTimelineToTop("smooth");
-      return;
     }
-    const button = event.target.closest("[data-page-action]");
-    if (!button || button.disabled) return;
-    event.preventDefault();
-    await changeTimelinePage(button.dataset.pageAction);
   });
 
   paginationNav.addEventListener("change", async (event) => {
@@ -1114,12 +1176,14 @@ timeline.addEventListener("click", async (event) => {
       const promptMessage =
         kind === "banned_word_exception"
           ? "Allowed phrase to ignore when checking banned words:"
+          : kind === "keyword" || kind === "suggested_keyword"
+            ? "Keyword to search:"
           : "Word or phrase to add to banned words:";
       const promptValue = window.prompt(promptMessage, selected) || "";
       values = parsePromptListValues(promptValue);
       value = values[0] || "";
     }
-    if (kind !== "banned_word" && kind !== "banned_user" && kind !== "banned_word_exception") {
+    if (kind !== "banned_word" && kind !== "banned_user" && kind !== "banned_word_exception" && kind !== "keyword" && kind !== "suggested_keyword") {
       timelineStatus.textContent = "Unsupported list action.";
       return;
     }

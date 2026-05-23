@@ -9,6 +9,7 @@ export const LIST_KINDS = [
   "tweet_sent",
   "text_sent",
   "no_result",
+  "suggested_keyword",
   "request_log",
   "total_api_call",
   "update_status_call",
