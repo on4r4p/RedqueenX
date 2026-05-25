@@ -34,6 +34,7 @@ export interface CachedMediaItem {
   altText?: string;
   width?: number;
   height?: number;
+  remoteUrl?: string | null;
   cacheId: string | null;
   cacheStatus: MediaCacheStatus;
   cachedUrl: string | null;
@@ -273,6 +274,7 @@ export class MediaCacheService {
         altText: media.altText,
         width: media.width,
         height: media.height,
+        remoteUrl: null,
         cacheId: null,
         cacheStatus: "no_source",
         cachedUrl: null,
@@ -285,6 +287,7 @@ export class MediaCacheService {
       altText: media.altText,
       width: media.width,
       height: media.height,
+      remoteUrl: directDisplayMediaUrl(sourceUrl),
       ...cached
     };
   }
@@ -346,6 +349,29 @@ export function sourceUrlFromMedia(media: TweetMedia): string | null {
     return null;
   }
   return media.videoUrl ?? media.url ?? media.previewImageUrl ?? null;
+}
+
+function directDisplayMediaUrl(sourceUrl: string): string | null {
+  try {
+    const url = new URL(sourceUrl);
+    const hostname = url.hostname.toLowerCase();
+    if (url.protocol !== "https:") {
+      return null;
+    }
+    if (
+      hostname === "i.redd.it" ||
+      hostname === "v.redd.it" ||
+      hostname === "preview.redd.it" ||
+      hostname === "external-preview.redd.it" ||
+      hostname === "redditmedia.com" ||
+      hostname.endsWith(".redditmedia.com")
+    ) {
+      return url.toString();
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function mapRow(row: MediaCacheRow): MediaCacheEntry {

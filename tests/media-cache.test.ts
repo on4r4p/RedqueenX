@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { MediaCacheService } from "../src/admin/mediaCacheService";
+import { TimelineItemService } from "../src/admin/timelineItemService";
 import { TimelineTweetService } from "../src/admin/timelineTweetService";
 import { openMemoryDatabase } from "../src/db/database";
 import type { ScoreDecision, TweetCandidate } from "../src/types";
@@ -41,6 +42,37 @@ describe("media cache", () => {
     expect(cached.media[0].cachedUrl).toMatch(/^\/media-cache\/[a-f0-9]{32}$/);
     expect(JSON.stringify(cached)).not.toContain(sourceUrl);
     expect(JSON.stringify(cached)).not.toContain("pbs.twimg.com");
+  });
+
+  it("allows direct display URLs for Reddit-hosted media only", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-media-cache-"));
+    const database = openMemoryDatabase();
+    const timelineItems = new TimelineItemService(database);
+    const mediaCache = new MediaCacheService(database, {
+      enabled: false,
+      cacheDir: tmp,
+      ttlHours: 24,
+      maxBytes: 10 * 1024 * 1024,
+      maxFileBytes: 1024 * 1024
+    });
+
+    timelineItems.save({
+      source: "reddit",
+      externalId: "reddit-media",
+      text: "reddit media",
+      media: [
+        {
+          type: "photo",
+          url: "https://i.redd.it/reddit-media.png",
+          previewImageUrl: "https://preview.redd.it/reddit-media.png"
+        }
+      ]
+    });
+
+    const decorated = mediaCache.decorateTimelineItem(timelineItems.latest(1)[0]);
+
+    expect(decorated.media[0].remoteUrl).toBe("https://i.redd.it/reddit-media.png");
+    expect(decorated.media[0].cachedUrl).toBeNull();
   });
 
   it("keeps cached media indefinitely when ttl is zero", () => {

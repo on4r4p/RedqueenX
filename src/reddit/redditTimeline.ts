@@ -3,6 +3,8 @@ import type { TimelineItemService } from "../admin/timelineItemService";
 import { isHandleSearchKeyword } from "../text";
 import type { RedditCrawler, RedditPost } from "./redditCrawler";
 
+const redditTextMaxCharacters = 700;
+
 export interface RedditSearchResult {
   searchedKeywords: number;
   skippedHandleKeywords: number;
@@ -68,7 +70,7 @@ function redditPostToTimelineItem(post: RedditPost) {
     externalId: post.id,
     keyword: post.keyword,
     title: post.title,
-    text: post.text,
+    text: truncateRedditText(post.text, post.title),
     author: `u/${post.author}`,
     authorName: `r/${post.subreddit}`,
     itemUrl: post.permalink,
@@ -77,10 +79,21 @@ function redditPostToTimelineItem(post: RedditPost) {
     engagementScore: post.score,
     commentsCount: post.commentsCount,
     reasons: ["reddit_crawl"],
+    media: post.media,
     urls: [post.url, post.permalink].filter((url, index, urls) => url && urls.indexOf(url) === index),
     metadata: {
       subreddit: post.subreddit,
       commentsCount: post.commentsCount
     }
   };
+}
+
+function truncateRedditText(text: string, title: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const titleLength = title && normalized !== title ? title.length + 1 : 0;
+  const maxTextCharacters = Math.max(80, redditTextMaxCharacters - titleLength);
+  if (normalized.length <= maxTextCharacters) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxTextCharacters - 3).trimEnd()}...`;
 }
