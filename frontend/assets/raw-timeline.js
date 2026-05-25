@@ -92,14 +92,49 @@ function linkify(text) {
   let output = "";
   let lastIndex = 0;
   for (const match of source.matchAll(urlPattern)) {
-    const url = match[0];
+    const { url, suffix } = splitLinkifiedUrl(match[0]);
     const index = match.index ?? 0;
     output += linkifyMentionsAndHashtags(source.slice(lastIndex, index));
     output += `<span class="external-link-disabled" data-external-url="${escapeAttr(url)}" title="Click to open this URL.">${escapeHtml(url)}</span>`;
-    lastIndex = index + url.length;
+    output += linkifyMentionsAndHashtags(suffix);
+    lastIndex = index + match[0].length;
   }
   output += linkifyMentionsAndHashtags(source.slice(lastIndex));
   return output;
+}
+
+function splitLinkifiedUrl(value) {
+  let url = String(value || "");
+  let suffix = "";
+  while (url.length > 0) {
+    const last = url.at(-1);
+    if (/[.,!?;:]/.test(last)) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === ")" && countCharacters(url, ")") > countCharacters(url, "(")) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === "]" && countCharacters(url, "]") > countCharacters(url, "[")) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === "}" && countCharacters(url, "}") > countCharacters(url, "{")) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    break;
+  }
+  return { url, suffix };
+}
+
+function countCharacters(value, character) {
+  return String(value || "").split(character).length - 1;
 }
 
 function linkifyMentionsAndHashtags(text) {
