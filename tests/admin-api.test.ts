@@ -481,6 +481,46 @@ describe("admin api", () => {
     });
     expect(timelineUserAdminDeleteDenied.statusCode).toBe(401);
 
+    database.prepare("INSERT INTO runs (id, status, started_at, updated_at, stats_json) VALUES (?, ?, ?, ?, ?)").run(
+      "run-timeline-clear-rejected",
+      "stopped",
+      "2026-05-07T11:30:00.000Z",
+      "2026-05-07T11:30:00.000Z",
+      "{}"
+    );
+    database
+      .prepare(
+        `INSERT INTO raw_timeline_tweets (
+          run_id,
+          tweet_id,
+          source_keyword,
+          text,
+          decision_status,
+          rejection_reasons_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        "run-timeline-clear-rejected",
+        "tweet-timeline-clear-rejected",
+        "keyword",
+        "timeline clear rejected tweet",
+        "rejected",
+        JSON.stringify(["score_too_low"])
+      );
+    const timelineUserClearsRejectedTimeline = await app.inject({
+      method: "DELETE",
+      url: "/timeline/rejected-timeline",
+      headers: timelineHeaders
+    });
+    expect(timelineUserClearsRejectedTimeline.statusCode).toBe(200);
+    expect(timelineUserClearsRejectedTimeline.json()).toEqual({ deleted: 1 });
+    expect(
+      database
+        .prepare("SELECT COUNT(*) AS total FROM raw_timeline_tweets WHERE run_id = ? AND decision_status = 'rejected'")
+        .get("run-timeline-clear-rejected")
+    ).toEqual({ total: 0 });
+
     await app.inject({
       method: "POST",
       url: "/admin/lists/rss_feed",

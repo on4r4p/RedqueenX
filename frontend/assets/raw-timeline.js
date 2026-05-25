@@ -906,10 +906,10 @@ rejectedTimelineClearAll?.addEventListener("click", () => {
   rejectedTimelineClearAll.disabled = true;
   rejectedTimelineClearAll.textContent = "Clearing...";
   rawTimelineStatus.textContent = "Clearing rejected timeline...";
-  csrfFetch("/admin/rejected-timeline", { method: "DELETE" })
+  csrfFetch("/timeline/rejected-timeline", { method: "DELETE" })
     .then(async (response) => {
       if (response.status === 401) {
-        rawTimelineStatus.textContent = "Admin login required before clearing rejected timeline.";
+        rawTimelineStatus.textContent = "Timeline login required before clearing rejected timeline.";
         return null;
       }
       const result = await response.json().catch(() => ({ error: "Clear rejected timeline failed" }));
@@ -924,7 +924,10 @@ rejectedTimelineClearAll?.addEventListener("click", () => {
       return result;
     })
     .catch((error) => {
-      rawTimelineStatus.textContent = error.message || "Unable to clear rejected timeline.";
+      rawTimelineStatus.textContent =
+        error instanceof TypeError
+          ? "Network error while clearing rejected timeline. Refresh and try again."
+          : error.message || "Unable to clear rejected timeline.";
     })
     .finally(() => {
       rejectedTimelineClearAll.disabled = false;

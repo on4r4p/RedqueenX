@@ -1108,10 +1108,18 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   app.get("/rejected-timeline/data", async (request) => rejectedTimelineDataResponse(request.query));
 
-  app.delete("/admin/rejected-timeline", async () => {
+  async function clearRejectedTimeline(actor: "admin" | "timeline") {
     const deleted = rawTimelineTweets.clearRejected();
-    await recordSession("info", "rejected_timeline.clear", "Rejected timeline entries deleted", { deleted });
+    await recordSession("info", "rejected_timeline.clear", "Rejected timeline entries deleted", { actor, deleted });
     return { deleted };
+  }
+
+  app.delete("/admin/rejected-timeline", async () => {
+    return clearRejectedTimeline("admin");
+  });
+
+  app.delete("/timeline/rejected-timeline", async () => {
+    return clearRejectedTimeline("timeline");
   });
 
   app.post("/admin/rejected-timeline/accept", async (request, reply) => {
@@ -6626,6 +6634,7 @@ function isTimelineProtectedPath(pathName: string): boolean {
     pathName.startsWith("/timeline/lists/") ||
     pathName.startsWith("/timeline/tweets/") ||
     pathName.startsWith("/timeline/media-cache/jobs/") ||
+    pathName === "/timeline/rejected-timeline" ||
     pathName === "/timeline/rejected-timeline/accept" ||
     pathName.startsWith("/media-cache/")
   );
