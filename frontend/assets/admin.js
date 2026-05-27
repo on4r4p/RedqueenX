@@ -3,10 +3,6 @@ const adminNavMore = document.getElementById("admin-nav-more");
 const metrics = document.getElementById("metrics");
 const countersUpdatedAt = document.getElementById("counters-updated-at");
 const sessionKeywordWarning = document.getElementById("session-keyword-warning");
-const runPreviewRefreshButton = document.getElementById("run-preview-refresh-button");
-const runPreviewSummary = document.getElementById("run-preview-summary");
-const runPreviewList = document.getElementById("run-preview-list");
-const runPreviewOpenState = new Set();
 const systemHealthRefreshButton = document.getElementById("system-health-refresh-button");
 const systemHealthUpdated = document.getElementById("system-health-updated");
 const systemHealthSummary = document.getElementById("system-health-summary");
@@ -2563,7 +2559,6 @@ async function openCurrentSessionSection() {
   await refreshStats();
   await refreshCurrentSession();
   await refreshSessionKeywords();
-  await refreshRunPreview();
 }
 
 async function openCurrentSessionForLiveFollow() {
@@ -3350,60 +3345,6 @@ async function refreshSessionKeywords() {
     .join("");
 }
 
-async function refreshRunPreview() {
-  if (!runPreviewList || !runPreviewSummary) return;
-  const data = await jsonFetch("/admin/runs/preview");
-  if (!data) return;
-  const availability = data.availability || {};
-  const previews = Array.isArray(data.previews)
-    ? data.previews
-    : [{ runIndex: 1, plannedKeywords: data.plannedKeywords ?? 0, sample: Array.isArray(data.sample) ? data.sample : [] }];
-  const previewLabel =
-    data.source === "active_run"
-      ? `${previews.length} active run${previews.length === 1 ? "" : "s"}`
-      : `${previews.length} fresh run preview${previews.length === 1 ? "" : "s"}`;
-  runPreviewSummary.textContent = [
-    previewLabel,
-    `${availability.availableKeywords ?? 0} available now`,
-    `${availability.excludedBySearchTermsUsed ?? 0} already searched`,
-    `${availability.excludedByNoResult ?? 0} no-result excluded`
-  ].join(" - ");
-  if (!previews.some((preview) => Array.isArray(preview.sample) && preview.sample.length > 0)) {
-    runPreviewList.innerHTML =
-      data.source === "active_run"
-        ? '<div class="empty-state">Active run has no keyword rows loaded.</div>'
-        : '<div class="empty-state">No eligible keyword for the next run. SearchTerms.Used and/or No.Result currently exclude every active keyword.</div>';
-    return;
-  }
-  runPreviewList.innerHTML = previews
-    .map((preview) => renderRunPreviewPanel(preview))
-    .join("");
-}
-
-function renderRunPreviewPanel(preview) {
-  const runIndex = String(preview.runIndex ?? 1);
-  const keywords = Array.isArray(preview.sample) ? preview.sample : [];
-  const plannedCount = Number.isFinite(Number(preview.plannedKeywords)) ? Number(preview.plannedKeywords) : keywords.length;
-  const status = preview.status === "active" ? "active" : preview.status === "queued" ? "queued" : "planned";
-  const isOpen = runPreviewOpenState.has(runIndex);
-  const rows = keywords.length
-    ? keywords
-        .map((keyword, index) => `<div class="session-keyword-row">
-          <span>#${index + 1}</span>
-          <strong>${escapeHtml(keyword)}</strong>
-          <em>${escapeHtml(status)}</em>
-        </div>`)
-        .join("")
-    : '<div class="empty-state">No eligible keyword left for this run preview.</div>';
-  return `<details class="run-preview-panel" data-run-preview-index="${escapeAttribute(runIndex)}"${isOpen ? " open" : ""}>
-    <summary>
-      <strong>Run ${escapeHtml(runIndex)} - ${escapeHtml(status)}</strong>
-      <span>${escapeHtml(String(plannedCount))} planned</span>
-    </summary>
-    <div class="session-keywords-list">${rows}</div>
-  </details>`;
-}
-
 function updateSessionStickStateFromScroll() {
   if (!sessionLog) return;
   sessionShouldStickBottom = isSessionLogNearBottom();
@@ -3656,7 +3597,6 @@ function updateSessionPolling() {
     sessionRefreshTimer = setInterval(() => {
       refreshCurrentSession().catch((error) => setStatus(error.message));
       refreshSessionKeywords().catch((error) => setStatus(error.message));
-      refreshRunPreview().catch((error) => setStatus(error.message));
     }, 2000);
   }
 }
@@ -3674,7 +3614,6 @@ function selectSessionLevel(selectedInput) {
 function refreshCurrentSessionSoon() {
   refreshCurrentSession().catch((error) => setStatus(error.message));
   refreshSessionKeywords().catch((error) => setStatus(error.message));
-  refreshRunPreview().catch((error) => setStatus(error.message));
 }
 
 function currentEditKindLabel() {
@@ -4445,7 +4384,6 @@ async function runAction(action, options = {}) {
       setStatus(`Run started: ${result.run.id}`);
     }
     await openCurrentSessionSection();
-    await refreshRunPreview();
     return;
   }
 
@@ -4472,7 +4410,6 @@ async function runAction(action, options = {}) {
   if (activeAdminSection() === "session") {
     await refreshCurrentSession();
     await refreshSessionKeywords();
-    await refreshRunPreview();
   }
 }
 
@@ -4503,7 +4440,6 @@ async function maybeResetSearchTermsUsedForStart(error, options = {}) {
   );
   if (!confirmed) {
     setStatus("Start cancelled. SearchTerms.Used was not reset.");
-    await refreshRunPreview();
     return true;
   }
 
@@ -4511,7 +4447,6 @@ async function maybeResetSearchTermsUsedForStart(error, options = {}) {
   const reset = await jsonFetch(resetEndpoint, { method: "POST" });
   setStatus(`SearchTerms.Used reset: ${reset?.deleted ?? 0} active entries cleared. Starting a fresh run...`);
   await refreshStats();
-  await refreshRunPreview();
   return true;
 }
 
@@ -5333,7 +5268,6 @@ document.querySelectorAll("[data-admin-section-target]").forEach((button) => {
       refreshStats().catch((error) => setStatus(error.message));
       refreshCurrentSession().catch((error) => setStatus(error.message));
       refreshSessionKeywords().catch((error) => setStatus(error.message));
-      refreshRunPreview().catch((error) => setStatus(error.message));
     }
     if (section === "tests") {
       refreshBrowserSnapshots().catch((error) => setStatus(error.message));
@@ -5427,26 +5361,10 @@ sessionAlertDetail?.addEventListener("input", (event) => {
 sessionRefreshButton.addEventListener("click", () => {
   refreshCurrentSession().catch((error) => setStatus(error.message));
   refreshSessionKeywords().catch((error) => setStatus(error.message));
-  refreshRunPreview().catch((error) => setStatus(error.message));
 });
 sessionKeywordsRefreshButton?.addEventListener("click", () => {
   refreshSessionKeywords().catch((error) => setStatus(error.message));
-  refreshRunPreview().catch((error) => setStatus(error.message));
 });
-runPreviewRefreshButton?.addEventListener("click", () => {
-  refreshRunPreview().catch((error) => setStatus(error.message));
-});
-runPreviewList?.addEventListener("toggle", (event) => {
-  const panel = event.target.closest?.("[data-run-preview-index]");
-  if (!panel) return;
-  const runIndex = panel.dataset.runPreviewIndex;
-  if (!runIndex) return;
-  if (panel.open) {
-    runPreviewOpenState.add(runIndex);
-  } else {
-    runPreviewOpenState.delete(runIndex);
-  }
-}, true);
 sessionLog?.addEventListener("scroll", updateSessionStickStateFromScroll);
 sessionStickBottom?.addEventListener("change", () => {
   sessionShouldStickBottom = Boolean(sessionStickBottom.checked);
@@ -5644,15 +5562,11 @@ if (initialAdminSection && document.getElementById(`admin-section-${initialAdmin
   if (initialAdminSection === "system") {
     refreshSystemHealth().catch((error) => setStatus(error.message));
   }
-  if (initialAdminSection === "session") {
-    refreshRunPreview().catch((error) => setStatus(error.message));
-  }
   updateSessionPolling();
 } else {
   updateSessionPolling();
   refreshCurrentSession().catch((error) => setStatus(error.message));
   refreshSessionKeywords().catch((error) => setStatus(error.message));
-  refreshRunPreview().catch((error) => setStatus(error.message));
 }
 
 refreshStats()
