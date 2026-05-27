@@ -1108,10 +1108,18 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   app.get("/rejected-timeline/data", async (request) => rejectedTimelineDataResponse(request.query));
 
-  app.delete("/admin/rejected-timeline", async () => {
+  async function clearRejectedTimeline(actor: "admin" | "timeline") {
     const deleted = rawTimelineTweets.clearRejected();
-    await recordSession("info", "rejected_timeline.clear", "Rejected timeline entries deleted", { deleted });
+    await recordSession("info", "rejected_timeline.clear", "Rejected timeline entries deleted", { actor, deleted });
     return { deleted };
+  }
+
+  app.delete("/admin/rejected-timeline", async () => {
+    return clearRejectedTimeline("admin");
+  });
+
+  app.delete("/timeline/rejected-timeline", async () => {
+    return clearRejectedTimeline("timeline");
   });
 
   app.post("/admin/rejected-timeline/accept", async (request, reply) => {
@@ -1528,17 +1536,35 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
 
   app.get("/admin/runs/preview", async () => {
     const runtimeConfig = getXApiConfig();
-    const runCount = Math.max(1, Math.floor(runtimeConfig.runChainCount ?? 1));
-    const previews = plannedKeywordBatches(lists, runtimeConfig, runCount).map((preview) => ({
+    const currentRun = runs.current();
+    const activePlan = currentRun ? currentRunKeywordPlanPreview(runs, currentRun) : null;
+    if (activePlan) {
+      const firstPreview = activePlan.previews[0] ?? { plannedKeywords: 0, sample: [] };
+      return {
+        generatedAt: new Date().toISOString(),
+        availability: keywordAvailability(lists),
+        source: "active_run",
+        run: { id: currentRun?.id, status: currentRun?.status, isCurrent: true },
+        runCount: activePlan.runCount,
+        plannedKeywords: firstPreview.plannedKeywords,
+        sample: firstPreview.sample,
+        previews: activePlan.previews
+      };
+    }
+
+    const keywordChain = plannedKeywordChain(lists, runtimeConfig);
+    const previews = keywordChain.batches.map((preview) => ({
       runIndex: preview.runIndex,
       plannedKeywords: preview.keywords.length,
-      sample: preview.keywords
+      sample: preview.keywords,
+      status: "planned"
     }));
     const firstPreview = previews[0] ?? { plannedKeywords: 0, sample: [] };
     return {
       generatedAt: new Date().toISOString(),
       availability: keywordAvailability(lists),
-      runCount,
+      source: "fresh_preview",
+      runCount: keywordChain.chain.total,
       plannedKeywords: firstPreview.plannedKeywords,
       sample: firstPreview.sample,
       previews
@@ -2047,7 +2073,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       total: stats.totalKeywords,
       loaded: keywords.length,
       completedKeywords: stats.completedKeywords,
-      currentKeyword: stats.currentKeyword
+      currentKeyword: stats.currentKeyword,
+      chain: runChainSummaryFromStats(stats)
     };
   });
 
@@ -2831,9 +2858,10 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         await stopRunForFreshStart(existing, "without_api");
       }
 
-      const keywords = plannedKeywords(lists, runtimeConfig);
+      const keywordChain = plannedKeywordChain(lists, runtimeConfig);
+      const keywords = keywordChain.keywords;
       const availability = keywordAvailability(lists);
-      const run = runs.start(createInitialRunStats(lists, runtimeConfig, keywords));
+      const run = runs.start(createInitialRunStats(lists, runtimeConfig, keywords, keywordChain.chain, keywordChain.futureBatches));
       runs.replaceKeywords(run.id, keywords);
       await recordSession("info", "run.started", "Fresh run started from start action", {
         runId: run.id,
@@ -2882,9 +2910,10 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       await stopRunForFreshStart(existing, "x_api");
     }
 
-    const keywords = plannedKeywords(lists, runtimeConfig);
+    const keywordChain = plannedKeywordChain(lists, runtimeConfig);
+    const keywords = keywordChain.keywords;
     const availability = keywordAvailability(lists);
-    const run = runs.start(createInitialRunStats(lists, runtimeConfig, keywords));
+    const run = runs.start(createInitialRunStats(lists, runtimeConfig, keywords, keywordChain.chain, keywordChain.futureBatches));
     runs.replaceKeywords(run.id, keywords);
     await recordSession("info", "run.started", "Fresh run started from start action", {
       runId: run.id,
@@ -3477,7 +3506,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       previousConfig.searchWithoutApiSessionKeywordLimitRandom === config.searchWithoutApiSessionKeywordLimitRandom &&
       previousConfig.searchWithoutApiRandomizeKeywordOrder === config.searchWithoutApiRandomizeKeywordOrder &&
       previousConfig.searchWithoutApiUserKeywordPercent === config.searchWithoutApiUserKeywordPercent &&
-      previousConfig.searchWithoutApiRequestsBeforePauseMin === config.searchWithoutApiRequestsBeforePauseMin
+      previousConfig.searchWithoutApiRequestsBeforePauseMin === config.searchWithoutApiRequestsBeforePauseMin &&
+      previousConfig.runChainCount === config.runChainCount
     ) {
       return { replanned: false, reason: "search_pacing_unchanged" };
     }
@@ -3492,16 +3522,10 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return { replanned: false, reason: "run_already_progressed", runId: run.id };
     }
 
-    const keywords = plannedKeywords(lists, config);
+    const keywordChain = plannedKeywordChain(lists, config);
+    const keywords = keywordChain.keywords;
     runs.replaceKeywords(run.id, keywords);
-    runs.updateStats(
-      run.id,
-      createInitialRunStats(lists, config, keywords, {
-        total: Math.max(1, Math.floor(stats.runChainTotal ?? config.runChainCount ?? 1)),
-        index: Math.max(1, Math.floor(stats.runChainIndex ?? 1)),
-        remaining: Math.max(0, Math.floor(stats.runChainRemaining ?? 0))
-      })
-    );
+    runs.updateStats(run.id, createInitialRunStats(lists, config, keywords, keywordChain.chain, keywordChain.futureBatches));
     return { replanned: true, reason: "fresh_run_replanned", runId: run.id, plannedKeywords: keywords.length };
   }
 
@@ -5526,7 +5550,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       return;
     }
 
-    const keywords = plannedKeywords(lists, runtimeConfig);
+    const queuedBatch = nextRunChainKeywordBatch(completedStats);
+    const keywords = queuedBatch?.keywords ?? plannedKeywords(lists, runtimeConfig);
     if (keywords.length === 0) {
       await recordSession("info", "run.chain.empty", "Sequential runs stopped because no eligible keywords remain. Clear SearchTerms.Used and/or No.Result to continue searching.", {
         previousRunId: completedRunId,
@@ -5558,7 +5583,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         });
         return;
       }
-      const nextRun = runs.start(createInitialRunStats(lists, runtimeConfig, keywords, chain));
+      const nextRun = runs.start(
+        createInitialRunStats(lists, runtimeConfig, keywords, chain, queuedBatch?.remainingBatches ?? [])
+      );
       runs.replaceKeywords(nextRun.id, keywords);
       await recordSession("info", "run.chain.started", "Sequential run started", {
         previousRunId: completedRunId,
@@ -5582,7 +5609,9 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       });
       return;
     }
-    const nextRun = runs.start(createInitialRunStats(lists, runtimeConfig, keywords, chain));
+    const nextRun = runs.start(
+      createInitialRunStats(lists, runtimeConfig, keywords, chain, queuedBatch?.remainingBatches ?? [])
+    );
     runs.replaceKeywords(nextRun.id, keywords);
     await recordSession("info", "run.chain.started", "Sequential run started", {
       previousRunId: completedRunId,
@@ -6585,8 +6614,8 @@ function applySecurityHeaders(request: FastifyRequest, reply: FastifyReply): voi
       "default-src 'self'",
       "script-src 'self'",
       "style-src 'self'",
-      "img-src 'self' data: blob:",
-      "media-src 'self' blob:",
+      "img-src 'self' data: blob: https://i.redd.it https://preview.redd.it https://external-preview.redd.it https://*.redditmedia.com",
+      "media-src 'self' blob: https://i.redd.it https://v.redd.it https://preview.redd.it https://external-preview.redd.it https://*.redditmedia.com",
       "connect-src 'self'",
       "object-src 'none'",
       "base-uri 'none'",
@@ -6626,6 +6655,7 @@ function isTimelineProtectedPath(pathName: string): boolean {
     pathName.startsWith("/timeline/lists/") ||
     pathName.startsWith("/timeline/tweets/") ||
     pathName.startsWith("/timeline/media-cache/jobs/") ||
+    pathName === "/timeline/rejected-timeline" ||
     pathName === "/timeline/rejected-timeline/accept" ||
     pathName.startsWith("/media-cache/")
   );
@@ -7402,8 +7432,12 @@ interface RunChainState {
 }
 
 function initialRunChainState(config: { runChainCount?: number }): RunChainState {
-  const total = Math.max(1, Math.floor(config.runChainCount ?? 1));
+  const total = runChainTotalFromAdditionalCount(config);
   return { total, index: 1, remaining: total - 1 };
+}
+
+function runChainTotalFromAdditionalCount(config: { runChainCount?: number }): number {
+  return Math.max(1, Math.floor(config.runChainCount ?? 0) + 1);
 }
 
 function nextRunChainState(stats: RunStats, config: { runChainCount?: number }): RunChainState | null {
@@ -7437,6 +7471,118 @@ function runChainStateFromStats(stats: RunStats, config: { runChainCount?: numbe
   };
 }
 
+function runChainSummaryFromStats(stats: RunStats): {
+  total: number;
+  index: number;
+  remaining: number;
+  queuedRuns: number;
+  queuedKeywords: number;
+} {
+  const queuedBatches = normalizeRunChainKeywordBatches(stats.runChainKeywordBatches);
+  const index = Math.max(1, Math.floor(stats.runChainIndex ?? 1));
+  const remaining = Math.max(0, Math.floor(stats.runChainRemaining ?? queuedBatches.length));
+  const total = Math.max(index + remaining, Math.floor(stats.runChainTotal ?? index + queuedBatches.length));
+  return {
+    total,
+    index,
+    remaining,
+    queuedRuns: queuedBatches.length,
+    queuedKeywords: queuedBatches.reduce((sum, batch) => sum + batch.length, 0)
+  };
+}
+
+function currentRunKeywordPlanPreview(
+  runs: RunService,
+  run: RunRecord
+): {
+  runCount: number;
+  previews: Array<{ runIndex: number; plannedKeywords: number; sample: string[]; status: "active" | "queued" }>;
+} {
+  const stats = parseRunStats(run.statsJson);
+  const chain = runChainSummaryFromStats(stats);
+  const currentKeywords = runs.keywords(run.id, 5_000).map((item) => item.keyword);
+  const queuedBatches = normalizeRunChainKeywordBatches(stats.runChainKeywordBatches);
+
+  const previews: Array<{ runIndex: number; plannedKeywords: number; sample: string[]; status: "active" | "queued" }> = [
+    {
+      runIndex: chain.index,
+      plannedKeywords: Math.max(currentKeywords.length, Math.floor(stats.totalKeywords ?? 0)),
+      sample: currentKeywords,
+      status: "active"
+    },
+    ...queuedBatches.map((keywords, index) => ({
+      runIndex: chain.index + index + 1,
+      plannedKeywords: keywords.length,
+      sample: keywords,
+      status: "queued" as const
+    }))
+  ];
+
+  return {
+    runCount: Math.max(chain.total, previews.length),
+    previews
+  };
+}
+
+function plannedKeywordChain(
+  lists: ListService,
+  config: {
+    runChainCount?: number;
+    searchWithoutApiSessionKeywordLimit?: number;
+    searchWithoutApiSessionKeywordLimitRandom?: boolean;
+    searchWithoutApiRandomizeKeywordOrder?: boolean;
+    searchWithoutApiUserKeywordPercent?: number;
+  }
+): {
+  keywords: string[];
+  futureBatches: string[][];
+  chain: RunChainState;
+  batches: Array<{ runIndex: number; keywords: string[] }>;
+} {
+  const requestedRuns = runChainTotalFromAdditionalCount(config);
+  const batches = plannedKeywordBatches(lists, config, requestedRuns)
+    .filter((batch) => batch.keywords.length > 0)
+    .map((batch, index) => ({ runIndex: index + 1, keywords: batch.keywords }));
+  if (batches.length === 0) {
+    return {
+      keywords: [],
+      futureBatches: [],
+      chain: { total: 1, index: 1, remaining: 0 },
+      batches: [{ runIndex: 1, keywords: [] }]
+    };
+  }
+
+  const futureBatches = batches.slice(1).map((batch) => batch.keywords);
+  return {
+    keywords: batches[0]?.keywords ?? [],
+    futureBatches,
+    chain: { total: batches.length, index: 1, remaining: futureBatches.length },
+    batches
+  };
+}
+
+function nextRunChainKeywordBatch(stats: RunStats): { keywords: string[]; remainingBatches: string[][] } | null {
+  const batches = normalizeRunChainKeywordBatches(stats.runChainKeywordBatches);
+  const keywords = batches[0] ?? [];
+  if (keywords.length === 0) {
+    return null;
+  }
+  return {
+    keywords,
+    remainingBatches: batches.slice(1)
+  };
+}
+
+function normalizeRunChainKeywordBatches(value: unknown): string[][] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((batch): batch is unknown[] => Array.isArray(batch))
+    .map((batch) => batch.map((keyword) => String(keyword).trim()).filter(Boolean))
+    .filter((batch) => batch.length > 0);
+}
+
 function createInitialRunStats(
   lists: ListService,
   config: Pick<XApiRuntimeConfig, "xSearchApiCallLimit" | "xSearchApiWindowMinutes" | "xKeywordsPerQuery"> &
@@ -7458,7 +7604,8 @@ function createInitialRunStats(
       >
     >,
   plannedKeywordList?: string[],
-  runChain = initialRunChainState(config)
+  runChain = initialRunChainState(config),
+  runChainKeywordBatches: string[][] = []
 ): RunStats {
   const apiWindowMinutes = searchPauseWindowMaxMinutesForConfig(config);
   const availableKeywords = plannedKeywords(lists, config).length;
@@ -7468,7 +7615,7 @@ function createInitialRunStats(
   const apiCallLimit = config.searchWithoutApiEnabled
     ? searchesBeforePauseForKeywords(totalKeywords, config)
     : apiSearchesBeforePauseForKeywords(totalKeywords, config);
-  return {
+  const stats: RunStats = {
     currentKeyword: null,
     totalKeywords,
     completedKeywords: 0,
@@ -7497,6 +7644,11 @@ function createInitialRunStats(
     lastScore: null,
     lastTweetId: null
   };
+  const normalizedBatches = normalizeRunChainKeywordBatches(runChainKeywordBatches);
+  if (normalizedBatches.length > 0) {
+    stats.runChainKeywordBatches = normalizedBatches;
+  }
+  return stats;
 }
 
 function searchesBeforePauseForKeywords(

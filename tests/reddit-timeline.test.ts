@@ -21,13 +21,21 @@ describe("Reddit timeline crawl", () => {
             keyword,
             subreddit: "netsec",
             title: "Exploit analysis",
-            text: "Exploit analysis body",
+            text: "Exploit analysis body ".repeat(80),
             author: "researcher",
             url: "https://example.test/exploit",
             permalink: "https://www.reddit.com/r/netsec/comments/reddit-1/exploit/",
             score: 42,
             commentsCount: 6,
-            createdAt: new Date("2026-05-18T10:00:00.000Z")
+            createdAt: new Date("2026-05-18T10:00:00.000Z"),
+            media: [
+              {
+                type: "photo",
+                url: "https://i.redd.it/exploit.png",
+                previewImageUrl: "https://preview.redd.it/exploit.png",
+                altText: "Exploit analysis"
+              }
+            ]
           } satisfies RedditPost
         ];
       })
@@ -51,8 +59,18 @@ describe("Reddit timeline crawl", () => {
       author: "u/researcher",
       authorName: "r/netsec",
       retweetCount: 42,
-      favoriteCount: 6
+      favoriteCount: 6,
+      media: [
+        {
+          type: "photo",
+          url: "https://i.redd.it/exploit.png",
+          previewImageUrl: "https://preview.redd.it/exploit.png",
+          altText: "Exploit analysis"
+        }
+      ]
     });
+    expect(timelineItems.latest(10)[0].text.length).toBeLessThanOrEqual(700);
+    expect(timelineItems.latest(10)[0].text.endsWith("...")).toBe(true);
     expect(record).toHaveBeenCalledWith("prob", "reddit.keyword.failed", "Reddit unavailable", {
       runId: "run-1",
       keyword: "malware"

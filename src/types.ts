@@ -61,6 +61,7 @@ export interface RunStats {
   runChainTotal?: number | null;
   runChainIndex?: number | null;
   runChainRemaining?: number | null;
+  runChainKeywordBatches?: string[][];
   apiCallsUsed: number;
   apiCallLimit: number;
   apiCallsRemaining: number;

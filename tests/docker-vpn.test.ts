@@ -752,6 +752,9 @@ exit 1
     expect(compose).toContain('"127.0.0.1:${X_LOGIN_NOVNC_PORT:-6080}:${X_LOGIN_NOVNC_PORT:-6080}"');
     expect(compose).not.toContain("/tmp/.X11-unix:/tmp/.X11-unix:rw");
     expect(compose).toContain("init-runtime:");
+    expect(fs.readFileSync(path.join(process.cwd(), "src/worker/dockerVpnWorker.ts"), "utf8")).toContain(
+      "SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT"
+    );
   });
 
   it("keeps the Docker VPN kill switch closed to new inbound tunnel traffic", () => {

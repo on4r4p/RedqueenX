@@ -10,6 +10,7 @@ const viewArchiveTimelineButton = document.getElementById("view-archive-timeline
 const restoreArchiveTimelineButton = document.getElementById("restore-archive-timeline");
 const timelineDefaultPageSize = 50;
 const timelineMaxPageSize = 200;
+const redditTimelineTextMaxCharacters = 700;
 const timelineQueryLimit = readOptionalBoundedQueryInt("limit", 1, timelineMaxPageSize);
 const defaultTimelineSources = ["tweet", "rss", "reddit"];
 const timelineState = {
@@ -78,20 +79,63 @@ function linkify(text) {
   let output = "";
   let lastIndex = 0;
   for (const match of source.matchAll(urlPattern)) {
-    const url = match[0];
+    const { url, suffix } = splitLinkifiedUrl(match[0]);
     const index = match.index ?? 0;
     output += linkifyMentionsAndHashtags(source.slice(lastIndex, index));
     output += `<span class="external-link-disabled" data-external-url="${escapeAttr(url)}" title="Click to open this URL.">${escapeHtml(url)}</span>`;
-    lastIndex = index + url.length;
+    output += linkifyMentionsAndHashtags(suffix);
+    lastIndex = index + match[0].length;
   }
   output += linkifyMentionsAndHashtags(source.slice(lastIndex));
   return output;
+}
+
+function splitLinkifiedUrl(value) {
+  let url = String(value || "");
+  let suffix = "";
+  while (url.length > 0) {
+    const last = url.at(-1);
+    if (/[.,!?;:]/.test(last)) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === ")" && countCharacters(url, ")") > countCharacters(url, "(")) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === "]" && countCharacters(url, "]") > countCharacters(url, "[")) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === "}" && countCharacters(url, "}") > countCharacters(url, "{")) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    break;
+  }
+  return { url, suffix };
+}
+
+function countCharacters(value, character) {
+  return String(value || "").split(character).length - 1;
 }
 
 function linkifyMentionsAndHashtags(text) {
   return escapeHtml(text)
     .replace(/@([A-Za-z0-9_]+)/g, '<span class="mention">@$1</span>')
     .replace(/#([A-Za-z0-9_]+)/g, '<span class="hashtag">#$1</span>');
+}
+
+function displayTimelineText(item) {
+  const text = String(item.text ?? "");
+  if (item.source !== "reddit" || text.length <= redditTimelineTextMaxCharacters) {
+    return text;
+  }
+  return `${text.slice(0, redditTimelineTextMaxCharacters - 3).trimEnd()}...`;
 }
 
 function escapeHtml(value) {
@@ -148,6 +192,12 @@ function renderMedia(item) {
           return `<video class="tweet-media-item" src="${escapeAttr(media.cachedUrl)}" controls preload="metadata" title="Double click for full screen"></video>`;
         }
         return `<img class="tweet-media-item" src="${escapeAttr(media.cachedUrl)}" alt="${escapeAttr(media.altText || "")}" loading="lazy" referrerpolicy="no-referrer" title="Double click for full screen" />`;
+      }
+      if (item.source === "reddit" && media.remoteUrl) {
+        if (type === "video") {
+          return `<video class="tweet-media-item" src="${escapeAttr(media.remoteUrl)}" controls preload="metadata" title="Double click for full screen"></video>`;
+        }
+        return `<img class="tweet-media-item" src="${escapeAttr(media.remoteUrl)}" alt="${escapeAttr(media.altText || "")}" loading="lazy" referrerpolicy="no-referrer" title="Double click for full screen" />`;
       }
       const status = media.cacheStatus || "missing";
       const label =
@@ -398,7 +448,7 @@ async function refreshTimeline() {
   timelineStatus.textContent = [
     timelineState.archived ? "Archive view." : "",
     pageSummary(pagination, items.length),
-    "Remote avatars, media, and external links are not loaded directly. Cached media is served locally from /media-cache only."
+    "X avatars, X media, and external links are not loaded directly. Reddit-hosted media may display directly."
   ]
     .filter(Boolean)
     .join(" ");
@@ -426,7 +476,7 @@ async function refreshTimeline() {
             ${renderSourceBadge(item)}
             ${renderLuckFactorBadge(item.reasons)}
           </div>
-          <p>${linkify(item.text)} ${tweetLink}</p>
+          <p>${linkify(displayTimelineText(item))} ${tweetLink}</p>
           ${renderMedia(item)}
           ${renderMetrics(item)}
           ${renderListButtons(item)}
@@ -559,6 +609,7 @@ async function changeTimelineSources() {
 }
 
 async function changeTimelinePage(action) {
+  const previousOffset = timelineState.offset;
   if (action === "prev") {
     timelineState.offset = Math.max(0, timelineState.offset - timelineState.limit);
   } else if (action === "next") {
@@ -566,8 +617,10 @@ async function changeTimelinePage(action) {
   } else {
     return;
   }
+  if (timelineState.offset === previousOffset) {
+    return;
+  }
   timelineStatus.textContent = "Loading timeline page...";
-  scrollTimelineToTop("auto");
   await refreshTimeline();
   scrollTimelineToTopAfterRender();
 }
@@ -946,14 +999,22 @@ async function mutateListBatch(kind, action, values, button) {
 
 timelinePaginations.forEach((paginationNav) => {
   paginationNav.addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-page-action]");
-    if (button && !button.disabled) {
-      event.preventDefault();
-      await changeTimelinePage(button.dataset.pageAction);
+    const button = event.target.closest("button");
+    if (!button || !paginationNav.contains(button)) {
       return;
     }
-    const scrollTop = event.target.closest("[data-scroll-top]");
+    const pageAction = button.dataset.pageAction;
+    if (pageAction) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (button.disabled) return;
+      await changeTimelinePage(pageAction);
+      return;
+    }
+    const scrollTop = button.hasAttribute("data-scroll-top");
     if (scrollTop) {
+      event.preventDefault();
+      event.stopPropagation();
       scrollTimelineToTop("smooth");
     }
   });

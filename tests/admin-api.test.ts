@@ -4,7 +4,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAdminApi } from "../src/admin/api";
 import { openMemoryDatabase } from "../src/db/database";
-import { RunService } from "../src/admin/runService";
+import { parseRunStats, RunService } from "../src/admin/runService";
+import { ListService } from "../src/admin/listService";
 import { TimelineItemService } from "../src/admin/timelineItemService";
 import { TimelineTweetService } from "../src/admin/timelineTweetService";
 import { XBrowserAccountService } from "../src/admin/xBrowserAccountService";
@@ -123,6 +124,95 @@ describe("admin api", () => {
     await app.close();
   });
 
+  it("stores concrete keyword batches when a chained run starts", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-api-chain-"));
+    const currentSessionFilePath = path.join(tmp, "current-session.log");
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+    for (const keyword of ["alpha", "beta", "gamma", "delta", "epsilon"]) {
+      lists.add("keyword", keyword);
+    }
+    const app = createAdminApi({
+      database,
+      config: loadConfig({
+        ADMIN_PASSWORD: "secret",
+        SESSION_SECRET: "test-session-secret",
+        DATABASE_URL: path.join(tmp, "redqueenx.sqlite"),
+        CURRENT_SESSION_FILE: currentSessionFilePath,
+        X_API_ENABLED: "true",
+        SEARCH_WITHOUT_API_ENABLED: "false",
+        SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: "2",
+        SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: "false",
+        SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: "false",
+        RUN_CHAIN_COUNT: "2"
+      }),
+      envPath: path.join(tmp, ".env"),
+      currentSessionFilePath
+    });
+
+    const login = await app.inject({ method: "POST", url: "/admin/login", payload: { username: "admin", password: "secret" } });
+    expect(login.statusCode).toBe(200);
+    const authHeaders = authHeadersFromSetCookie(login.headers["set-cookie"]);
+
+    const preview = await app.inject({ method: "GET", url: "/admin/runs/preview", headers: authHeaders });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json().source).toBe("fresh_preview");
+    expect(preview.json().previews.map((item: { sample: string[] }) => item.sample)).toEqual([
+      ["alpha", "beta"],
+      ["gamma", "delta"],
+      ["epsilon"]
+    ]);
+
+    const runStart = await app.inject({ method: "POST", url: "/admin/runs", headers: authHeaders });
+    expect(runStart.statusCode).toBe(200);
+    const runs = new RunService(database);
+    const run = runs.latest();
+    if (!run) {
+      throw new Error("Expected a run to be created.");
+    }
+    expect(runs.keywords(run.id).map((item) => item.keyword)).toEqual(["alpha", "beta"]);
+    expect(parseRunStats(run.statsJson)).toMatchObject({
+      runChainTotal: 3,
+      runChainIndex: 1,
+      runChainRemaining: 2,
+      runChainKeywordBatches: [
+        ["gamma", "delta"],
+        ["epsilon"]
+      ]
+    });
+
+    const activePreview = await app.inject({ method: "GET", url: "/admin/runs/preview", headers: authHeaders });
+    expect(activePreview.statusCode).toBe(200);
+    expect(activePreview.json()).toMatchObject({
+      source: "active_run",
+      run: { id: run.id, status: "running", isCurrent: true },
+      runCount: 3
+    });
+    expect(
+      activePreview.json().previews.map((item: { runIndex: number; sample: string[]; status: string }) => ({
+        runIndex: item.runIndex,
+        sample: item.sample,
+        status: item.status
+      }))
+    ).toEqual([
+      { runIndex: 1, sample: ["alpha", "beta"], status: "active" },
+      { runIndex: 2, sample: ["gamma", "delta"], status: "queued" },
+      { runIndex: 3, sample: ["epsilon"], status: "queued" }
+    ]);
+
+    const sessionKeywords = await app.inject({ method: "GET", url: "/admin/session/keywords?limit=1000", headers: authHeaders });
+    expect(sessionKeywords.statusCode).toBe(200);
+    expect(sessionKeywords.json().chain).toEqual({
+      total: 3,
+      index: 1,
+      remaining: 2,
+      queuedRuns: 2,
+      queuedKeywords: 3
+    });
+
+    await app.close();
+  });
+
   it("protects admin routes and supports login, list mutations, commands, and import", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-api-"));
     fs.writeFileSync(path.join(tmp, "Rq.Keywords"), "one\n\ntwo", "utf8");
@@ -190,7 +280,7 @@ describe("admin api", () => {
         searchWithoutApiMediaCacheFetchDelayMinMs: 800,
         searchWithoutApiMediaCacheFetchDelayMaxMs: 3000,
         timelineDefaultPageSize: 50,
-        runChainCount: 1,
+        runChainCount: 0,
         staleKeywordUserMaxAgeDays: 90,
         staleKeywordUserStartIndex: 1,
         staleKeywordUserActionDelayMinSeconds: 1,
@@ -480,6 +570,46 @@ describe("admin api", () => {
       headers: timelineHeaders
     });
     expect(timelineUserAdminDeleteDenied.statusCode).toBe(401);
+
+    database.prepare("INSERT INTO runs (id, status, started_at, updated_at, stats_json) VALUES (?, ?, ?, ?, ?)").run(
+      "run-timeline-clear-rejected",
+      "stopped",
+      "2026-05-07T11:30:00.000Z",
+      "2026-05-07T11:30:00.000Z",
+      "{}"
+    );
+    database
+      .prepare(
+        `INSERT INTO raw_timeline_tweets (
+          run_id,
+          tweet_id,
+          source_keyword,
+          text,
+          decision_status,
+          rejection_reasons_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        "run-timeline-clear-rejected",
+        "tweet-timeline-clear-rejected",
+        "keyword",
+        "timeline clear rejected tweet",
+        "rejected",
+        JSON.stringify(["score_too_low"])
+      );
+    const timelineUserClearsRejectedTimeline = await app.inject({
+      method: "DELETE",
+      url: "/timeline/rejected-timeline",
+      headers: timelineHeaders
+    });
+    expect(timelineUserClearsRejectedTimeline.statusCode).toBe(200);
+    expect(timelineUserClearsRejectedTimeline.json()).toEqual({ deleted: 1 });
+    expect(
+      database
+        .prepare("SELECT COUNT(*) AS total FROM raw_timeline_tweets WHERE run_id = ? AND decision_status = 'rejected'")
+        .get("run-timeline-clear-rejected")
+    ).toEqual({ total: 0 });
 
     await app.inject({
       method: "POST",
@@ -1452,7 +1582,7 @@ describe("admin api", () => {
       SEARCH_WITHOUT_API_MAX_RETRIES: "3",
       SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS: "10",
       TIMELINE_DEFAULT_PAGE_SIZE: "50",
-      RUN_CHAIN_COUNT: "1",
+      RUN_CHAIN_COUNT: "0",
       STALE_KEYWORD_USER_MAX_AGE_DAYS: "90",
       STALE_KEYWORD_USER_START_INDEX: "1",
       STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS: "1",
@@ -1597,7 +1727,7 @@ describe("admin api", () => {
       payload: {
         values: {
           TIMELINE_DEFAULT_PAGE_SIZE: "50",
-          RUN_CHAIN_COUNT: "1",
+          RUN_CHAIN_COUNT: "0",
           STALE_KEYWORD_USER_MAX_AGE_DAYS: "90",
           STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS: "1",
           STALE_KEYWORD_USER_ACTION_DELAY_MAX_SECONDS: "5",

@@ -92,14 +92,49 @@ function linkify(text) {
   let output = "";
   let lastIndex = 0;
   for (const match of source.matchAll(urlPattern)) {
-    const url = match[0];
+    const { url, suffix } = splitLinkifiedUrl(match[0]);
     const index = match.index ?? 0;
     output += linkifyMentionsAndHashtags(source.slice(lastIndex, index));
     output += `<span class="external-link-disabled" data-external-url="${escapeAttr(url)}" title="Click to open this URL.">${escapeHtml(url)}</span>`;
-    lastIndex = index + url.length;
+    output += linkifyMentionsAndHashtags(suffix);
+    lastIndex = index + match[0].length;
   }
   output += linkifyMentionsAndHashtags(source.slice(lastIndex));
   return output;
+}
+
+function splitLinkifiedUrl(value) {
+  let url = String(value || "");
+  let suffix = "";
+  while (url.length > 0) {
+    const last = url.at(-1);
+    if (/[.,!?;:]/.test(last)) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === ")" && countCharacters(url, ")") > countCharacters(url, "(")) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === "]" && countCharacters(url, "]") > countCharacters(url, "[")) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === "}" && countCharacters(url, "}") > countCharacters(url, "{")) {
+      suffix = last + suffix;
+      url = url.slice(0, -1);
+      continue;
+    }
+    break;
+  }
+  return { url, suffix };
+}
+
+function countCharacters(value, character) {
+  return String(value || "").split(character).length - 1;
 }
 
 function linkifyMentionsAndHashtags(text) {
@@ -871,10 +906,10 @@ rejectedTimelineClearAll?.addEventListener("click", () => {
   rejectedTimelineClearAll.disabled = true;
   rejectedTimelineClearAll.textContent = "Clearing...";
   rawTimelineStatus.textContent = "Clearing rejected timeline...";
-  csrfFetch("/admin/rejected-timeline", { method: "DELETE" })
+  csrfFetch("/timeline/rejected-timeline", { method: "DELETE" })
     .then(async (response) => {
       if (response.status === 401) {
-        rawTimelineStatus.textContent = "Admin login required before clearing rejected timeline.";
+        rawTimelineStatus.textContent = "Timeline login required before clearing rejected timeline.";
         return null;
       }
       const result = await response.json().catch(() => ({ error: "Clear rejected timeline failed" }));
@@ -889,7 +924,10 @@ rejectedTimelineClearAll?.addEventListener("click", () => {
       return result;
     })
     .catch((error) => {
-      rawTimelineStatus.textContent = error.message || "Unable to clear rejected timeline.";
+      rawTimelineStatus.textContent =
+        error instanceof TypeError
+          ? "Network error while clearing rejected timeline. Refresh and try again."
+          : error.message || "Unable to clear rejected timeline.";
     })
     .finally(() => {
       rejectedTimelineClearAll.disabled = false;

@@ -216,7 +216,7 @@ export class RunService {
 export function createRunStats(stats: Partial<RunStats> = {}): RunStats {
   const apiCallLimit = stats.apiCallLimit ?? 180;
   const apiCallsUsed = stats.apiCallsUsed ?? 0;
-  return {
+  const runStats: RunStats = {
     currentKeyword: stats.currentKeyword ?? null,
     totalKeywords: stats.totalKeywords ?? 0,
     completedKeywords: stats.completedKeywords ?? 0,
@@ -225,6 +225,7 @@ export function createRunStats(stats: Partial<RunStats> = {}): RunStats {
     sessionKeywordLimit: stats.sessionKeywordLimit ?? null,
     sessionKeywordLimitRandom: stats.sessionKeywordLimitRandom ?? false,
     randomizeKeywordOrder: stats.randomizeKeywordOrder ?? false,
+    userKeywordPercent: stats.userKeywordPercent ?? 100,
     runChainTotal: stats.runChainTotal ?? null,
     runChainIndex: stats.runChainIndex ?? null,
     runChainRemaining: stats.runChainRemaining ?? null,
@@ -244,6 +245,11 @@ export function createRunStats(stats: Partial<RunStats> = {}): RunStats {
     lastScore: stats.lastScore ?? null,
     lastTweetId: stats.lastTweetId ?? null
   };
+  const runChainKeywordBatches = normalizeRunChainKeywordBatches(stats.runChainKeywordBatches);
+  if (runChainKeywordBatches.length > 0) {
+    runStats.runChainKeywordBatches = runChainKeywordBatches;
+  }
+  return runStats;
 }
 
 export function parseRunStats(statsJson: string): RunStats {
@@ -263,4 +269,14 @@ function mapRun(row: RunRow): RunRecord {
     stoppedAt: row.stopped_at,
     statsJson: row.stats_json
   };
+}
+
+function normalizeRunChainKeywordBatches(value: unknown): string[][] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((batch): batch is unknown[] => Array.isArray(batch))
+    .map((batch) => batch.map((keyword) => String(keyword).trim()).filter(Boolean))
+    .filter((batch) => batch.length > 0);
 }

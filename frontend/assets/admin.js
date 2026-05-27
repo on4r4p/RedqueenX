@@ -621,7 +621,7 @@ const adminTooltipByName = {
   X_LOGIN_START_URL: "Initial X login page opened by the manual browser helper.",
   TIMELINE_DEFAULT_PAGE_SIZE: "Default number of tweets shown per page on Timeline and Rejected Timeline when the URL has no limit parameter.",
   RUN_CHAIN_COUNT:
-    "Number of runs launched sequentially from Start. Chaining stops if a run fails, pauses for session verification, or no eligible keyword remains.",
+    "Number of extra runs launched after the first Start run. 0 means only the first run; use 1+ to continue with the next planned batches.",
   STALE_KEYWORD_USER_MAX_AGE_DAYS:
     "Saved default threshold for Keyword users cleanup. @keywords are removed when the latest visible tweet is older than this many days.",
   STALE_KEYWORD_USER_START_INDEX:
@@ -3293,7 +3293,16 @@ async function refreshSessionKeywords() {
   }
   const loadedLabel = data.loaded > 0 ? `${data.loaded} shown` : "0 persisted";
   const runScope = data.run.isCurrent ? "active run" : `latest ${data.run.status} run`;
-  sessionKeywordsSummary.textContent = `${loadedLabel} / ${data.total} planned - ${runScope} ${data.run.id}`;
+  const chain = data.chain || {};
+  const chainParts = [];
+  if (Number(chain.total) > 1) {
+    chainParts.push(`run ${chain.index}/${chain.total}`);
+  }
+  if (Number(chain.queuedKeywords) > 0) {
+    chainParts.push(`${chain.queuedKeywords} queued next`);
+  }
+  const chainLabel = chainParts.length ? ` - ${chainParts.join(" - ")}` : "";
+  sessionKeywordsSummary.textContent = `${loadedLabel} / ${data.total} planned - ${runScope} ${data.run.id}${chainLabel}`;
   if (!data.keywords.length) {
     sessionKeywordsList.innerHTML =
       data.total > 0
@@ -3318,15 +3327,21 @@ async function refreshRunPreview() {
   const previews = Array.isArray(data.previews)
     ? data.previews
     : [{ runIndex: 1, plannedKeywords: data.plannedKeywords ?? 0, sample: Array.isArray(data.sample) ? data.sample : [] }];
+  const previewLabel =
+    data.source === "active_run"
+      ? `${previews.length} active/queued run${previews.length === 1 ? "" : "s"}`
+      : `${previews.length} fresh run preview${previews.length === 1 ? "" : "s"}`;
   runPreviewSummary.textContent = [
-    `${previews.length} run preview${previews.length === 1 ? "" : "s"}`,
+    previewLabel,
     `${availability.availableKeywords ?? 0} available now`,
     `${availability.excludedBySearchTermsUsed ?? 0} already searched`,
     `${availability.excludedByNoResult ?? 0} no-result excluded`
   ].join(" - ");
   if (!previews.some((preview) => Array.isArray(preview.sample) && preview.sample.length > 0)) {
     runPreviewList.innerHTML =
-      '<div class="empty-state">No eligible keyword for the next run. SearchTerms.Used and/or No.Result currently exclude every active keyword.</div>';
+      data.source === "active_run"
+        ? '<div class="empty-state">Active run has no keyword rows loaded.</div>'
+        : '<div class="empty-state">No eligible keyword for the next run. SearchTerms.Used and/or No.Result currently exclude every active keyword.</div>';
     return;
   }
   runPreviewList.innerHTML = previews
@@ -3338,19 +3353,20 @@ function renderRunPreviewPanel(preview) {
   const runIndex = String(preview.runIndex ?? 1);
   const keywords = Array.isArray(preview.sample) ? preview.sample : [];
   const plannedCount = Number.isFinite(Number(preview.plannedKeywords)) ? Number(preview.plannedKeywords) : keywords.length;
+  const status = preview.status === "active" ? "active" : preview.status === "queued" ? "queued" : "planned";
   const isOpen = runPreviewOpenState.has(runIndex);
   const rows = keywords.length
     ? keywords
         .map((keyword, index) => `<div class="session-keyword-row">
           <span>#${index + 1}</span>
           <strong>${escapeHtml(keyword)}</strong>
-          <em>planned</em>
+          <em>${escapeHtml(status)}</em>
         </div>`)
         .join("")
     : '<div class="empty-state">No eligible keyword left for this run preview.</div>';
   return `<details class="run-preview-panel" data-run-preview-index="${escapeAttribute(runIndex)}"${isOpen ? " open" : ""}>
     <summary>
-      <strong>Run ${escapeHtml(runIndex)}</strong>
+      <strong>Run ${escapeHtml(runIndex)} - ${escapeHtml(status)}</strong>
       <span>${escapeHtml(String(plannedCount))} planned</span>
     </summary>
     <div class="session-keywords-list">${rows}</div>

@@ -99,7 +99,7 @@ const envSchema = z.object({
   SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MIN_MS: z.coerce.number().int().min(0).default(800),
   SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS: z.coerce.number().int().min(0).default(3000),
   TIMELINE_DEFAULT_PAGE_SIZE: z.coerce.number().int().min(1).max(200).default(50),
-  RUN_CHAIN_COUNT: z.coerce.number().int().min(1).default(1),
+  RUN_CHAIN_COUNT: z.coerce.number().int().min(0).default(0),
   STALE_KEYWORD_USER_MAX_AGE_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
   STALE_KEYWORD_USER_START_INDEX: z.coerce.number().int().min(1).default(1),
   STALE_KEYWORD_USER_ACTION_DELAY_MIN_SECONDS: z.coerce.number().int().min(0).default(1),

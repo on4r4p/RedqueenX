@@ -430,7 +430,8 @@ async function maybeStartNextChainedRun(
     });
     return;
   }
-  const keywords = plannedKeywords(lists, config);
+  const queuedBatch = nextRunChainKeywordBatch(parseRunStats(completedRun.statsJson));
+  const keywords = queuedBatch?.keywords ?? plannedKeywords(lists, config);
   if (keywords.length === 0) {
     await record("info", "docker_vpn.run.chain.empty", "Sequential Docker VPN runs stopped because no eligible keywords remain. Clear SearchTerms.Used and/or No.Result to continue searching.", {
       previousRunId: completedRunId,
@@ -441,14 +442,16 @@ async function maybeStartNextChainedRun(
     return;
   }
 
-  const nextRun = runs.start({
-    sessionKeywordLimit: config.searchWithoutApiSessionKeywordLimit,
-    sessionKeywordLimitRandom: config.searchWithoutApiSessionKeywordLimitRandom,
-    randomizeKeywordOrder: config.searchWithoutApiRandomizeKeywordOrder,
-    runChainTotal: chain.total,
-    runChainIndex: chain.index,
-    runChainRemaining: chain.remaining
-  });
+  const nextRun = runs.start(
+    createDockerRunStats(
+      keywords.length,
+      keywordAvailabilityLogData(lists).availableKeywords,
+      config,
+      chain,
+      queuedBatch?.remainingBatches ?? []
+    )
+  );
+  runs.replaceKeywords(nextRun.id, keywords);
   await record("info", "docker_vpn.run.chain.started", "Sequential Docker VPN run queued", {
     previousRunId: completedRunId,
     runId: nextRun.id,
@@ -486,7 +489,7 @@ async function waitForCompletedRun(
 }
 
 function nextRunChainState(stats: RunStats, config: Pick<AppConfig, "runChainCount">): RunChainState | null {
-  const fallbackTotal = Math.max(1, Math.floor(config.runChainCount ?? 1));
+  const fallbackTotal = runChainTotalFromAdditionalCount(config);
   const currentIndex = Math.max(1, Math.floor(stats.runChainIndex ?? 1));
   const remaining = Math.max(0, Math.floor(stats.runChainRemaining ?? fallbackTotal - currentIndex));
   if (remaining <= 0) {
@@ -498,13 +501,88 @@ function nextRunChainState(stats: RunStats, config: Pick<AppConfig, "runChainCou
 }
 
 function runChainLogData(stats: RunStats, config: Pick<AppConfig, "runChainCount">): Record<string, number | null> {
-  const fallbackTotal = Math.max(1, Math.floor(config.runChainCount ?? 1));
+  const fallbackTotal = runChainTotalFromAdditionalCount(config);
   const index = stats.runChainIndex ?? 1;
   return {
     runChainTotal: stats.runChainTotal ?? fallbackTotal,
     runChainIndex: index,
     runChainRemaining: stats.runChainRemaining ?? Math.max(0, fallbackTotal - index)
   };
+}
+
+function runChainTotalFromAdditionalCount(config: Pick<AppConfig, "runChainCount">): number {
+  return Math.max(1, Math.floor(config.runChainCount ?? 0) + 1);
+}
+
+function nextRunChainKeywordBatch(stats: RunStats): { keywords: string[]; remainingBatches: string[][] } | null {
+  const batches = normalizeRunChainKeywordBatches(stats.runChainKeywordBatches);
+  const keywords = batches[0] ?? [];
+  if (keywords.length === 0) {
+    return null;
+  }
+  return {
+    keywords,
+    remainingBatches: batches.slice(1)
+  };
+}
+
+function createDockerRunStats(
+  totalKeywords: number,
+  availableKeywords: number,
+  config: AppConfig,
+  chain: RunChainState,
+  runChainKeywordBatches: string[][]
+): Partial<RunStats> {
+  const apiCallLimit = searchesBeforePauseForKeywords(totalKeywords, config);
+  const stats: Partial<RunStats> = {
+    totalKeywords,
+    completedKeywords: 0,
+    remainingKeywords: totalKeywords,
+    availableKeywords,
+    sessionKeywordLimit: config.searchWithoutApiSessionKeywordLimit,
+    sessionKeywordLimitRandom: config.searchWithoutApiSessionKeywordLimitRandom,
+    randomizeKeywordOrder: config.searchWithoutApiRandomizeKeywordOrder,
+    userKeywordPercent: config.searchWithoutApiUserKeywordPercent,
+    runChainTotal: chain.total,
+    runChainIndex: chain.index,
+    runChainRemaining: chain.remaining,
+    apiCallsUsed: 0,
+    apiCallLimit,
+    apiCallsRemaining: apiCallLimit,
+    apiWindowMinutes: config.searchWithoutApiPauseMaxMinutes,
+    browserAlertAutoIgnore: config.searchWithoutApiAutoIgnoreAlert,
+    browserAlertRetryCount: 0,
+    browserAlertMaxRetries: config.searchWithoutApiMaxRetries,
+    browserAlertAutoRestartDelaySeconds: config.searchWithoutApiAutoRestartDelaySeconds,
+    browserAlertAutoRestartAt: null,
+    browserAlertLastCompletedKeywords: null
+  };
+  const normalizedBatches = normalizeRunChainKeywordBatches(runChainKeywordBatches);
+  if (normalizedBatches.length > 0) {
+    stats.runChainKeywordBatches = normalizedBatches;
+  }
+  return stats;
+}
+
+function searchesBeforePauseForKeywords(
+  remainingKeywords: number,
+  config: Pick<AppConfig, "searchWithoutApiRequestsBeforePauseMin">
+): number {
+  const remaining = Math.max(0, Math.floor(remainingKeywords));
+  if (remaining <= 0) {
+    return 0;
+  }
+  return Math.max(1, Math.floor(config.searchWithoutApiRequestsBeforePauseMin));
+}
+
+function normalizeRunChainKeywordBatches(value: unknown): string[][] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((batch): batch is unknown[] => Array.isArray(batch))
+    .map((batch) => batch.map((keyword) => String(keyword).trim()).filter(Boolean))
+    .filter((batch) => batch.length > 0);
 }
 
 function plannedKeywords(
@@ -672,6 +750,7 @@ function dockerRuntimeEnvValues(config: AppConfig): NodeJS.ProcessEnv {
     SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: String(config.searchWithoutApiSessionKeywordLimit),
     SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: String(config.searchWithoutApiSessionKeywordLimitRandom),
     SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: String(config.searchWithoutApiRandomizeKeywordOrder),
+    SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT: String(config.searchWithoutApiUserKeywordPercent),
     SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT: String(config.searchWithoutApiAutoIgnoreAlert),
     SEARCH_WITHOUT_API_MAX_RETRIES: String(config.searchWithoutApiMaxRetries),
     SEARCH_WITHOUT_API_AUTO_RESTART_DELAY_SECONDS: String(config.searchWithoutApiAutoRestartDelaySeconds),

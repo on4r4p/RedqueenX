@@ -2029,11 +2029,11 @@ function createBrowserRunStats(
   existingStats?: RunStats
 ) {
   const apiCallLimit = searchesBeforePauseForKeywords(totalKeywords, config);
-  const fallbackRunChainTotal = Math.max(1, Math.floor(config.runChainCount ?? 1));
+  const fallbackRunChainTotal = Math.max(1, Math.floor(config.runChainCount ?? 0) + 1);
   const runChainTotal = Math.max(1, Math.floor(existingStats?.runChainTotal ?? fallbackRunChainTotal));
   const runChainIndex = Math.max(1, Math.floor(existingStats?.runChainIndex ?? 1));
   const runChainRemaining = Math.max(0, Math.floor(existingStats?.runChainRemaining ?? runChainTotal - runChainIndex));
-  return {
+  const stats: RunStats = {
     currentKeyword: null,
     totalKeywords,
     completedKeywords: 0,
@@ -2061,6 +2061,21 @@ function createBrowserRunStats(
     lastScore: null,
     lastTweetId: null
   };
+  const runChainKeywordBatches = normalizeRunChainKeywordBatches(existingStats?.runChainKeywordBatches);
+  if (runChainKeywordBatches.length > 0) {
+    stats.runChainKeywordBatches = runChainKeywordBatches;
+  }
+  return stats;
+}
+
+function normalizeRunChainKeywordBatches(value: unknown): string[][] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((batch): batch is unknown[] => Array.isArray(batch))
+    .map((batch) => batch.map((keyword) => String(keyword).trim()).filter(Boolean))
+    .filter((batch) => batch.length > 0);
 }
 
 function searchesBeforePauseForKeywords(remainingKeywords: number, config: ReturnType<typeof loadConfig>): number {

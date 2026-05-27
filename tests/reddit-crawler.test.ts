@@ -42,6 +42,16 @@ describe("RedditCrawler", () => {
                 author: "researcher",
                 permalink: "/r/netsec/comments/abc/new_exploit_write_up/",
                 url: "https://example.test/write-up",
+                url_overridden_by_dest: "https://i.redd.it/exploit.png",
+                preview: {
+                  images: [
+                    {
+                      source: {
+                        url: "https://preview.redd.it/exploit-preview.png?width=960&amp;format=png"
+                      }
+                    }
+                  ]
+                },
                 score: 42,
                 num_comments: 7,
                 created_utc: 1_778_800_000
@@ -87,7 +97,15 @@ describe("RedditCrawler", () => {
       text: "Exploit details",
       author: "researcher",
       score: 42,
-      commentsCount: 7
+      commentsCount: 7,
+      media: [
+        {
+          type: "photo",
+          url: "https://i.redd.it/exploit.png",
+          previewImageUrl: "https://preview.redd.it/exploit-preview.png?width=960&format=png",
+          altText: "New exploit write-up"
+        }
+      ]
     });
   });
 });

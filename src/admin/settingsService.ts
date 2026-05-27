@@ -146,7 +146,7 @@ export const xApiConfigSchema = z.object({
   searchWithoutApiMediaCacheFetchDelayMinMs: z.coerce.number().int().min(0),
   searchWithoutApiMediaCacheFetchDelayMaxMs: z.coerce.number().int().min(0),
   timelineDefaultPageSize: z.coerce.number().int().min(1).max(200),
-  runChainCount: z.coerce.number().int().min(1),
+  runChainCount: z.coerce.number().int().min(0),
   staleKeywordUserMaxAgeDays: z.coerce.number().int().min(1).max(3650),
   staleKeywordUserStartIndex: z.coerce.number().int().min(1),
   staleKeywordUserActionDelayMinSeconds: z.coerce.number().int().min(0),
