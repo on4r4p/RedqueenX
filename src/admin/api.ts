@@ -2315,6 +2315,12 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     return { deleted };
   });
 
+  app.post("/admin/settings/search-terms-used/reset", async () => {
+    const deleted = lists.markDeletedAll("search_terms_used");
+    await recordSession("info", "settings.search_terms_used.reset", "SearchTerms.Used list reset", { deleted });
+    return { deleted };
+  });
+
   app.get("/admin/keyword-users/prune-stale/current", async () => staleKeywordUserPruneStatusFresh());
 
   app.post("/admin/keyword-users/prune-stale/speed", async (request, reply) => {
@@ -2850,6 +2856,14 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
   app.post("/admin/runs", async (_request, reply) => {
     const runtimeConfig = getXApiConfig();
     if (runtimeConfig.searchWithoutApiEnabled) {
+      const keywordChain = plannedKeywordChain(lists, runtimeConfig);
+      const keywords = keywordChain.keywords;
+      const availability = keywordAvailability(lists);
+      if (keywords.length === 0) {
+        await sendNoEligibleKeywordsStartBlocked(reply, "without_api", availability, runtimeConfig);
+        return;
+      }
+
       const blocked = await prepareWithoutApiRunStart(reply);
       if (!blocked.ok) return;
 
@@ -2858,9 +2872,6 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         await stopRunForFreshStart(existing, "without_api");
       }
 
-      const keywordChain = plannedKeywordChain(lists, runtimeConfig);
-      const keywords = keywordChain.keywords;
-      const availability = keywordAvailability(lists);
       const run = runs.start(createInitialRunStats(lists, runtimeConfig, keywords, keywordChain.chain, keywordChain.futureBatches));
       runs.replaceKeywords(run.id, keywords);
       await recordSession("info", "run.started", "Fresh run started from start action", {
@@ -2873,19 +2884,6 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         xIdentifier: blocked.account.xIdentifier,
         vpnProfilePath: runtimeConfig.vpnConfig
       });
-      if (keywords.length === 0) {
-        await recordSession(
-          "prob",
-          "run.no_eligible_keywords",
-          "No eligible keyword remains. Active keywords are already in SearchTerms.Used or No.Result; clear one of those lists to search again.",
-          {
-            runId: run.id,
-            mode: "without_api",
-            sessionKeywordLimit: runtimeConfig.searchWithoutApiSessionKeywordLimit,
-            ...keywordAvailabilityLogData(availability)
-          }
-        );
-      }
       await startWithoutApiExecution(run);
       return { run };
     }
@@ -2913,6 +2911,11 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const keywordChain = plannedKeywordChain(lists, runtimeConfig);
     const keywords = keywordChain.keywords;
     const availability = keywordAvailability(lists);
+    if (keywords.length === 0) {
+      await sendNoEligibleKeywordsStartBlocked(reply, "x_api", availability, runtimeConfig);
+      return;
+    }
+
     const run = runs.start(createInitialRunStats(lists, runtimeConfig, keywords, keywordChain.chain, keywordChain.futureBatches));
     runs.replaceKeywords(run.id, keywords);
     await recordSession("info", "run.started", "Fresh run started from start action", {
@@ -2922,18 +2925,6 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       ...keywordAvailabilityLogData(availability),
       searchPacingApplied: true
     });
-    if (keywords.length === 0) {
-      await recordSession(
-        "prob",
-        "run.no_eligible_keywords",
-        "No eligible keyword remains. Active keywords are already in SearchTerms.Used or No.Result; clear one of those lists to search again.",
-        {
-          runId: run.id,
-          mode: "x_api",
-          ...keywordAvailabilityLogData(availability)
-        }
-      );
-    }
     startCrawlerLoop(run);
     return { run };
   });
@@ -3567,6 +3558,32 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       previousRunId: stopped.id,
       mode,
       reason: "start_button_always_creates_new_run"
+    });
+  }
+
+  async function sendNoEligibleKeywordsStartBlocked(
+    reply: FastifyReply,
+    mode: "without_api" | "x_api",
+    availability: ReturnType<typeof keywordAvailability>,
+    runtimeConfig: XApiRuntimeConfig
+  ): Promise<void> {
+    await recordSession(
+      "prob",
+      "run.no_eligible_keywords",
+      "No eligible keyword remains. Active keywords are already in SearchTerms.Used or No.Result; clear one of those lists to search again.",
+      {
+        mode,
+        ...(mode === "without_api" ? { sessionKeywordLimit: runtimeConfig.searchWithoutApiSessionKeywordLimit } : {}),
+        ...keywordAvailabilityLogData(availability)
+      }
+    );
+    reply.code(409).send({
+      error:
+        "No eligible keyword remains. Active keywords are already in SearchTerms.Used or No.Result; clear SearchTerms.Used to search them again.",
+      reason: "no_eligible_keywords",
+      availability,
+      resetSearchTermsUsedAvailable: availability.excludedBySearchTermsUsed > 0,
+      resetSearchTermsUsedEndpoint: "/admin/settings/search-terms-used/reset"
     });
   }
 

@@ -213,6 +213,64 @@ describe("admin api", () => {
     await app.close();
   });
 
+  it("blocks empty starts and allows resetting SearchTerms.Used before starting again", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-api-empty-start-"));
+    const currentSessionFilePath = path.join(tmp, "current-session.log");
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+    for (const keyword of ["alpha", "beta"]) {
+      lists.add("keyword", keyword);
+      lists.add("search_terms_used", keyword);
+    }
+    const app = createAdminApi({
+      database,
+      config: loadConfig({
+        ADMIN_PASSWORD: "secret",
+        SESSION_SECRET: "test-session-secret",
+        DATABASE_URL: path.join(tmp, "redqueenx.sqlite"),
+        CURRENT_SESSION_FILE: currentSessionFilePath,
+        X_API_ENABLED: "true",
+        SEARCH_WITHOUT_API_ENABLED: "false"
+      }),
+      envPath: path.join(tmp, ".env"),
+      currentSessionFilePath
+    });
+
+    const login = await app.inject({ method: "POST", url: "/admin/login", payload: { username: "admin", password: "secret" } });
+    expect(login.statusCode).toBe(200);
+    const authHeaders = authHeadersFromSetCookie(login.headers["set-cookie"]);
+
+    const blockedStart = await app.inject({ method: "POST", url: "/admin/runs", headers: authHeaders });
+    expect(blockedStart.statusCode).toBe(409);
+    expect(blockedStart.json()).toMatchObject({
+      reason: "no_eligible_keywords",
+      resetSearchTermsUsedAvailable: true,
+      resetSearchTermsUsedEndpoint: "/admin/settings/search-terms-used/reset",
+      availability: {
+        totalKeywords: 2,
+        availableKeywords: 0,
+        excludedBySearchTermsUsed: 2
+      }
+    });
+    expect(new RunService(database).current()).toBeNull();
+
+    const resetSearchTermsUsed = await app.inject({
+      method: "POST",
+      url: "/admin/settings/search-terms-used/reset",
+      headers: authHeaders
+    });
+    expect(resetSearchTermsUsed.statusCode).toBe(200);
+    expect(resetSearchTermsUsed.json()).toEqual({ deleted: 2 });
+
+    const runStart = await app.inject({ method: "POST", url: "/admin/runs", headers: authHeaders });
+    expect(runStart.statusCode).toBe(200);
+    const run = new RunService(database).current();
+    expect(run).toMatchObject({ status: "running" });
+    expect(run ? new RunService(database).keywords(run.id).map((item) => item.keyword) : []).toEqual(["alpha", "beta"]);
+
+    await app.close();
+  });
+
   it("protects admin routes and supports login, list mutations, commands, and import", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-api-"));
     fs.writeFileSync(path.join(tmp, "Rq.Keywords"), "one\n\ntwo", "utf8");
@@ -1768,6 +1826,14 @@ describe("admin api", () => {
       }
     });
 
+    const freshRunKeyword = await app.inject({
+      method: "POST",
+      url: "/admin/lists/keyword",
+      headers: authHeaders,
+      payload: { value: "fresh-run-keyword" }
+    });
+    expect(freshRunKeyword.statusCode).toBe(200);
+
     const runStart = await app.inject({
       method: "POST",
       url: "/admin/runs",
@@ -2228,6 +2294,13 @@ describe("admin api", () => {
     });
     expect(noActiveRun.statusCode).toBe(200);
     expect(noActiveRun.json().run).toBeNull();
+
+    const deleteFreshRunKeyword = await app.inject({
+      method: "DELETE",
+      url: `/admin/lists/keyword/${freshRunKeyword.json().entry.id}`,
+      headers: authHeaders
+    });
+    expect(deleteFreshRunKeyword.statusCode).toBe(200);
 
     const envDefaults = await app.inject({
       method: "GET",

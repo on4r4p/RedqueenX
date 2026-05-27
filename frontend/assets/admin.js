@@ -2,6 +2,7 @@ const statusLine = document.getElementById("status-line");
 const adminNavMore = document.getElementById("admin-nav-more");
 const metrics = document.getElementById("metrics");
 const countersUpdatedAt = document.getElementById("counters-updated-at");
+const sessionKeywordWarning = document.getElementById("session-keyword-warning");
 const runPreviewRefreshButton = document.getElementById("run-preview-refresh-button");
 const runPreviewSummary = document.getElementById("run-preview-summary");
 const runPreviewList = document.getElementById("run-preview-list");
@@ -816,13 +817,17 @@ async function jsonFetch(url, options = {}) {
   if (!response.ok) {
     const text = await response.text();
     let message = text;
+    let payload = null;
     try {
-      const payload = JSON.parse(text);
+      payload = JSON.parse(text);
       message = payload.error || payload.message || text;
     } catch {
       // Keep the raw response body when the server did not return JSON.
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
   }
 
   return response.json();
@@ -1600,6 +1605,7 @@ async function refreshStats() {
       return `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
     })
     .join("") + renderRunCounterMetric(data.currentRun) + renderXBudgetMetrics(data.xBudget, data.runtimeModes) + renderSearchWithoutApiMetrics(data.searchWithoutApi);
+  renderSessionKeywordWarning(data.searchWithoutApi);
   if (countersUpdatedAt) {
     countersUpdatedAt.textContent = `Updated ${new Date().toLocaleString()}`;
   }
@@ -1647,10 +1653,6 @@ function renderXBudgetMetrics(budget, runtimeModes = {}) {
 function renderSearchWithoutApiMetrics(stats) {
   if (!stats?.enabled) return "";
   const available = stats.availableKeywords ?? 0;
-  const noEligibleWarning =
-    (stats.keywordTotal ?? 0) > 0 && available === 0
-      ? `<div class="metric metric-wide is-warning"><span>No eligible keywords remain</span><strong class="metric-text">${keywordExhaustionText(stats)}</strong></div>`
-      : "";
   return `
     <div class="metric"><span>Keywords per session</span><strong>${formatSessionKeywordLimit(stats)}</strong></div>
     <div class="metric"><span>@user keyword target</span><strong>${stats.userKeywordPercent ?? 100}%</strong></div>
@@ -1658,8 +1660,17 @@ function renderSearchWithoutApiMetrics(stats) {
     <div class="metric"><span>SearchTerms.Used saved</span><strong>${stats.searchTermsUsedKeywords ?? stats.searchedKeywords ?? 0}</strong></div>
     <div class="metric"><span>Active keywords already searched</span><strong>${stats.excludedAlreadySearchedKeywords ?? 0}</strong></div>
     <div class="metric"><span>Available keywords now</span><strong>${available}</strong></div>
-    ${noEligibleWarning}
   `;
+}
+
+function renderSessionKeywordWarning(stats) {
+  if (!sessionKeywordWarning) return;
+  const available = stats?.availableKeywords ?? 0;
+  if (!stats?.enabled || (stats.keywordTotal ?? 0) <= 0 || available > 0) {
+    sessionKeywordWarning.innerHTML = "";
+    return;
+  }
+  sessionKeywordWarning.innerHTML = `<div class="metric metric-wide is-warning"><span>No eligible keywords remain</span><strong class="metric-text">${keywordExhaustionText(stats)}</strong></div>`;
 }
 
 function keywordExhaustionText(stats) {
@@ -2552,6 +2563,7 @@ async function openCurrentSessionSection() {
   await refreshStats();
   await refreshCurrentSession();
   await refreshSessionKeywords();
+  await refreshRunPreview();
 }
 
 async function openCurrentSessionForLiveFollow() {
@@ -2570,6 +2582,24 @@ async function openCurrentSessionForLiveFollow() {
 
 function isActiveRun(run) {
   return run?.status === "running" || run?.status === "paused";
+}
+
+function renderRunActionButtons(run) {
+  const active = isActiveRun(run);
+  document.querySelectorAll("[data-run-action]").forEach((button) => {
+    const action = button.dataset.runAction;
+    const highlighted =
+      action === "start"
+        ? !active
+        : action === "pause"
+          ? run?.status === "running"
+          : action === "stop"
+            ? true
+            : action === "resume"
+              ? run?.status === "paused"
+              : false;
+    button.classList.toggle("is-run-action-active", highlighted);
+  });
 }
 
 function formatStaleKeywordUserPruneRunLabel(status) {
@@ -2591,6 +2621,7 @@ function formatStaleKeywordUserPruneRunLabel(status) {
 
 function renderRunStatus(run, staleKeywordUserPrune) {
   if (!runStatusLine) return;
+  renderRunActionButtons(run);
   if (!isActiveRun(run)) {
     const pruneLabel = formatStaleKeywordUserPruneRunLabel(staleKeywordUserPrune);
     if (pruneLabel) {
@@ -3625,6 +3656,7 @@ function updateSessionPolling() {
     sessionRefreshTimer = setInterval(() => {
       refreshCurrentSession().catch((error) => setStatus(error.message));
       refreshSessionKeywords().catch((error) => setStatus(error.message));
+      refreshRunPreview().catch((error) => setStatus(error.message));
     }, 2000);
   }
 }
@@ -3642,6 +3674,7 @@ function selectSessionLevel(selectedInput) {
 function refreshCurrentSessionSoon() {
   refreshCurrentSession().catch((error) => setStatus(error.message));
   refreshSessionKeywords().catch((error) => setStatus(error.message));
+  refreshRunPreview().catch((error) => setStatus(error.message));
 }
 
 function currentEditKindLabel() {
@@ -4393,15 +4426,26 @@ function setupEnvSecretToggles() {
   });
 }
 
-async function runAction(action) {
+async function runAction(action, options = {}) {
   if (action === "start") {
     showAdminSection("session");
     updateSessionPolling();
-    const result = await jsonFetch("/admin/runs", { method: "POST" });
+    let result = null;
+    try {
+      result = await jsonFetch("/admin/runs", { method: "POST" });
+    } catch (error) {
+      const handled = await maybeResetSearchTermsUsedForStart(error, options);
+      if (handled) {
+        await runAction("start", { allowSearchTermsUsedResetPrompt: false });
+        return;
+      }
+      throw error;
+    }
     if (result) {
       setStatus(`Run started: ${result.run.id}`);
     }
     await openCurrentSessionSection();
+    await refreshRunPreview();
     return;
   }
 
@@ -4428,7 +4472,47 @@ async function runAction(action) {
   if (activeAdminSection() === "session") {
     await refreshCurrentSession();
     await refreshSessionKeywords();
+    await refreshRunPreview();
   }
+}
+
+async function maybeResetSearchTermsUsedForStart(error, options = {}) {
+  const payload = error?.payload;
+  if (
+    options.allowSearchTermsUsedResetPrompt === false ||
+    payload?.reason !== "no_eligible_keywords" ||
+    !payload.resetSearchTermsUsedAvailable
+  ) {
+    return false;
+  }
+
+  const availability = payload.availability || {};
+  const searched = Number(availability.excludedBySearchTermsUsed ?? 0);
+  const noResult = Number(availability.excludedByNoResult ?? 0);
+  const confirmed = window.confirm(
+    [
+      "No eligible keyword is left for a new run.",
+      "",
+      `${searched} keyword${searched === 1 ? "" : "s"} are blocked by SearchTerms.Used.`,
+      noResult > 0 ? `${noResult} keyword${noResult === 1 ? "" : "s"} will stay excluded by No.Result.` : "",
+      "",
+      "Reset SearchTerms.Used and start again?"
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+  if (!confirmed) {
+    setStatus("Start cancelled. SearchTerms.Used was not reset.");
+    await refreshRunPreview();
+    return true;
+  }
+
+  const resetEndpoint = payload.resetSearchTermsUsedEndpoint || "/admin/settings/search-terms-used/reset";
+  const reset = await jsonFetch(resetEndpoint, { method: "POST" });
+  setStatus(`SearchTerms.Used reset: ${reset?.deleted ?? 0} active entries cleared. Starting a fresh run...`);
+  await refreshStats();
+  await refreshRunPreview();
+  return true;
 }
 
 async function startStaleKeywordUserPrune() {
@@ -5343,9 +5427,11 @@ sessionAlertDetail?.addEventListener("input", (event) => {
 sessionRefreshButton.addEventListener("click", () => {
   refreshCurrentSession().catch((error) => setStatus(error.message));
   refreshSessionKeywords().catch((error) => setStatus(error.message));
+  refreshRunPreview().catch((error) => setStatus(error.message));
 });
 sessionKeywordsRefreshButton?.addEventListener("click", () => {
   refreshSessionKeywords().catch((error) => setStatus(error.message));
+  refreshRunPreview().catch((error) => setStatus(error.message));
 });
 runPreviewRefreshButton?.addEventListener("click", () => {
   refreshRunPreview().catch((error) => setStatus(error.message));
