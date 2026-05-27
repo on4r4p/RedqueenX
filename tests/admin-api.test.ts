@@ -129,7 +129,7 @@ describe("admin api", () => {
     const currentSessionFilePath = path.join(tmp, "current-session.log");
     const database = openMemoryDatabase();
     const lists = new ListService(database);
-    for (const keyword of ["alpha", "beta", "gamma", "delta", "epsilon"]) {
+    for (const keyword of ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]) {
       lists.add("keyword", keyword);
     }
     const app = createAdminApi({
@@ -144,7 +144,7 @@ describe("admin api", () => {
         SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT: "2",
         SEARCH_WITHOUT_API_SESSION_KEYWORD_LIMIT_RANDOM: "false",
         SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER: "false",
-        RUN_CHAIN_COUNT: "2"
+        RUN_CHAIN_COUNT: "3"
       }),
       envPath: path.join(tmp, ".env"),
       currentSessionFilePath
@@ -158,7 +158,7 @@ describe("admin api", () => {
     expect(preview.statusCode).toBe(200);
     expect(preview.json().source).toBe("fresh_preview");
     expect(preview.json().previews.map((item: { sample: string[] }) => item.sample)).toEqual([
-      ["alpha", "beta", "gamma", "delta", "epsilon"]
+      ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
     ]);
 
     const runStart = await app.inject({ method: "POST", url: "/admin/runs", headers: authHeaders });
@@ -168,7 +168,14 @@ describe("admin api", () => {
     if (!run) {
       throw new Error("Expected a run to be created.");
     }
-    expect(runs.keywords(run.id).map((item) => item.keyword)).toEqual(["alpha", "beta", "gamma", "delta", "epsilon"]);
+    expect(runs.keywords(run.id).map((item) => item.keyword)).toEqual([
+      "alpha",
+      "beta",
+      "gamma",
+      "delta",
+      "epsilon",
+      "zeta"
+    ]);
     expect(parseRunStats(run.statsJson)).toMatchObject({
       runChainTotal: 1,
       runChainIndex: 1,
@@ -189,7 +196,7 @@ describe("admin api", () => {
         status: item.status
       }))
     ).toEqual([
-      { runIndex: 1, sample: ["alpha", "beta", "gamma", "delta", "epsilon"], status: "active" }
+      { runIndex: 1, sample: ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"], status: "active" }
     ]);
 
     const sessionKeywords = await app.inject({ method: "GET", url: "/admin/session/keywords?limit=1000", headers: authHeaders });

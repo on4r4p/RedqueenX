@@ -13,6 +13,7 @@ import { parseRunStats, RunService } from "../admin/runService";
 import { SettingsService } from "../admin/settingsService";
 import { XBrowserAccountService } from "../admin/xBrowserAccountService";
 import { XSessionAlertService } from "../admin/xSessionAlertService";
+import { keywordBatchMultiplierFromRunChainCount } from "../runPlanning";
 import { isHandleSearchKeyword, normalizeValue } from "../text";
 import type { RunRecord, RunStats } from "../types";
 import { assertVpnRuntime } from "./vpnGuard";
@@ -505,7 +506,7 @@ function runChainLogData(stats: RunStats, config: Pick<AppConfig, "runChainCount
 }
 
 function runChainTotalFromAdditionalCount(config: Pick<AppConfig, "runChainCount">): number {
-  return Math.max(1, Math.floor(config.runChainCount ?? 0) + 1);
+  return keywordBatchMultiplierFromRunChainCount(config.runChainCount);
 }
 
 function nextRunChainKeywordBatch(stats: RunStats): { keywords: string[]; remainingBatches: string[][] } | null {

@@ -622,7 +622,7 @@ const adminTooltipByName = {
   X_LOGIN_START_URL: "Initial X login page opened by the manual browser helper.",
   TIMELINE_DEFAULT_PAGE_SIZE: "Default number of tweets shown per page on Timeline and Rejected Timeline when the URL has no limit parameter.",
   RUN_CHAIN_COUNT:
-    "Number of extra keyword batches folded into the next single run. 0 means one normal batch; 1 doubles the planned keyword count.",
+    "Keyword batch multiplier for the next single run. 0 means one normal batch; 1 doubles the planned keyword count; 3 searches three batches.",
   STALE_KEYWORD_USER_MAX_AGE_DAYS:
     "Saved default threshold for Keyword users cleanup. @keywords are removed when the latest visible tweet is older than this many days.",
   STALE_KEYWORD_USER_START_INDEX:

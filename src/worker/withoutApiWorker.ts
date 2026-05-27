@@ -10,6 +10,7 @@ import { Crawler } from "../crawler";
 import { openDatabase } from "../db/database";
 import { formatDiagnosticsReport, runVpnDiagnostics, type VpnDiagnosticsReport } from "../diagnostics/vpn";
 import { runRssFallback as runSharedRssFallback } from "../rssFallback";
+import { keywordBatchMultiplierFromRunChainCount } from "../runPlanning";
 import { RedditCrawler } from "../reddit/redditCrawler";
 import { crawlRedditKeywords } from "../reddit/redditTimeline";
 import { CurrentSessionService, type CurrentSessionLevel } from "../admin/currentSessionService";
@@ -1948,7 +1949,7 @@ function planBrowserKeywords(lists: ListService, config: ReturnType<typeof loadC
 }
 
 function keywordBatchMultiplier(config: Pick<ReturnType<typeof loadConfig>, "runChainCount">): number {
-  return Math.max(1, Math.floor(config.runChainCount ?? 0) + 1);
+  return keywordBatchMultiplierFromRunChainCount(config.runChainCount);
 }
 
 function plannedKeywordSelectionCount(available: number, configuredLimit: number, multiplier: number, randomize: boolean): number {

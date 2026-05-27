@@ -43,6 +43,7 @@ import { Crawler } from "../crawler";
 import { XApiClient } from "../x-client";
 import { XActionClient } from "../x-actions";
 import { runRssFallback as runSharedRssFallback } from "../rssFallback";
+import { keywordBatchMultiplierFromRunChainCount } from "../runPlanning";
 import { RedditCrawler } from "../reddit/redditCrawler";
 import { crawlRedditKeywords } from "../reddit/redditTimeline";
 import { TimelineTweetService, type TimelineTweetExportRecord } from "./timelineTweetService";
@@ -7454,7 +7455,7 @@ function initialRunChainState(config: { runChainCount?: number }): RunChainState
 }
 
 function runChainTotalFromAdditionalCount(config: { runChainCount?: number }): number {
-  return Math.max(1, Math.floor(config.runChainCount ?? 0) + 1);
+  return keywordBatchMultiplierFromRunChainCount(config.runChainCount);
 }
 
 function nextRunChainState(stats: RunStats, config: { runChainCount?: number }): RunChainState | null {
