@@ -1924,7 +1924,7 @@ function planBrowserKeywords(lists: ListService, config: ReturnType<typeof loadC
   const configuredLimit = Math.max(0, Math.floor(config.searchWithoutApiSessionKeywordLimit));
   if (configuredLimit === 0 || keywords.length === 0) {
     return {
-      keywords,
+      keywords: applyUserKeywordPercent(keywords, keywords.length, config.searchWithoutApiUserKeywordPercent),
       ...availability,
       configuredLimit,
       randomized: false,
@@ -1932,15 +1932,68 @@ function planBrowserKeywords(lists: ListService, config: ReturnType<typeof loadC
     };
   }
 
-  const max = Math.min(configuredLimit, keywords.length);
-  const effectiveLimit = config.searchWithoutApiSessionKeywordLimitRandom ? randomInt(1, max) : max;
+  const effectiveLimit = plannedKeywordSelectionCount(
+    keywords.length,
+    configuredLimit,
+    keywordBatchMultiplier(config),
+    config.searchWithoutApiSessionKeywordLimitRandom
+  );
   return {
-    keywords: keywords.slice(0, effectiveLimit),
+    keywords: applyUserKeywordPercent(keywords, effectiveLimit, config.searchWithoutApiUserKeywordPercent),
     ...availability,
     configuredLimit,
     randomized: config.searchWithoutApiSessionKeywordLimitRandom,
     orderRandomized: config.searchWithoutApiRandomizeKeywordOrder
   };
+}
+
+function keywordBatchMultiplier(config: Pick<ReturnType<typeof loadConfig>, "runChainCount">): number {
+  return Math.max(1, Math.floor(config.runChainCount ?? 0) + 1);
+}
+
+function plannedKeywordSelectionCount(available: number, configuredLimit: number, multiplier: number, randomize: boolean): number {
+  const safeAvailable = Math.max(0, Math.floor(available));
+  if (safeAvailable <= 0) {
+    return 0;
+  }
+  const safeMultiplier = Math.max(1, Math.floor(multiplier));
+  if (configuredLimit <= 0) {
+    return safeAvailable;
+  }
+
+  const multipliedLimit = Math.max(1, Math.floor(configuredLimit)) * safeMultiplier;
+  const maxKeywords = Math.min(safeAvailable, multipliedLimit);
+  if (!randomize) {
+    return maxKeywords;
+  }
+
+  const maxBase = Math.max(1, Math.min(Math.floor(configuredLimit), Math.ceil(safeAvailable / safeMultiplier)));
+  return Math.min(safeAvailable, randomInt(1, maxBase) * safeMultiplier);
+}
+
+function applyUserKeywordPercent(keywords: string[], totalKeywords: number, configuredPercent = 100): string[] {
+  const total = Math.max(0, Math.min(keywords.length, Math.floor(totalKeywords)));
+  const percent = Math.max(0, Math.min(100, Math.floor(configuredPercent)));
+  if (total === 0 || percent >= 100) {
+    return keywords.slice(0, total);
+  }
+
+  const indexedKeywords = keywords.map((keyword, index) => ({ keyword, index }));
+  const userKeywords = indexedKeywords.filter(({ keyword }) => isHandleSearchKeyword(keyword));
+  const regularKeywords = indexedKeywords.filter(({ keyword }) => !isHandleSearchKeyword(keyword));
+  const targetUsers = Math.floor((total * percent) / 100);
+  const targetRegular = total - targetUsers;
+  const selected = [...regularKeywords.slice(0, targetRegular), ...userKeywords.slice(0, targetUsers)];
+
+  if (selected.length < total) {
+    const selectedIndexes = new Set(selected.map(({ index }) => index));
+    selected.push(...indexedKeywords.filter(({ index }) => !selectedIndexes.has(index)).slice(0, total - selected.length));
+  }
+
+  return selected
+    .sort((left, right) => left.index - right.index)
+    .slice(0, total)
+    .map(({ keyword }) => keyword);
 }
 
 async function planSmokeKeywords(cliKeyword?: string) {
@@ -2029,10 +2082,6 @@ function createBrowserRunStats(
   existingStats?: RunStats
 ) {
   const apiCallLimit = searchesBeforePauseForKeywords(totalKeywords, config);
-  const fallbackRunChainTotal = Math.max(1, Math.floor(config.runChainCount ?? 0) + 1);
-  const runChainTotal = Math.max(1, Math.floor(existingStats?.runChainTotal ?? fallbackRunChainTotal));
-  const runChainIndex = Math.max(1, Math.floor(existingStats?.runChainIndex ?? 1));
-  const runChainRemaining = Math.max(0, Math.floor(existingStats?.runChainRemaining ?? runChainTotal - runChainIndex));
   const stats: RunStats = {
     currentKeyword: null,
     totalKeywords,
@@ -2042,9 +2091,10 @@ function createBrowserRunStats(
     sessionKeywordLimit: config.searchWithoutApiSessionKeywordLimit,
     sessionKeywordLimitRandom: config.searchWithoutApiSessionKeywordLimitRandom,
     randomizeKeywordOrder: config.searchWithoutApiRandomizeKeywordOrder,
-    runChainTotal,
-    runChainIndex,
-    runChainRemaining,
+    userKeywordPercent: config.searchWithoutApiUserKeywordPercent,
+    runChainTotal: 1,
+    runChainIndex: 1,
+    runChainRemaining: 0,
     apiCallsUsed: 0,
     apiCallLimit,
     apiCallsRemaining: apiCallLimit,
@@ -2061,10 +2111,6 @@ function createBrowserRunStats(
     lastScore: null,
     lastTweetId: null
   };
-  const runChainKeywordBatches = normalizeRunChainKeywordBatches(existingStats?.runChainKeywordBatches);
-  if (runChainKeywordBatches.length > 0) {
-    stats.runChainKeywordBatches = runChainKeywordBatches;
-  }
   return stats;
 }
 
@@ -2091,7 +2137,10 @@ function browserRunPlanMatchesConfig(stats: RunStats, config: ReturnType<typeof 
   return (
     stats.sessionKeywordLimit === config.searchWithoutApiSessionKeywordLimit &&
     Boolean(stats.sessionKeywordLimitRandom) === Boolean(config.searchWithoutApiSessionKeywordLimitRandom) &&
-    Boolean(stats.randomizeKeywordOrder) === Boolean(config.searchWithoutApiRandomizeKeywordOrder)
+    Boolean(stats.randomizeKeywordOrder) === Boolean(config.searchWithoutApiRandomizeKeywordOrder) &&
+    Math.floor(stats.userKeywordPercent ?? 100) === Math.floor(config.searchWithoutApiUserKeywordPercent) &&
+    Math.floor(stats.runChainTotal ?? 1) === 1 &&
+    Math.floor(stats.runChainRemaining ?? 0) === 0
   );
 }
 

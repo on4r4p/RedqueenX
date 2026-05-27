@@ -124,7 +124,7 @@ describe("admin api", () => {
     await app.close();
   });
 
-  it("stores concrete keyword batches when a chained run starts", async () => {
+  it("folds extra keyword batches into one concrete run plan", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redqueen-api-chain-"));
     const currentSessionFilePath = path.join(tmp, "current-session.log");
     const database = openMemoryDatabase();
@@ -158,9 +158,7 @@ describe("admin api", () => {
     expect(preview.statusCode).toBe(200);
     expect(preview.json().source).toBe("fresh_preview");
     expect(preview.json().previews.map((item: { sample: string[] }) => item.sample)).toEqual([
-      ["alpha", "beta"],
-      ["gamma", "delta"],
-      ["epsilon"]
+      ["alpha", "beta", "gamma", "delta", "epsilon"]
     ]);
 
     const runStart = await app.inject({ method: "POST", url: "/admin/runs", headers: authHeaders });
@@ -170,15 +168,11 @@ describe("admin api", () => {
     if (!run) {
       throw new Error("Expected a run to be created.");
     }
-    expect(runs.keywords(run.id).map((item) => item.keyword)).toEqual(["alpha", "beta"]);
+    expect(runs.keywords(run.id).map((item) => item.keyword)).toEqual(["alpha", "beta", "gamma", "delta", "epsilon"]);
     expect(parseRunStats(run.statsJson)).toMatchObject({
-      runChainTotal: 3,
+      runChainTotal: 1,
       runChainIndex: 1,
-      runChainRemaining: 2,
-      runChainKeywordBatches: [
-        ["gamma", "delta"],
-        ["epsilon"]
-      ]
+      runChainRemaining: 0
     });
 
     const activePreview = await app.inject({ method: "GET", url: "/admin/runs/preview", headers: authHeaders });
@@ -186,7 +180,7 @@ describe("admin api", () => {
     expect(activePreview.json()).toMatchObject({
       source: "active_run",
       run: { id: run.id, status: "running", isCurrent: true },
-      runCount: 3
+      runCount: 1
     });
     expect(
       activePreview.json().previews.map((item: { runIndex: number; sample: string[]; status: string }) => ({
@@ -195,19 +189,17 @@ describe("admin api", () => {
         status: item.status
       }))
     ).toEqual([
-      { runIndex: 1, sample: ["alpha", "beta"], status: "active" },
-      { runIndex: 2, sample: ["gamma", "delta"], status: "queued" },
-      { runIndex: 3, sample: ["epsilon"], status: "queued" }
+      { runIndex: 1, sample: ["alpha", "beta", "gamma", "delta", "epsilon"], status: "active" }
     ]);
 
     const sessionKeywords = await app.inject({ method: "GET", url: "/admin/session/keywords?limit=1000", headers: authHeaders });
     expect(sessionKeywords.statusCode).toBe(200);
     expect(sessionKeywords.json().chain).toEqual({
-      total: 3,
+      total: 1,
       index: 1,
-      remaining: 2,
-      queuedRuns: 2,
-      queuedKeywords: 3
+      remaining: 0,
+      queuedRuns: 0,
+      queuedKeywords: 0
     });
 
     await app.close();

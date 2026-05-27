@@ -1552,7 +1552,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       };
     }
 
-    const keywordChain = plannedKeywordChain(lists, runtimeConfig);
+    const keywordChain = plannedKeywordChain(lists, runtimeConfig, { deterministic: true });
     const previews = keywordChain.batches.map((preview) => ({
       runIndex: preview.runIndex,
       plannedKeywords: preview.keywords.length,
@@ -5559,7 +5559,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
     const completedStats = parseRunStats(completedRun.statsJson);
     const chain = nextRunChainState(completedStats, runtimeConfig);
     if (!chain) {
-      await recordSession("info", "run.chain.completed", "Sequential run chain completed", {
+      await recordSession("info", "run.chain.completed", "Run completed; no extra run queued", {
         previousRunId: completedRunId,
         mode,
         ...runChainLogData(completedStats, runtimeConfig)
@@ -7449,8 +7449,8 @@ interface RunChainState {
 }
 
 function initialRunChainState(config: { runChainCount?: number }): RunChainState {
-  const total = runChainTotalFromAdditionalCount(config);
-  return { total, index: 1, remaining: total - 1 };
+  void config;
+  return { total: 1, index: 1, remaining: 0 };
 }
 
 function runChainTotalFromAdditionalCount(config: { runChainCount?: number }): number {
@@ -7458,34 +7458,24 @@ function runChainTotalFromAdditionalCount(config: { runChainCount?: number }): n
 }
 
 function nextRunChainState(stats: RunStats, config: { runChainCount?: number }): RunChainState | null {
-  const fallback = initialRunChainState(config);
-  const currentIndex = Math.max(1, Math.floor(stats.runChainIndex ?? fallback.index));
-  const remaining = Math.max(0, Math.floor(stats.runChainRemaining ?? fallback.remaining));
-  if (remaining <= 0) {
-    return null;
-  }
-  const total = Math.max(1, Math.floor(stats.runChainTotal ?? fallback.total));
-  const index = currentIndex + 1;
-  return { total, index, remaining: remaining - 1 };
+  void stats;
+  void config;
+  return null;
 }
 
 function runChainLogData(stats: RunStats, config: { runChainCount?: number }): Record<string, number | null> {
-  const fallback = initialRunChainState(config);
-  const index = stats.runChainIndex ?? fallback.index;
+  void stats;
+  void config;
   return {
-    runChainTotal: stats.runChainTotal ?? fallback.total,
-    runChainIndex: index,
-    runChainRemaining: stats.runChainRemaining ?? Math.max(0, fallback.total - index)
+    runChainTotal: 1,
+    runChainIndex: 1,
+    runChainRemaining: 0
   };
 }
 
 function runChainStateFromStats(stats: RunStats, config: { runChainCount?: number }): RunChainState {
-  const fallback = initialRunChainState(config);
-  return {
-    total: Math.max(1, Math.floor(stats.runChainTotal ?? fallback.total)),
-    index: Math.max(1, Math.floor(stats.runChainIndex ?? fallback.index)),
-    remaining: Math.max(0, Math.floor(stats.runChainRemaining ?? fallback.remaining))
-  };
+  void stats;
+  return initialRunChainState(config);
 }
 
 function runChainSummaryFromStats(stats: RunStats): {
@@ -7495,16 +7485,13 @@ function runChainSummaryFromStats(stats: RunStats): {
   queuedRuns: number;
   queuedKeywords: number;
 } {
-  const queuedBatches = normalizeRunChainKeywordBatches(stats.runChainKeywordBatches);
-  const index = Math.max(1, Math.floor(stats.runChainIndex ?? 1));
-  const remaining = Math.max(0, Math.floor(stats.runChainRemaining ?? queuedBatches.length));
-  const total = Math.max(index + remaining, Math.floor(stats.runChainTotal ?? index + queuedBatches.length));
+  void stats;
   return {
-    total,
-    index,
-    remaining,
-    queuedRuns: queuedBatches.length,
-    queuedKeywords: queuedBatches.reduce((sum, batch) => sum + batch.length, 0)
+    total: 1,
+    index: 1,
+    remaining: 0,
+    queuedRuns: 0,
+    queuedKeywords: 0
   };
 }
 
@@ -7518,7 +7505,6 @@ function currentRunKeywordPlanPreview(
   const stats = parseRunStats(run.statsJson);
   const chain = runChainSummaryFromStats(stats);
   const currentKeywords = runs.keywords(run.id, 5_000).map((item) => item.keyword);
-  const queuedBatches = normalizeRunChainKeywordBatches(stats.runChainKeywordBatches);
 
   const previews: Array<{ runIndex: number; plannedKeywords: number; sample: string[]; status: "active" | "queued" }> = [
     {
@@ -7527,12 +7513,6 @@ function currentRunKeywordPlanPreview(
       sample: currentKeywords,
       status: "active"
     },
-    ...queuedBatches.map((keywords, index) => ({
-      runIndex: chain.index + index + 1,
-      plannedKeywords: keywords.length,
-      sample: keywords,
-      status: "queued" as const
-    }))
   ];
 
   return {
@@ -7541,23 +7521,34 @@ function currentRunKeywordPlanPreview(
   };
 }
 
+type KeywordPlanConfig = {
+  runChainCount?: number;
+  searchWithoutApiSessionKeywordLimit?: number;
+  searchWithoutApiSessionKeywordLimitRandom?: boolean;
+  searchWithoutApiRandomizeKeywordOrder?: boolean;
+  searchWithoutApiUserKeywordPercent?: number;
+};
+
+interface KeywordPlanOptions {
+  deterministic?: boolean;
+  multiplier?: number;
+}
+
 function plannedKeywordChain(
   lists: ListService,
-  config: {
-    runChainCount?: number;
-    searchWithoutApiSessionKeywordLimit?: number;
-    searchWithoutApiSessionKeywordLimitRandom?: boolean;
-    searchWithoutApiRandomizeKeywordOrder?: boolean;
-    searchWithoutApiUserKeywordPercent?: number;
-  }
+  config: KeywordPlanConfig,
+  options: KeywordPlanOptions = {}
 ): {
   keywords: string[];
   futureBatches: string[][];
   chain: RunChainState;
   batches: Array<{ runIndex: number; keywords: string[] }>;
 } {
-  const requestedRuns = runChainTotalFromAdditionalCount(config);
-  const batches = plannedKeywordBatches(lists, config, requestedRuns)
+  const keywords = plannedKeywords(lists, config, {
+    ...options,
+    multiplier: options.multiplier ?? runChainTotalFromAdditionalCount(config)
+  });
+  const batches = [{ runIndex: 1, keywords }]
     .filter((batch) => batch.keywords.length > 0)
     .map((batch, index) => ({ runIndex: index + 1, keywords: batch.keywords }));
   if (batches.length === 0) {
@@ -7569,11 +7560,10 @@ function plannedKeywordChain(
     };
   }
 
-  const futureBatches = batches.slice(1).map((batch) => batch.keywords);
   return {
     keywords: batches[0]?.keywords ?? [],
-    futureBatches,
-    chain: { total: batches.length, index: 1, remaining: futureBatches.length },
+    futureBatches: [],
+    chain: { total: 1, index: 1, remaining: 0 },
     batches
   };
 }
@@ -7625,7 +7615,7 @@ function createInitialRunStats(
   runChainKeywordBatches: string[][] = []
 ): RunStats {
   const apiWindowMinutes = searchPauseWindowMaxMinutesForConfig(config);
-  const availableKeywords = plannedKeywords(lists, config).length;
+  const availableKeywords = plannedKeywords(lists, config, { deterministic: true }).length;
   const keywords = plannedKeywordList ?? plannedKeywords(lists, config);
   const configuredLimit = config.searchWithoutApiSessionKeywordLimit ?? 0;
   const totalKeywords = keywords.length;
@@ -7720,27 +7710,17 @@ function randomSearchPauseWindowMinutesForConfig(config: {
 
 function plannedKeywords(
   lists: ListService,
-  config?: {
-    searchWithoutApiSessionKeywordLimit?: number;
-    searchWithoutApiSessionKeywordLimitRandom?: boolean;
-    searchWithoutApiRandomizeKeywordOrder?: boolean;
-    searchWithoutApiUserKeywordPercent?: number;
-  }
+  config?: KeywordPlanConfig,
+  options: KeywordPlanOptions = {}
 ): string[] {
-  return plannedKeywordBatches(lists, config, 1)[0]?.keywords ?? [];
+  return plannedKeywordBatches(lists, config, 1, options)[0]?.keywords ?? [];
 }
 
 function plannedKeywordBatches(
   lists: ListService,
-  config:
-    | {
-        searchWithoutApiSessionKeywordLimit?: number;
-        searchWithoutApiSessionKeywordLimitRandom?: boolean;
-        searchWithoutApiRandomizeKeywordOrder?: boolean;
-        searchWithoutApiUserKeywordPercent?: number;
-      }
-    | undefined,
-  count: number
+  config: KeywordPlanConfig | undefined,
+  count: number,
+  options: KeywordPlanOptions = {}
 ): Array<{ runIndex: number; keywords: string[] }> {
   const noResults = new Set(lists.activeValues("no_result").map(normalizeValue));
   const alreadyUsed = new Set(lists.activeValues("search_terms_used").map(normalizeValue));
@@ -7752,15 +7732,19 @@ function plannedKeywordBatches(
     });
   const totalBatches = Math.max(1, Math.floor(count));
   const batches: Array<{ runIndex: number; keywords: string[] }> = [];
+  const multiplier = Math.max(1, Math.floor(options.multiplier ?? runChainTotalFromAdditionalCount(config ?? {})));
 
   for (let runIndex = 1; runIndex <= totalBatches; runIndex += 1) {
-    const orderedKeywords = config?.searchWithoutApiRandomizeKeywordOrder
+    const orderedKeywords = config?.searchWithoutApiRandomizeKeywordOrder && !options.deterministic
       ? shuffleKeywordList(remainingKeywords)
       : remainingKeywords;
     const configuredLimit = Math.max(0, Math.floor(config?.searchWithoutApiSessionKeywordLimit ?? 0));
-    const maxKeywords = configuredLimit > 0 ? Math.min(orderedKeywords.length, configuredLimit) : orderedKeywords.length;
-    const totalKeywords =
-      config?.searchWithoutApiSessionKeywordLimitRandom && maxKeywords > 0 ? randomInt(1, maxKeywords) : maxKeywords;
+    const totalKeywords = plannedKeywordSelectionCount(
+      orderedKeywords.length,
+      configuredLimit,
+      multiplier,
+      Boolean(config?.searchWithoutApiSessionKeywordLimitRandom) && !options.deterministic
+    );
     const keywords = applyUserKeywordPercent(orderedKeywords, totalKeywords, config?.searchWithoutApiUserKeywordPercent);
     batches.push({ runIndex, keywords });
 
@@ -7773,6 +7757,31 @@ function plannedKeywordBatches(
   }
 
   return batches;
+}
+
+function plannedKeywordSelectionCount(
+  available: number,
+  configuredLimit: number,
+  multiplier: number,
+  randomize: boolean
+): number {
+  const safeAvailable = Math.max(0, Math.floor(available));
+  if (safeAvailable <= 0) {
+    return 0;
+  }
+  const safeMultiplier = Math.max(1, Math.floor(multiplier));
+  if (configuredLimit <= 0) {
+    return safeAvailable;
+  }
+
+  const multipliedLimit = Math.max(1, Math.floor(configuredLimit)) * safeMultiplier;
+  const maxKeywords = Math.min(safeAvailable, multipliedLimit);
+  if (!randomize) {
+    return maxKeywords;
+  }
+
+  const maxBase = Math.max(1, Math.min(Math.floor(configuredLimit), Math.ceil(safeAvailable / safeMultiplier)));
+  return Math.min(safeAvailable, randomInt(1, maxBase) * safeMultiplier);
 }
 
 function applyUserKeywordPercent(keywords: string[], totalKeywords: number, configuredPercent = 100): string[] {

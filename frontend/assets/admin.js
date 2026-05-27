@@ -622,7 +622,7 @@ const adminTooltipByName = {
   X_LOGIN_START_URL: "Initial X login page opened by the manual browser helper.",
   TIMELINE_DEFAULT_PAGE_SIZE: "Default number of tweets shown per page on Timeline and Rejected Timeline when the URL has no limit parameter.",
   RUN_CHAIN_COUNT:
-    "Number of extra runs launched after the first Start run. 0 means only the first run; use 1+ to continue with the next planned batches.",
+    "Number of extra keyword batches folded into the next single run. 0 means one normal batch; 1 doubles the planned keyword count.",
   STALE_KEYWORD_USER_MAX_AGE_DAYS:
     "Saved default threshold for Keyword users cleanup. @keywords are removed when the latest visible tweet is older than this many days.",
   STALE_KEYWORD_USER_START_INDEX:
@@ -3360,7 +3360,7 @@ async function refreshRunPreview() {
     : [{ runIndex: 1, plannedKeywords: data.plannedKeywords ?? 0, sample: Array.isArray(data.sample) ? data.sample : [] }];
   const previewLabel =
     data.source === "active_run"
-      ? `${previews.length} active/queued run${previews.length === 1 ? "" : "s"}`
+      ? `${previews.length} active run${previews.length === 1 ? "" : "s"}`
       : `${previews.length} fresh run preview${previews.length === 1 ? "" : "s"}`;
   runPreviewSummary.textContent = [
     previewLabel,

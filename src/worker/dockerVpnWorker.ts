@@ -424,7 +424,7 @@ async function maybeStartNextChainedRun(
 
   const chain = nextRunChainState(parseRunStats(completedRun.statsJson), config);
   if (!chain) {
-    await record("info", "docker_vpn.run.chain.completed", "Sequential Docker VPN run chain completed", {
+    await record("info", "docker_vpn.run.chain.completed", "Docker VPN run completed; no extra run queued", {
       previousRunId: completedRunId,
       ...runChainLogData(parseRunStats(completedRun.statsJson), config)
     });
@@ -489,24 +489,18 @@ async function waitForCompletedRun(
 }
 
 function nextRunChainState(stats: RunStats, config: Pick<AppConfig, "runChainCount">): RunChainState | null {
-  const fallbackTotal = runChainTotalFromAdditionalCount(config);
-  const currentIndex = Math.max(1, Math.floor(stats.runChainIndex ?? 1));
-  const remaining = Math.max(0, Math.floor(stats.runChainRemaining ?? fallbackTotal - currentIndex));
-  if (remaining <= 0) {
-    return null;
-  }
-  const total = Math.max(1, Math.floor(stats.runChainTotal ?? fallbackTotal));
-  const index = currentIndex + 1;
-  return { total, index, remaining: remaining - 1 };
+  void stats;
+  void config;
+  return null;
 }
 
 function runChainLogData(stats: RunStats, config: Pick<AppConfig, "runChainCount">): Record<string, number | null> {
-  const fallbackTotal = runChainTotalFromAdditionalCount(config);
-  const index = stats.runChainIndex ?? 1;
+  void stats;
+  void config;
   return {
-    runChainTotal: stats.runChainTotal ?? fallbackTotal,
-    runChainIndex: index,
-    runChainRemaining: stats.runChainRemaining ?? Math.max(0, fallbackTotal - index)
+    runChainTotal: 1,
+    runChainIndex: 1,
+    runChainRemaining: 0
   };
 }
 
