@@ -78,6 +78,25 @@ run_host_security_helper() {
   log "Continuing deploy because REDQUEENX_DEPLOY_HOST_SECURITY_STRICT is not true."
 }
 
+sync_env_file() {
+  if [[ ! -f scripts/sync-env.cjs ]]; then
+    log "env sync script not found; skipping .env sync."
+    return 0
+  fi
+
+  if command -v node >/dev/null 2>&1; then
+    run node scripts/sync-env.cjs
+    return 0
+  fi
+
+  if command -v npm >/dev/null 2>&1; then
+    run npm run env:sync
+    return 0
+  fi
+
+  log "node/npm are not available; skipping .env sync."
+}
+
 log "Starting RedqueenX deploy in $deploy_dir using $compose_file."
 cd "$deploy_dir"
 
@@ -89,15 +108,7 @@ else
   run git pull --ff-only origin "$branch"
 fi
 
-if [[ -f package.json && -f scripts/sync-env.cjs ]]; then
-  if command -v npm >/dev/null 2>&1; then
-    run npm run env:sync
-  else
-    log "npm is not available; skipping .env sync."
-  fi
-else
-  log "env sync script not found; skipping .env sync."
-fi
+sync_env_file
 
 if [[ -f .env ]]; then
   env_owner="${REDQUEENX_UID:-1000}:${REDQUEENX_GID:-1000}"

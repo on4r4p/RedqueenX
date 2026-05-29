@@ -9,7 +9,6 @@ const options = parseArgs(args);
 const root = process.cwd();
 const envPath = path.resolve(root, options.envPath);
 const examplePath = path.resolve(root, options.examplePath);
-const syncedExistingKeys = new Set(["RUN_CHAIN_COUNT"]);
 
 main();
 
@@ -30,30 +29,23 @@ function main() {
 
   const exampleText = fs.readFileSync(examplePath, "utf8");
   const envText = fs.readFileSync(envPath, "utf8");
-  const existingSync = syncExistingAssignments(envText, exampleText, syncedExistingKeys);
-  const existingKeys = new Set(readAssignedKeys(existingSync.text));
+  const existingKeys = new Set(readAssignedKeys(envText));
   const missingKeys = readAssignedKeys(exampleText).filter((key) => !existingKeys.has(key));
   const missingSet = new Set(missingKeys);
   const appendText = buildAppendText(exampleText, missingSet);
   const hasAppendText = Boolean(appendText.trim());
 
-  if (missingKeys.length === 0 && existingSync.updatedKeys.length === 0) {
+  if (missingKeys.length === 0) {
     console.log(`[env:sync] ${relative(envPath)} already contains every key from ${relative(examplePath)}.`);
     return;
   }
 
-  if (missingKeys.length > 0 && !hasAppendText && existingSync.updatedKeys.length === 0) {
+  if (missingKeys.length > 0 && !hasAppendText) {
     console.log("[env:sync] No appendable missing key lines found.");
     return;
   }
 
   if (options.dryRun) {
-    if (existingSync.updatedKeys.length > 0) {
-      console.log(`[env:sync] Would update ${existingSync.updatedKeys.length} existing key(s) in ${relative(envPath)}:`);
-      for (const key of existingSync.updatedKeys) {
-        console.log(`  - ${key}`);
-      }
-    }
     if (missingKeys.length > 0) {
       console.log(`[env:sync] Would add ${missingKeys.length} missing key(s) to ${relative(envPath)}:`);
       for (const key of missingKeys) {
@@ -63,19 +55,13 @@ function main() {
     return;
   }
 
-  let nextEnvText = existingSync.text;
+  let nextEnvText = envText;
   if (missingKeys.length > 0 && hasAppendText) {
     const prefix = nextEnvText.endsWith("\n") ? "" : "\n";
     nextEnvText = `${nextEnvText}${prefix}${appendText}`;
   }
   fs.writeFileSync(envPath, nextEnvText, "utf8");
 
-  if (existingSync.updatedKeys.length > 0) {
-    console.log(`[env:sync] Updated ${existingSync.updatedKeys.length} existing key(s) in ${relative(envPath)}:`);
-    for (const key of existingSync.updatedKeys) {
-      console.log(`  - ${key}`);
-    }
-  }
   if (missingKeys.length > 0 && hasAppendText) {
     console.log(`[env:sync] Added ${missingKeys.length} missing key(s) to ${relative(envPath)}:`);
     for (const key of missingKeys) {
@@ -135,42 +121,6 @@ function readAssignedKeys(text) {
     keys.push(key);
   }
   return keys;
-}
-
-function syncExistingAssignments(envText, exampleText, syncedKeys) {
-  const exampleAssignments = readAssignmentLines(exampleText);
-  const updatedKeys = [];
-  const lines = envText.split(/\r?\n/);
-  const nextLines = lines.map((line) => {
-    const key = readAssignmentKey(line);
-    if (!key || !syncedKeys.has(key)) {
-      return line;
-    }
-
-    const exampleLine = exampleAssignments.get(key);
-    if (!exampleLine || line === exampleLine) {
-      return line;
-    }
-
-    updatedKeys.push(key);
-    return exampleLine;
-  });
-
-  return {
-    text: nextLines.join("\n"),
-    updatedKeys
-  };
-}
-
-function readAssignmentLines(text) {
-  const assignments = new Map();
-  for (const line of text.split(/\r?\n/)) {
-    const key = readAssignmentKey(line);
-    if (key && !assignments.has(key)) {
-      assignments.set(key, line);
-    }
-  }
-  return assignments;
 }
 
 function buildAppendText(exampleText, missingKeys) {

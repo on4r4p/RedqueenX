@@ -292,6 +292,10 @@ deploy. The fail2ban jails watch
 HTTP statuses (`308`, `400`, `401`, `403`, `404`, `405`, `408`, `429`) and common
 scan paths such as `.env`, `wp-login.php`, `.git`, and `phpmyadmin`.
 
+Deploy also runs `scripts/sync-env.cjs` automatically. It appends keys that are
+present in `.env.example` but missing from `.env`; existing filled values are
+kept unchanged.
+
 In Docker mode, `Load medias` records a media-cache job in SQLite. The worker
 then downloads the media through the VPN container.
 

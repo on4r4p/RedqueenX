@@ -68,6 +68,27 @@ run_host_security_helper() {
   fi
 }
 
+sync_env_file() {
+  if [ ! -f scripts/sync-env.cjs ]; then
+    echo "env sync script not found; skipping .env sync."
+    return 0
+  fi
+
+  if command -v node >/dev/null 2>&1; then
+    node scripts/sync-env.cjs
+    return 0
+  fi
+
+  if command -v npm >/dev/null 2>&1; then
+    npm run env:sync
+    return 0
+  fi
+
+  echo "node/npm are not available; skipping .env sync."
+}
+
+sync_env_file
+
 append_env_if_missing ADMIN_HOST "0.0.0.0"
 append_env_if_missing ADMIN_PORT "3005"
 append_env_if_missing ADMIN_TRUST_PROXY "true"
