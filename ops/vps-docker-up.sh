@@ -81,7 +81,7 @@ if [ -z "${REDQUEENX_GID:-}" ]; then
   fi
 fi
 
-mkdir -p runtime/docker
+mkdir -p runtime/docker/caddy-logs
 chown "$REDQUEENX_UID:$REDQUEENX_GID" .env 2>/dev/null || true
 chown -R "$REDQUEENX_UID:$REDQUEENX_GID" runtime/docker 2>/dev/null || true
 
@@ -110,4 +110,8 @@ If this is a remote VPS and no reverse proxy is configured, open it from your PC
 
 Then open locally:
   http://127.0.0.1:3005/admin
+
+Host health/fail2ban helpers:
+  sudo ./ops/install-vps-health-collector.sh
+  sudo ./ops/fail2ban/install-redqueenx.sh
 EOF

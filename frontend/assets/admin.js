@@ -1280,6 +1280,18 @@ function formatBytes(bytes) {
   return `${(value / 1024 ** index).toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
 }
 
+function formatDurationSeconds(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return "-";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${Math.round(seconds % 60)}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
 function renderMetric(label, value, text = false) {
   return `<div class="metric"><span>${escapeHtml(label)}</span><strong${text ? ' class="metric-text"' : ""}>${escapeHtml(value)}</strong></div>`;
 }
@@ -1336,29 +1348,85 @@ function renderStringList(values) {
   return renderDatabaseTable(rows, [{ key: "value", label: "Value" }]);
 }
 
+function renderLogSnippets(samples) {
+  const visibleSamples = (samples || []).filter((sample) => (sample.lines || []).length || sample.error);
+  if (!visibleSamples.length) return "";
+  return visibleSamples
+    .map((sample) => {
+      const lines = (sample.lines || []).length ? sample.lines.join("\n") : sample.error || "No log line.";
+      return `<details class="system-log-snippet" open><summary>${escapeHtml(sample.label || "Log sample")}</summary><pre>${escapeHtml(lines)}</pre></details>`;
+    })
+    .join("");
+}
+
+function renderSecurityHistory(history) {
+  if (!history?.available) {
+    return renderAvailabilityNote(history, "Persisted security history");
+  }
+  const rows = (history.ips || []).map((entry) => ({
+    ip: entry.ip,
+    actions: Array.isArray(entry.actions) ? entry.actions.join(", ") : "",
+    sources: Array.isArray(entry.sources) ? entry.sources.join(", ") : "",
+    firstSeen: entry.firstSeen ? new Date(entry.firstSeen).toLocaleString() : "",
+    lastSeen: entry.lastSeen ? new Date(entry.lastSeen).toLocaleString() : "",
+    observations: entry.observations ?? 0,
+    lastDetail: entry.lastDetail || ""
+  }));
+  return [
+    `<h3>Persisted security IP trace</h3>`,
+    history.path ? `<div class="system-path">History: <code>${escapeHtml(history.path)}</code></div>` : "",
+    history.eventsPath ? `<div class="system-path">Events: <code>${escapeHtml(history.eventsPath)}</code></div>` : "",
+    renderDatabaseTable(rows, [
+      { key: "ip", label: "IP" },
+      { key: "actions", label: "Actions" },
+      { key: "sources", label: "Sources" },
+      { key: "firstSeen", label: "First seen" },
+      { key: "lastSeen", label: "Last seen" },
+      { key: "observations", label: "Obs." },
+      { key: "lastDetail", label: "Last detail" }
+    ]),
+    renderLogSnippets(history.samples)
+  ].join("");
+}
+
+function systemHealthReportAge(data) {
+  if (Number.isFinite(Number(data.reportAgeSeconds))) {
+    return Number(data.reportAgeSeconds);
+  }
+  const generatedAt = new Date(data.generatedAt).getTime();
+  if (Number.isNaN(generatedAt)) return null;
+  return Math.max(0, Math.round((Date.now() - generatedAt) / 1000));
+}
+
 async function refreshSystemHealth() {
   if (!systemHealthSummary) return;
   systemHealthSummary.innerHTML = '<div class="empty-state">Loading system health...</div>';
   const data = await jsonFetch("/admin/system/health");
   if (!data) return;
 
+  const reportAge = systemHealthReportAge(data);
   if (systemHealthUpdated) {
     const source = data.environment?.source === "host-collector"
       ? "Host checks loaded from VPS collector."
       : data.environment?.source === "container-fallback"
         ? "Host collector missing; Docker containers cannot read VPS systemd logs directly."
-        : "Host checks use the last 30 days when journalctl is available.";
-    systemHealthUpdated.textContent = `Updated ${new Date(data.generatedAt).toLocaleString()}. ${source}`;
+        : "Host checks use live local commands when available.";
+    const age = reportAge === null ? "" : ` Report age: ${formatDurationSeconds(reportAge)}.`;
+    const stale = data.reportStale ? " The collector output is stale." : "";
+    systemHealthUpdated.textContent = `Updated ${new Date(data.generatedAt).toLocaleString()}. ${source}${age}${stale}`;
   }
 
   systemHealthSummary.innerHTML = [
     renderMetric("Runtime", data.environment?.inDocker ? "Docker container" : "host/local", true),
     renderMetric("Host", data.environment?.host || "-", true),
+    renderMetric("Report age", reportAge === null ? "-" : formatDurationSeconds(reportAge), true),
     renderMetric("SSH accepted logins", data.ssh?.available ? data.ssh.acceptedLogins ?? 0 : "unavailable", true),
     renderMetric("SSH failed attempts", data.ssh?.available ? data.ssh.failedAttempts ?? 0 : "unavailable", true),
     renderMetric("fail2ban sshd banned", data.fail2ban?.available ? data.fail2ban.sshd?.currentlyBanned ?? 0 : "unavailable", true),
     renderMetric("Web scan hits", data.caddy?.available ? data.caddy.suspiciousRequests ?? 0 : "unavailable", true),
-    renderMetric("Webhook invalid signatures", data.webhook?.available ? data.webhook.invalidSignatures ?? 0 : "unavailable", true)
+    renderMetric("HTTP suspect statuses", data.caddy?.available ? data.caddy.statusHits ?? 0 : "unavailable", true),
+    renderMetric("Webhook invalid signatures", data.webhook?.available ? data.webhook.invalidSignatures ?? 0 : "unavailable", true),
+    renderMetric("Tracked security IPs", data.history?.available ? data.history.ipCount ?? 0 : "unavailable", true)
   ].join("");
 
   if (systemHealthServices) {
@@ -1372,21 +1440,39 @@ async function refreshSystemHealth() {
   if (systemHealthSsh) {
     systemHealthSsh.innerHTML = [
       renderAvailabilityNote(data.ssh, "SSH logs"),
-      data.ssh?.available ? `<h3>SSH login IPs</h3>${renderIpTable(data.ssh.loginIps)}<h3>SSH failed source IPs</h3>${renderIpTable(data.ssh.topIps)}` : "",
+      data.ssh?.available
+        ? `<h3>SSH login IPs</h3>${renderIpTable(data.ssh.loginIps)}<h3>SSH failed source IPs</h3>${renderIpTable(data.ssh.topIps)}${renderLogSnippets(data.ssh.samples)}`
+        : "",
       renderAvailabilityNote(data.fail2ban, "fail2ban"),
       data.fail2ban?.available
         ? `<h3>fail2ban sshd</h3>${renderDatabaseTable([data.fail2ban.sshd || {}], [
             { key: "currentlyBanned", label: "Currently banned" },
             { key: "totalBanned", label: "Total banned" }
-          ])}<h3>Banned IPs</h3>${renderStringList(data.fail2ban.sshd?.bannedIps || [])}<h3>Jails</h3>${renderStringList(data.fail2ban.jails || [])}`
-        : ""
+          ])}<h3>Jail status</h3>${renderDatabaseTable(data.fail2ban.jailStats || [], [
+            { key: "jail", label: "Jail" },
+            { key: "currentlyBanned", label: "Current" },
+            { key: "totalBanned", label: "Total" },
+            { key: "bannedIps", label: "Banned IPs" },
+            { key: "error", label: "Note" }
+          ])}<h3>Current banned IPs</h3>${renderStringList(data.fail2ban.sshd?.bannedIps || [])}<h3>Ban event IPs</h3>${renderIpTable(data.fail2ban.banLogIps)}<h3>Jails</h3>${renderStringList(data.fail2ban.jails || [])}${renderLogSnippets(data.fail2ban.samples)}`
+        : "",
+      renderAvailabilityNote(data.firewall, "Firewall"),
+      data.firewall?.available
+        ? `<h3>Firewall dropped IPs</h3>${renderIpTable(data.firewall.droppedIps)}${renderLogSnippets(data.firewall.samples)}`
+        : "",
+      renderSecurityHistory(data.history)
     ].join("");
   }
 
   if (systemHealthWeb) {
     systemHealthWeb.innerHTML = [
       renderAvailabilityNote(data.caddy, "Caddy logs"),
-      data.caddy?.available ? `<h3>Scanner IPs</h3>${renderIpTable(data.caddy.topIps)}` : ""
+      data.caddy?.available
+        ? `<h3>Scanner IPs</h3>${renderIpTable(data.caddy.topIps)}<h3>Suspicious HTTP status counts</h3>${renderDatabaseTable(data.caddy.statusCounts || [], [
+            { key: "status", label: "Status" },
+            { key: "count", label: "Count" }
+          ])}<h3>Suspicious status IPs</h3>${renderIpTable(data.caddy.statusIps)}${renderLogSnippets(data.caddy.samples)}`
+        : ""
     ].join("");
   }
 
@@ -1398,14 +1484,14 @@ async function refreshSystemHealth() {
             { key: "posts", label: "POSTs" },
             { key: "invalidSignatures", label: "Invalid signatures" },
             { key: "errors", label: "Errors" }
-          ])}<h3>Webhook IPs</h3>${renderIpTable(data.webhook.topIps)}`
+          ])}<h3>Webhook IPs</h3>${renderIpTable(data.webhook.topIps)}${renderLogSnippets(data.webhook.samples)}`
         : "",
       renderAvailabilityNote(data.docker, "Docker compose"),
       data.docker?.available
         ? `<h3>Docker compose services</h3>${renderDatabaseTable(data.docker.services || [], [
             { key: "name", label: "Container" },
             { key: "status", label: "Status" }
-          ])}`
+          ])}<h3>Docker log IPs</h3>${renderIpTable(data.docker.logIps)}${renderLogSnippets(data.docker.samples)}`
         : ""
     ].join("");
   }

@@ -1604,6 +1604,38 @@ h2 {
   overflow: auto;
 }
 
+.system-log-snippet {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.system-log-snippet summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.system-log-snippet pre {
+  margin: 8px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #061017;
+  color: #cfe8f8;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  white-space: pre-wrap;
+}
+
+.system-path {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .database-table {
   width: 100%;
   border-collapse: collapse;

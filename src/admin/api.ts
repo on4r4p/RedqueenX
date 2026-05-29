@@ -8241,26 +8241,31 @@ type IpCount = {
   count: number;
 };
 
+type LogSnippet = {
+  label: string;
+  lines: string[];
+  error?: string;
+};
+
+const suspiciousHttpStatusesForHealth = new Set([308, 400, 401, 403, 404, 405, 408, 429]);
+const suspiciousPathPatternForHealth =
+  /\.env|wp-login\.php|xmlrpc\.php|phpmyadmin|phpMyAdmin|cgi-bin|boaform|HNAP1|vendor\/phpunit|actuator|server-status|\.git|\.aws|config\.json|etc\/passwd|\.DS_Store|adminer|setup\.php|telescope|debug\/default\/view|solr\/admin|manager\/html|wp-admin|\.svn/i;
+
 async function systemHealthReport() {
   const since = "30 days ago";
-  const hostReport = await readVpsHealthReport();
+  const inDocker = fsSync.existsSync("/.dockerenv");
+  const hostReport = inDocker ? await readVpsHealthReport() : null;
   if (hostReport) {
-    return {
-      ...hostReport,
-      environment: {
-        ...(typeof hostReport.environment === "object" && hostReport.environment ? hostReport.environment : {}),
-        inDocker: fsSync.existsSync("/.dockerenv"),
-        containerHost: os.hostname(),
-        source: "host-collector"
-      }
-    };
+    return enrichCachedHealthReport(hostReport);
   }
 
-  if (fsSync.existsSync("/.dockerenv")) {
+  if (inDocker) {
     const unavailableMessage =
       "Host health collector not configured. Run node scripts/vps-health-collect.cjs /opt/RedqueenX/runtime/docker/vps-health.json on the VPS host.";
     return {
       generatedAt: new Date().toISOString(),
+      reportAgeSeconds: 0,
+      reportStale: false,
       environment: {
         inDocker: true,
         cwd: process.cwd(),
@@ -8274,44 +8279,126 @@ async function systemHealthReport() {
         status: "host collector required",
         error: unavailableMessage
       })),
-      ssh: { available: false, window: since, failedAttempts: 0, acceptedLogins: 0, topIps: [] as IpCount[], loginIps: [] as IpCount[], error: unavailableMessage },
+      ssh: {
+        available: false,
+        window: since,
+        failedAttempts: 0,
+        acceptedLogins: 0,
+        topIps: [] as IpCount[],
+        loginIps: [] as IpCount[],
+        samples: [] as LogSnippet[],
+        error: unavailableMessage
+      },
       fail2ban: {
         available: false,
         jails: [] as string[],
         sshd: { currentlyBanned: 0, totalBanned: 0, bannedIps: [] as string[] },
+        banLogIps: [] as IpCount[],
+        jailStats: [] as Array<Record<string, unknown>>,
+        samples: [] as LogSnippet[],
         error: unavailableMessage
       },
-      caddy: { available: false, window: since, suspiciousRequests: 0, topIps: [] as IpCount[], error: unavailableMessage },
-      webhook: { available: false, window: since, posts: 0, invalidSignatures: 0, errors: 0, topIps: [] as IpCount[], error: unavailableMessage },
-      docker: { available: false, services: [] as Array<{ name: string; status: string }>, error: unavailableMessage }
+      caddy: {
+        available: false,
+        window: since,
+        suspiciousRequests: 0,
+        statusHits: 0,
+        statusCounts: [] as Array<{ status: number; count: number }>,
+        topIps: [] as IpCount[],
+        statusIps: [] as IpCount[],
+        samples: [] as LogSnippet[],
+        error: unavailableMessage
+      },
+      webhook: {
+        available: false,
+        window: since,
+        posts: 0,
+        invalidSignatures: 0,
+        errors: 0,
+        topIps: [] as IpCount[],
+        samples: [] as LogSnippet[],
+        error: unavailableMessage
+      },
+      docker: {
+        available: false,
+        services: [] as Array<{ name: string; status: string }>,
+        logIps: [] as IpCount[],
+        samples: [] as LogSnippet[],
+        error: unavailableMessage
+      },
+      firewall: {
+        available: false,
+        droppedIps: [] as IpCount[],
+        samples: [] as LogSnippet[],
+        error: unavailableMessage
+      },
+      history: {
+        available: false,
+        path: securityHistoryPath(),
+        eventsPath: securityHistoryEventsPath(),
+        ipCount: 0,
+        ips: [] as Array<Record<string, unknown>>,
+        samples: [] as LogSnippet[],
+        error: unavailableMessage
+      }
     };
   }
 
-  const [docker, caddy, webhook, ssh, fail2ban, dockerCompose] = await Promise.all([
+  const [docker, caddy, webhook, ssh, fail2ban, dockerCompose, firewall, history] = await Promise.all([
     serviceStatus("docker"),
     serviceStatus("caddy"),
     serviceStatus("redqueenx-webhook"),
     sshHealth(since),
     fail2banHealth(),
-    dockerComposeHealth()
+    dockerComposeHealth(),
+    firewallHealth(),
+    readSecurityHistory()
   ]);
   const caddyScan = await caddyScanHealth(since);
   const webhookActivity = await webhookHealth(since);
 
   return {
     generatedAt: new Date().toISOString(),
+    reportAgeSeconds: 0,
+    reportStale: false,
     environment: {
-      inDocker: fsSync.existsSync("/.dockerenv"),
+      inDocker,
       cwd: process.cwd(),
-      host: os.hostname()
+      host: os.hostname(),
+      source: "live-host"
     },
     services: [docker, caddy, webhook],
     ssh,
     fail2ban,
     caddy: caddyScan,
     webhook: webhookActivity,
-    docker: dockerCompose
+    docker: dockerCompose,
+    firewall,
+    history
   };
+}
+
+function enrichCachedHealthReport(hostReport: Record<string, unknown>) {
+  const ageSeconds = healthReportAgeSeconds(hostReport.generatedAt);
+  return {
+    ...hostReport,
+    reportAgeSeconds: ageSeconds,
+    reportStale: ageSeconds === null ? true : ageSeconds > 10 * 60,
+    environment: {
+      ...(typeof hostReport.environment === "object" && hostReport.environment ? hostReport.environment : {}),
+      inDocker: fsSync.existsSync("/.dockerenv"),
+      containerHost: os.hostname(),
+      source: "host-collector",
+      reportPath: vpsHealthReportPath()
+    }
+  };
+}
+
+function healthReportAgeSeconds(generatedAt: unknown): number | null {
+  if (typeof generatedAt !== "string") return null;
+  const time = new Date(generatedAt).getTime();
+  if (Number.isNaN(time)) return null;
+  return Math.max(0, Math.round((Date.now() - time) / 1000));
 }
 
 async function readVpsHealthReport(): Promise<Record<string, unknown> | null> {
@@ -8336,6 +8423,24 @@ function vpsHealthReportPath(): string {
   return path.resolve(process.env.VPS_HEALTH_REPORT_PATH || path.join(process.cwd(), "runtime/vps-health.json"));
 }
 
+function composeHealthFilePath(): string {
+  return path.resolve(process.env.REDQUEENX_COMPOSE_FILE || "compose.prod.yaml");
+}
+
+function caddyAccessLogPath(): string {
+  return path.resolve(process.env.REDQUEENX_CADDY_ACCESS_LOG || path.join(process.cwd(), "runtime/caddy-logs/access.log"));
+}
+
+function securityHistoryPath(): string {
+  return path.resolve(process.env.REDQUEENX_SECURITY_HISTORY_PATH || path.join(process.cwd(), "runtime/vps-security-history.json"));
+}
+
+function securityHistoryEventsPath(): string {
+  return path.resolve(
+    process.env.REDQUEENX_SECURITY_HISTORY_EVENTS_PATH || path.join(process.cwd(), "runtime/vps-security-events.jsonl")
+  );
+}
+
 async function serviceStatus(name: string) {
   const result = await safeExec("systemctl", ["is-active", name], 3_000, 100_000);
   return {
@@ -8349,7 +8454,16 @@ async function serviceStatus(name: string) {
 async function sshHealth(since: string) {
   const result = await safeExec("journalctl", ["-u", "ssh", "-u", "sshd", "--since", since, "--no-pager", "-o", "cat"], 8_000);
   if (!result.available) {
-    return { available: false, window: since, failedAttempts: 0, topIps: [] as IpCount[], error: result.error };
+    return {
+      available: false,
+      window: since,
+      failedAttempts: 0,
+      acceptedLogins: 0,
+      topIps: [] as IpCount[],
+      loginIps: [] as IpCount[],
+      samples: [] as LogSnippet[],
+      error: result.error
+    };
   }
   const failedPattern = /Failed password|Invalid user|authentication failure|Connection closed by authenticating user/i;
   const failedLines = result.stdout
@@ -8366,74 +8480,159 @@ async function sshHealth(since: string) {
     acceptedLogins: acceptedLines.length,
     topIps: topIpCounts(failedLines.join("\n")),
     loginIps: topIpCounts(acceptedLines.join("\n")),
+    samples: [
+      logSnippet("SSH accepted login log sample", acceptedLines),
+      logSnippet("SSH failed attempt log sample", failedLines)
+    ],
     error: result.stderr ? firstLine(result.stderr) : undefined
   };
 }
 
 async function fail2banHealth() {
-  const [summary, sshd] = await Promise.all([
-    safeExec("fail2ban-client", ["status"], 5_000),
-    safeExec("fail2ban-client", ["status", "sshd"], 5_000)
-  ]);
+  const summary = await safeExec("fail2ban-client", ["status"], 5_000);
+  const banLog = await safeExec("journalctl", ["-u", "fail2ban", "--since", "30 days ago", "--no-pager", "-o", "cat"], 8_000, 4_000_000);
+  const banLines = banLog.available
+    ? banLog.stdout.split(/\r?\n/).filter((line) => /\bBan\s+\d{1,3}(?:\.\d{1,3}){3}\b/i.test(line))
+    : [];
+  const jails = parseFail2banJails(summary.stdout);
+  const jailNames = Array.from(new Set(["sshd", ...jails])).filter(Boolean).slice(0, 20);
+  const jailStatsWithSamples = await Promise.all(
+    jailNames.map(async (jail) => {
+      const status = await safeExec("fail2ban-client", ["status", jail], 5_000);
+      const text = status.stdout || "";
+      return {
+        jail,
+        available: status.available && !status.error,
+        currentlyBanned: parseNumberAfterLabel(text, "Currently banned"),
+        totalBanned: parseNumberAfterLabel(text, "Total banned"),
+        bannedIps: parseFail2banBannedIps(text),
+        error: status.error,
+        sample: logSnippet(`fail2ban ${jail} status`, text.split(/\r?\n/), 40)
+      };
+    })
+  );
+  const sshd = jailStatsWithSamples.find((jail) => jail.jail === "sshd") || {
+    available: false,
+    currentlyBanned: 0,
+    totalBanned: 0,
+    bannedIps: [] as string[],
+    error: undefined
+  };
   if (!summary.available && !sshd.available) {
     return {
       available: false,
       jails: [] as string[],
       sshd: { currentlyBanned: 0, totalBanned: 0, bannedIps: [] as string[] },
+      banLogIps: topIpCounts(banLines.join("\n"), 500),
+      jailStats: [] as Array<Record<string, unknown>>,
+      samples: [logSnippet("fail2ban ban event sample", banLines, 40, banLog.error)],
       error: summary.error || sshd.error
     };
   }
-  const sshdText = sshd.stdout || "";
   return {
     available: true,
-    jails: parseFail2banJails(summary.stdout),
+    jails,
     sshd: {
-      currentlyBanned: parseNumberAfterLabel(sshdText, "Currently banned"),
-      totalBanned: parseNumberAfterLabel(sshdText, "Total banned"),
-      bannedIps: parseFail2banBannedIps(sshdText)
+      currentlyBanned: sshd.currentlyBanned,
+      totalBanned: sshd.totalBanned,
+      bannedIps: sshd.bannedIps
     },
+    banLogIps: topIpCounts(banLines.join("\n"), 500),
+    jailStats: jailStatsWithSamples.map(({ sample, ...jail }) => jail),
+    samples: [
+      logSnippet("fail2ban status", summary.stdout.split(/\r?\n/), 40),
+      logSnippet("fail2ban ban event sample", banLines, 40, banLog.error),
+      ...jailStatsWithSamples.map((jail) => jail.sample)
+    ],
     error: !sshd.available ? sshd.error : undefined
   };
 }
 
 async function caddyScanHealth(since: string) {
-  const result = await safeExec("journalctl", ["-u", "caddy", "--since", since, "--no-pager", "-o", "cat"], 8_000, 4_000_000);
-  if (!result.available) {
-    return { available: false, window: since, suspiciousRequests: 0, topIps: [] as IpCount[], error: result.error };
+  const [journalResult, accessLogResult] = await Promise.all([
+    safeExec("journalctl", ["-u", "caddy", "--since", since, "--no-pager", "-o", "cat"], 8_000, 4_000_000),
+    readFileTail(caddyAccessLogPath(), 2_000_000)
+  ]);
+  if (!journalResult.available && !accessLogResult.available) {
+    return {
+      available: false,
+      window: since,
+      suspiciousRequests: 0,
+      statusHits: 0,
+      statusCounts: [] as Array<{ status: number; count: number }>,
+      topIps: [] as IpCount[],
+      statusIps: [] as IpCount[],
+      samples: [] as LogSnippet[],
+      accessLogPath: caddyAccessLogPath(),
+      error: journalResult.error || accessLogResult.error
+    };
   }
-  const suspiciousPattern =
-    /\.env|wp-login\.php|xmlrpc\.php|phpmyadmin|phpMyAdmin|cgi-bin|boaform|HNAP1|vendor\/phpunit|actuator|server-status|\.git|\.aws|config\.json/i;
-  const suspiciousLines = result.stdout
-    .split(/\r?\n/)
-    .filter((line) => suspiciousPattern.test(line));
+  const lines = [
+    ...journalResult.stdout.split(/\r?\n/).filter(Boolean),
+    ...accessLogResult.stdout.split(/\r?\n/).filter(Boolean)
+  ];
+  const suspiciousLines = lines.filter((line) => suspiciousPathPatternForHealth.test(line));
+  const statusLines = lines.filter((line) => {
+    const status = httpStatusFromLine(line);
+    return status !== null && suspiciousHttpStatusesForHealth.has(status);
+  });
   return {
     available: true,
     window: since,
+    accessLogPath: caddyAccessLogPath(),
+    sources: {
+      journal: journalResult.available,
+      accessLog: accessLogResult.available
+    },
     suspiciousRequests: suspiciousLines.length,
-    topIps: topIpCounts(suspiciousLines.join("\n"))
+    statusHits: statusLines.length,
+    statusCounts: statusCounts(statusLines),
+    topIps: topIpCounts(suspiciousLines.join("\n")),
+    statusIps: topIpCounts(statusLines.join("\n")),
+    samples: [
+      logSnippet("Caddy suspicious path sample", suspiciousLines.map(formatCaddyLine)),
+      logSnippet("Caddy suspicious status sample", statusLines.map(formatCaddyLine)),
+      logSnippet("Caddy access log tail", accessLogResult.stdout.split(/\r?\n/).filter(Boolean).map(formatCaddyLine), 20, accessLogResult.error)
+    ],
+    error: journalResult.stderr ? firstLine(journalResult.stderr) : accessLogResult.error
   };
 }
 
 async function webhookHealth(since: string) {
   const result = await safeExec("journalctl", ["-u", "redqueenx-webhook", "--since", since, "--no-pager", "-o", "cat"], 8_000);
   if (!result.available) {
-    return { available: false, window: since, posts: 0, invalidSignatures: 0, errors: 0, topIps: [] as IpCount[], error: result.error };
+    return {
+      available: false,
+      window: since,
+      posts: 0,
+      invalidSignatures: 0,
+      errors: 0,
+      topIps: [] as IpCount[],
+      samples: [] as LogSnippet[],
+      error: result.error
+    };
   }
+  const suspiciousLines = result.stdout
+    .split(/\r?\n/)
+    .filter((line) => /invalid payload signatures|error evaluating hook|error occurred|error in exec|POST \/hooks/i.test(line));
   return {
     available: true,
     window: since,
     posts: countMatches(result.stdout, /incoming HTTP POST|POST \/hooks/gi),
     invalidSignatures: countMatches(result.stdout, /invalid payload signatures/gi),
     errors: countMatches(result.stdout, /error evaluating hook|error occurred|error in exec/gi),
-    topIps: topIpCounts(result.stdout)
+    topIps: topIpCounts(result.stdout),
+    samples: [logSnippet("Webhook suspicious activity sample", suspiciousLines)]
   };
 }
 
 async function dockerComposeHealth() {
-  const result = await safeExec("docker", ["compose", "-f", "compose.prod.yaml", "ps"], 6_000, 500_000);
+  const composeFile = composeHealthFilePath();
+  const result = await safeExec("docker", ["compose", "-f", composeFile, "ps"], 6_000, 500_000);
   if (!result.available) {
-    return { available: false, services: [] as Array<{ name: string; status: string }>, error: result.error };
+    return { available: false, services: [] as Array<{ name: string; status: string }>, logIps: [] as IpCount[], samples: [] as LogSnippet[], error: result.error };
   }
+  const logs = await safeExec("docker", ["compose", "-f", composeFile, "logs", "--tail", "120"], 8_000, 1_000_000);
   const services = result.stdout
     .split(/\r?\n/)
     .slice(1)
@@ -8446,7 +8645,75 @@ async function dockerComposeHealth() {
         status: parts.find((part) => /\b(Up|Exited|Restarting|Created|Paused)\b/i.test(part)) || parts.at(-1) || "unknown"
       };
     });
-  return { available: true, services };
+  return {
+    available: true,
+    services,
+    logIps: topIpCounts(logs.stdout),
+    samples: [
+      logSnippet("Docker compose ps", result.stdout.split(/\r?\n/), 40, result.error),
+      logSnippet("Docker compose logs tail", logs.stdout.split(/\r?\n/), 80, logs.error)
+    ],
+    error: result.error
+  };
+}
+
+async function firewallHealth() {
+  const [rules, chains, nft] = await Promise.all([
+    safeExec("iptables", ["-S"], 5_000, 1_000_000),
+    safeExec("iptables", ["-L", "-n", "--line-numbers"], 5_000, 1_000_000),
+    safeExec("nft", ["list", "ruleset"], 5_000, 1_000_000)
+  ]);
+  const interestingRules = (rules.stdout || "")
+    .split(/\r?\n/)
+    .filter((line) => /f2b|fail2ban|redqueenx|DROP|REJECT|BLACKLIST/i.test(line));
+  return {
+    available: rules.available || nft.available,
+    droppedIps: topIpCounts([...interestingRules, ...filterInterestingFirewallLines(nft.stdout)].join("\n"), 500),
+    samples: [
+      logSnippet("iptables fail2ban/drop rules", interestingRules.length ? interestingRules : rules.stdout.split(/\r?\n/), 80, rules.error),
+      logSnippet("iptables chain counters", chains.stdout.split(/\r?\n/), 80, chains.error),
+      logSnippet("nft ruleset fail2ban/drop rules", filterInterestingFirewallLines(nft.stdout), 80, nft.error)
+    ],
+    error: rules.available || nft.available ? undefined : rules.error || nft.error
+  };
+}
+
+function filterInterestingFirewallLines(text: string): string[] {
+  return text.split(/\r?\n/).filter((line) => /f2b|fail2ban|redqueenx|drop|reject|blacklist/i.test(line));
+}
+
+async function readSecurityHistory() {
+  const historyFile = securityHistoryPath();
+  try {
+    const content = await fs.readFile(historyFile, "utf8");
+    const parsed = JSON.parse(content) as {
+      ips?: Array<Record<string, unknown>>;
+      ipCount?: number;
+      updatedAt?: string;
+      eventsPath?: string;
+      path?: string;
+    };
+    const ips = Array.isArray(parsed.ips) ? parsed.ips : [];
+    return {
+      available: true,
+      path: parsed.path || historyFile,
+      eventsPath: parsed.eventsPath || securityHistoryEventsPath(),
+      updatedAt: parsed.updatedAt,
+      ipCount: typeof parsed.ipCount === "number" ? parsed.ipCount : ips.length,
+      ips,
+      samples: [logSnippet("Persisted security IP history", ips.map(formatHistoryLine), 40)]
+    };
+  } catch (error) {
+    return {
+      available: false,
+      path: historyFile,
+      eventsPath: securityHistoryEventsPath(),
+      ipCount: 0,
+      ips: [] as Array<Record<string, unknown>>,
+      samples: [] as LogSnippet[],
+      error: commandErrorSummary(error)
+    };
+  }
 }
 
 async function safeExec(command: string, args: string[], timeout = 5_000, maxBuffer = 2_000_000): Promise<SafeCommandResult> {
@@ -8502,6 +8769,103 @@ function parseFail2banBannedIps(text: string): string[] {
   const match = text.match(/Banned IP list:\s*(.*)$/im);
   if (!match || !match[1].trim()) return [];
   return extractIps(match[1]);
+}
+
+async function readFileTail(filePath: string, maxBytes: number): Promise<SafeCommandResult> {
+  try {
+    const stats = await fs.stat(filePath);
+    if (!stats.isFile()) {
+      return { available: false, stdout: "", stderr: "", error: "not a regular file" };
+    }
+    const start = Math.max(0, stats.size - maxBytes);
+    const length = stats.size - start;
+    const handle = await fs.open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, start);
+      return { available: true, stdout: buffer.toString("utf8"), stderr: "" };
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    return {
+      available: false,
+      stdout: "",
+      stderr: "",
+      error: commandErrorSummary(error)
+    };
+  }
+}
+
+function logSnippet(label: string, lines: string[], limit = 12, error?: string): LogSnippet {
+  return {
+    label,
+    lines: lines.filter(Boolean).slice(-limit).map(cleanLogLine),
+    error
+  };
+}
+
+function cleanLogLine(line: string): string {
+  return line.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 600);
+}
+
+function httpStatusFromLine(line: string): number | null {
+  const parsed = parseCaddyJson(line);
+  if (parsed && Number.isInteger(parsed.status)) {
+    return parsed.status;
+  }
+  const jsonMatch = line.match(/"status":\s*(\d{3})\b/);
+  if (jsonMatch) {
+    return Number(jsonMatch[1]);
+  }
+  const combinedMatch = line.match(/"\S+\s+\S+\s+HTTP\/[0-9.]+"\s+(\d{3})\b/);
+  return combinedMatch ? Number(combinedMatch[1]) : null;
+}
+
+function statusCounts(lines: string[]): Array<{ status: number; count: number }> {
+  const counts = new Map<number, number>();
+  for (const line of lines) {
+    const status = httpStatusFromLine(line);
+    if (status === null) continue;
+    counts.set(status, (counts.get(status) || 0) + 1);
+  }
+  return Array.from(counts, ([status, count]) => ({ status, count })).sort((a, b) => b.count - a.count || a.status - b.status);
+}
+
+function parseCaddyJson(line: string): { ts?: unknown; status: number; method?: string; uri?: string; ip?: string; host?: string } | null {
+  try {
+    const parsed = JSON.parse(line) as {
+      ts?: unknown;
+      status?: unknown;
+      request?: { method?: string; uri?: string; client_ip?: string; remote_ip?: string; host?: string };
+    };
+    const request = parsed.request || {};
+    return {
+      ts: parsed.ts,
+      status: Number(parsed.status),
+      method: request.method,
+      uri: request.uri,
+      ip: request.client_ip || request.remote_ip,
+      host: request.host
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatCaddyLine(line: string): string {
+  const parsed = parseCaddyJson(line);
+  if (!parsed) return line;
+  const ts = typeof parsed.ts === "number" ? new Date(parsed.ts * 1000).toISOString() : "";
+  return [ts, parsed.ip, parsed.method, parsed.host, parsed.uri, parsed.status ? `status=${parsed.status}` : ""]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function formatHistoryLine(entry: Record<string, unknown>): string {
+  const actions = Array.isArray(entry.actions) ? entry.actions.join(",") : "";
+  const sources = Array.isArray(entry.sources) ? entry.sources.join(",") : "";
+  return `${entry.ip || ""} actions=${actions} sources=${sources} first=${entry.firstSeen || ""} last=${entry.lastSeen || ""} observations=${entry.observations || 0}`;
 }
 
 async function waitForProcessesToExit(pids: number[], timeoutMs: number): Promise<number[]> {

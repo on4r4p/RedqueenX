@@ -1,0 +1,14 @@
+[Unit]
+Description=RedqueenX VPS health collector
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/RedqueenX
+Environment=REDQUEENX_DIR=/opt/RedqueenX
+Environment=REDQUEENX_COMPOSE_FILE=/opt/RedqueenX/compose.prod.yaml
+Environment=VPS_HEALTH_REPORT_PATH=/opt/RedqueenX/runtime/docker/vps-health.json
+Environment=REDQUEENX_CADDY_ACCESS_LOG=/opt/RedqueenX/runtime/docker/caddy-logs/access.log
+Environment=REDQUEENX_SECURITY_HISTORY_PATH=/opt/RedqueenX/runtime/docker/vps-security-history.json
+Environment=REDQUEENX_SECURITY_HISTORY_EVENTS_PATH=/opt/RedqueenX/runtime/docker/vps-security-events.jsonl
+Environment=REDQUEENX_HEALTH_FILE_MODE=0644
+ExecStart=/usr/bin/node /opt/RedqueenX/scripts/vps-health-collect.cjs /opt/RedqueenX/runtime/docker/vps-health.json

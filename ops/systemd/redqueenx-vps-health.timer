@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh RedqueenX VPS health report
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+RandomizedDelaySec=10s
+Unit=redqueenx-vps-health.service
+
+[Install]
+WantedBy=timers.target

@@ -1,4 +1,12 @@
 {$REDQUEENX_SITE} {
   encode zstd gzip
+  log {
+    output file /var/log/caddy/access.log {
+      roll_size 20mb
+      roll_keep 10
+      roll_keep_for 720h
+    }
+    format json
+  }
   reverse_proxy admin:{$ADMIN_PORT}
 }

@@ -7,6 +7,7 @@ services:
       - -c
       - |
         mkdir -p \
+          /app/runtime/caddy-logs \
           /app/runtime/media-cache \
           /app/runtime/playwright-profile \
           /app/runtime/x-auth \
@@ -31,6 +32,7 @@ services:
       - "443:443"
     volumes:
       - ./ops/docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./runtime/docker/caddy-logs:/var/log/caddy:rw
       - caddy_data:/data
       - caddy_config:/config
 
@@ -54,6 +56,9 @@ services:
       DATABASE_URL: /app/runtime/redqueenx.sqlite
       CURRENT_SESSION_FILE: /app/runtime/current-session.log
       VPS_HEALTH_REPORT_PATH: /app/runtime/vps-health.json
+      REDQUEENX_CADDY_ACCESS_LOG: /app/runtime/caddy-logs/access.log
+      REDQUEENX_SECURITY_HISTORY_PATH: /app/runtime/vps-security-history.json
+      REDQUEENX_SECURITY_HISTORY_EVENTS_PATH: /app/runtime/vps-security-events.jsonl
       SEARCH_WITHOUT_API_ISOLATION: docker_vpn
       SEARCH_WITHOUT_API_PROFILE_DIR: /app/runtime/playwright-profile
       SEARCH_WITHOUT_API_MEDIA_CACHE_DIR: /app/runtime/media-cache

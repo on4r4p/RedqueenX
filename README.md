@@ -277,6 +277,28 @@ For a self-contained local Docker stack with the bundled Caddy container, use:
 docker compose --profile caddy up -d admin vpn worker caddy
 ```
 
+The VPS health panel reads host logs from a JSON report because the admin
+container cannot inspect systemd, fail2ban, or host firewall state directly.
+Install the host collector timer on the VPS so the UI refreshes every minute
+and keeps a persistent trace of SSH-failed, fail2ban-banned, and firewall-
+dropped IPs:
+
+```bash
+sudo ./ops/install-vps-health-collector.sh
+```
+
+If you expose the bundled Caddy container, install the RedqueenX fail2ban jails
+after the Caddy access log exists:
+
+```bash
+sudo ./ops/fail2ban/install-redqueenx.sh
+```
+
+Those jails watch `/opt/RedqueenX/runtime/docker/caddy-logs/access.log` for
+repeated suspicious HTTP statuses (`308`, `400`, `401`, `403`, `404`, `405`,
+`408`, `429`) and common scan paths such as `.env`, `wp-login.php`, `.git`, and
+`phpmyadmin`.
+
 In Docker mode, `Load medias` records a media-cache job in SQLite. The worker
 then downloads the media through the VPN container.
 
