@@ -46,6 +46,38 @@ log_local_tracked_changes() {
   git status --short --untracked-files=no 2>&1 | tee -a "$log_file"
 }
 
+run_host_security_helper() {
+  local label="$1"
+  local script="$2"
+
+  if [[ "${REDQUEENX_DEPLOY_HOST_SECURITY:-true}" != "true" ]]; then
+    log "Host security helper disabled; skipping $label."
+    return 0
+  fi
+
+  if [[ ! -x "$script" ]]; then
+    log "Host security helper not found or not executable: $script; skipping $label."
+    return 0
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    log "Host security helper requires root; skipping $label."
+    return 0
+  fi
+
+  log "+ $script"
+  if "$script" 2>&1 | tee -a "$log_file"; then
+    log "Host security helper completed: $label."
+    return 0
+  fi
+
+  log "Host security helper failed: $label."
+  if [[ "${REDQUEENX_DEPLOY_HOST_SECURITY_STRICT:-false}" == "true" ]]; then
+    exit 1
+  fi
+  log "Continuing deploy because REDQUEENX_DEPLOY_HOST_SECURITY_STRICT is not true."
+}
+
 log "Starting RedqueenX deploy in $deploy_dir using $compose_file."
 cd "$deploy_dir"
 
@@ -75,6 +107,9 @@ if [[ -f .env ]]; then
     log "Could not chown .env to $env_owner; admin settings may not be able to write .env."
   fi
 fi
+
+run_host_security_helper "VPS health collector" "$deploy_dir/ops/install-vps-health-collector.sh"
+run_host_security_helper "RedqueenX fail2ban jails" "$deploy_dir/ops/fail2ban/install-redqueenx.sh"
 
 compose -f "$compose_file" pull
 compose -f "$compose_file" up -d --remove-orphans

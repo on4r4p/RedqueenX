@@ -10,6 +10,9 @@ escaped_redqueenx_dir="$(printf '%s' "$redqueenx_dir" | sed 's/[&|]/\\&/g')"
 tmp_jail="$(mktemp)"
 trap 'rm -f "$tmp_jail"' EXIT
 
+mkdir -p "$redqueenx_dir/runtime/docker/caddy-logs"
+touch "$redqueenx_dir/runtime/docker/caddy-logs/access.log"
+
 sed "s|/opt/RedqueenX|$escaped_redqueenx_dir|g" "$script_dir/jail.d/redqueenx-caddy.conf" > "$tmp_jail"
 
 install -m 0644 "$script_dir/filter.d/redqueenx-caddy-status.conf" "$filter_dir/redqueenx-caddy-status.conf"

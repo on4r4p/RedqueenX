@@ -37,6 +37,37 @@ append_env_if_missing() {
   fi
 }
 
+run_host_security_helper() {
+  local label="$1"
+  local script="$2"
+
+  if [ "${REDQUEENX_DEPLOY_HOST_SECURITY:-true}" != "true" ]; then
+    echo "Host security helper disabled; skipping $label."
+    return 0
+  fi
+
+  if [ ! -x "$script" ]; then
+    echo "Host security helper not found or not executable: $script; skipping $label."
+    return 0
+  fi
+
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Host security helper requires root; skipping $label."
+    return 0
+  fi
+
+  echo "Running host security helper: $label"
+  if "$script"; then
+    echo "Host security helper completed: $label"
+    return 0
+  fi
+
+  echo "Warning: host security helper failed: $label" >&2
+  if [ "${REDQUEENX_DEPLOY_HOST_SECURITY_STRICT:-false}" = "true" ]; then
+    exit 1
+  fi
+}
+
 append_env_if_missing ADMIN_HOST "0.0.0.0"
 append_env_if_missing ADMIN_PORT "3005"
 append_env_if_missing ADMIN_TRUST_PROXY "true"
@@ -85,6 +116,9 @@ mkdir -p runtime/docker/caddy-logs
 chown "$REDQUEENX_UID:$REDQUEENX_GID" .env 2>/dev/null || true
 chown -R "$REDQUEENX_UID:$REDQUEENX_GID" runtime/docker 2>/dev/null || true
 
+run_host_security_helper "VPS health collector" "$repo_dir/ops/install-vps-health-collector.sh"
+run_host_security_helper "RedqueenX fail2ban jails" "$repo_dir/ops/fail2ban/install-redqueenx.sh"
+
 services=(admin vpn worker)
 if [ "$with_caddy" = "true" ]; then
   services=(admin vpn worker caddy)
@@ -112,6 +146,5 @@ Then open locally:
   http://127.0.0.1:3005/admin
 
 Host health/fail2ban helpers:
-  sudo ./ops/install-vps-health-collector.sh
-  sudo ./ops/fail2ban/install-redqueenx.sh
+  auto-installed when this script runs as root
 EOF
