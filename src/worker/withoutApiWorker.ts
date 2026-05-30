@@ -872,6 +872,7 @@ async function runBrowserRedditCrawl(input: {
       enabled: input.config.redditCrawlEnabled,
       userAgent: input.config.redditCrawlUserAgent,
       subreddits: input.config.redditCrawlSubreddits,
+      includeGeneralSearch: input.config.redditCrawlIncludeGeneralSearch,
       limitPerKeyword: input.config.redditCrawlLimitPerKeyword,
       sort: input.config.redditCrawlSort,
       timeRange: input.config.redditCrawlTimeRange,

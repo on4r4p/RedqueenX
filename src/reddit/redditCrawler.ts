@@ -5,6 +5,7 @@ export interface RedditCrawlerConfig {
   enabled: boolean;
   userAgent: string;
   subreddits: string[];
+  includeGeneralSearch: boolean;
   limitPerKeyword: number;
   sort: "relevance" | "hot" | "top" | "new" | "comments";
   timeRange: "hour" | "day" | "week" | "month" | "year" | "all";
@@ -49,34 +50,50 @@ export class RedditCrawler {
       return [];
     }
 
-    const url = redditSearchUrl(normalizedKeyword, this.config);
-    const response = await fetch(url, {
-      headers: {
-        "user-agent": this.config.userAgent,
-        accept: "application/json"
+    const postsById = new Map<string, RedditPost>();
+    for (const subreddits of redditSearchScopes(this.config)) {
+      const url = redditSearchUrl(normalizedKeyword, this.config, subreddits);
+      const response = await fetch(url, {
+        headers: {
+          "user-agent": this.config.userAgent,
+          accept: "application/json"
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Reddit search failed with HTTP ${response.status}`);
       }
-    });
-    if (!response.ok) {
-      throw new Error(`Reddit search failed with HTTP ${response.status}`);
+
+      const listing = (await response.json()) as RedditListing;
+      for (const post of (listing.data?.children ?? [])
+        .map((child) => mapRedditChild(normalizedKeyword, child.data))
+        .filter((post): post is RedditPost => Boolean(post))
+        .filter((post) => post.score >= this.config.minScore)) {
+        if (!postsById.has(post.id)) {
+          postsById.set(post.id, post);
+        }
+      }
     }
 
-    const listing = (await response.json()) as RedditListing;
-    return (listing.data?.children ?? [])
-      .map((child) => mapRedditChild(normalizedKeyword, child.data))
-      .filter((post): post is RedditPost => Boolean(post))
-      .filter((post) => post.score >= this.config.minScore)
-      .slice(0, this.config.limitPerKeyword);
+    return Array.from(postsById.values()).slice(0, this.config.limitPerKeyword);
   }
 }
 
-function redditSearchUrl(keyword: string, config: RedditCrawlerConfig): string {
-  const subredditPath = config.subreddits.length > 0 ? `/r/${config.subreddits.map(encodeURIComponent).join("+")}` : "";
+function redditSearchScopes(config: RedditCrawlerConfig): string[][] {
+  const scopes = config.subreddits.length > 0 ? [config.subreddits] : [[]];
+  if (config.includeGeneralSearch && config.subreddits.length > 0) {
+    scopes.push([]);
+  }
+  return scopes;
+}
+
+function redditSearchUrl(keyword: string, config: RedditCrawlerConfig, subreddits: string[]): string {
+  const subredditPath = subreddits.length > 0 ? `/r/${subreddits.map(encodeURIComponent).join("+")}` : "";
   const url = new URL(`https://www.reddit.com${subredditPath}/search.json`);
   url.searchParams.set("q", keyword);
   url.searchParams.set("limit", String(config.limitPerKeyword));
   url.searchParams.set("sort", config.sort);
   url.searchParams.set("t", config.timeRange);
-  if (config.subreddits.length > 0) {
+  if (subreddits.length > 0) {
     url.searchParams.set("restrict_sr", "1");
   }
   return url.toString();

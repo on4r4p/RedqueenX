@@ -2,6 +2,26 @@ import path from "node:path";
 import { z } from "zod";
 import { parseAccessListInput } from "./admin/serverAccess";
 
+const defaultRedditCrawlSubreddits = [
+  "cybersecurity",
+  "netsec",
+  "blueteamsec",
+  "osint",
+  "privacy",
+  "hacking",
+  "AskNetsec",
+  "redteamsec",
+  "ReverseEngineering",
+  "malware",
+  "computerforensics",
+  "bugbounty",
+  "websecurity",
+  "exploitdev",
+  "netsecstudents",
+  "blackhat",
+  "HowToHack"
+].join(",");
+
 const envSchema = z.object({
   ADMIN_HOST: z.string().default("0.0.0.0"),
   ADMIN_PORT: z.coerce.number().int().positive().default(3005),
@@ -183,7 +203,11 @@ const envSchema = z.object({
     .default("false")
     .transform((value) => value === "true"),
   REDDIT_CRAWL_USER_AGENT: z.string().default("RedqueenX/0.1.0"),
-  REDDIT_CRAWL_SUBREDDITS: z.string().default("cybersecurity,netsec,blueteamsec,osint,privacy"),
+  REDDIT_CRAWL_SUBREDDITS: z.string().default(defaultRedditCrawlSubreddits),
+  REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
   REDDIT_CRAWL_LIMIT_PER_KEYWORD: z.coerce.number().int().min(1).max(100).default(10),
   REDDIT_CRAWL_SORT: z.enum(["relevance", "hot", "top", "new", "comments"]).default("relevance"),
   REDDIT_CRAWL_TIME_RANGE: z.enum(["hour", "day", "week", "month", "year", "all"]).default("month"),
@@ -311,6 +335,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     redditCrawlEnabled: parsed.REDDIT_CRAWL_ENABLED,
     redditCrawlUserAgent: parsed.REDDIT_CRAWL_USER_AGENT,
     redditCrawlSubreddits: parseCsvList(parsed.REDDIT_CRAWL_SUBREDDITS),
+    redditCrawlIncludeGeneralSearch: parsed.REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH,
     redditCrawlLimitPerKeyword: parsed.REDDIT_CRAWL_LIMIT_PER_KEYWORD,
     redditCrawlSort: parsed.REDDIT_CRAWL_SORT,
     redditCrawlTimeRange: parsed.REDDIT_CRAWL_TIME_RANGE,

@@ -16,6 +16,7 @@ describe("RedditCrawler", () => {
       enabled: true,
       userAgent: "RedqueenX test",
       subreddits: ["netsec"],
+      includeGeneralSearch: false,
       limitPerKeyword: 10,
       sort: "relevance",
       timeRange: "month",
@@ -75,6 +76,7 @@ describe("RedditCrawler", () => {
       enabled: true,
       userAgent: "RedqueenX test",
       subreddits: ["netsec", "cybersecurity"],
+      includeGeneralSearch: false,
       limitPerKeyword: 5,
       sort: "top",
       timeRange: "week",
@@ -107,5 +109,62 @@ describe("RedditCrawler", () => {
         }
       ]
     });
+  });
+
+  it("can add a general Reddit search after configured subreddit search", async () => {
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const url = new URL(String(input));
+      return {
+        ok: true,
+        json: async () => ({
+          data: {
+            children:
+              url.pathname === "/search.json"
+                ? [
+                    {
+                      data: {
+                        id: "global",
+                        subreddit: "cybersecurity",
+                        title: "General exploit discussion",
+                        permalink: "/r/cybersecurity/comments/global/general_exploit_discussion/",
+                        score: 5
+                      }
+                    }
+                  ]
+                : [
+                    {
+                      data: {
+                        id: "subreddit",
+                        subreddit: "netsec",
+                        title: "Subreddit exploit discussion",
+                        permalink: "/r/netsec/comments/subreddit/subreddit_exploit_discussion/",
+                        score: 6
+                      }
+                    }
+                  ]
+          }
+        })
+      };
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const crawler = new RedditCrawler({
+      enabled: true,
+      userAgent: "RedqueenX test",
+      subreddits: ["netsec"],
+      includeGeneralSearch: true,
+      limitPerKeyword: 10,
+      sort: "relevance",
+      timeRange: "month",
+      minScore: 1
+    });
+
+    const posts = await crawler.searchKeyword("exploit");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const requestedUrls = fetchMock.mock.calls.map((call) => new URL(String(call[0])));
+    expect(requestedUrls.map((url) => url.pathname)).toEqual(["/r/netsec/search.json", "/search.json"]);
+    expect(requestedUrls[0].searchParams.get("restrict_sr")).toBe("1");
+    expect(requestedUrls[1].searchParams.get("restrict_sr")).toBeNull();
+    expect(posts.map((post) => post.id)).toEqual(["subreddit", "global"]);
   });
 });

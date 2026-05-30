@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ListService } from "../src/admin/listService";
 import { TimelineItemService } from "../src/admin/timelineItemService";
 import { openMemoryDatabase } from "../src/db/database";
-import { runRssFallback } from "../src/rssFallback";
+import { prioritizeLikelyRssFeeds, runRssFallback } from "../src/rssFallback";
 import type { CurrentSessionLevel } from "../src/admin/currentSessionService";
 
 describe("RSS fallback", () => {
@@ -63,6 +63,20 @@ describe("RSS fallback", () => {
       runId: "run-empty",
       reason: "browser_completed"
     });
+  });
+
+  it("prioritizes likely feed URLs over imported article links", async () => {
+    expect(
+      prioritizeLikelyRssFeeds([
+        "https://packetstormsecurity.com/news/view/29421/example-article.html",
+        "https://rss.packetstormsecurity.com/",
+        "https://example.test/security/rss.xml"
+      ])
+    ).toEqual([
+      "https://example.test/security/rss.xml",
+      "https://rss.packetstormsecurity.com/",
+      "https://packetstormsecurity.com/news/view/29421/example-article.html"
+    ]);
   });
 });
 

@@ -388,7 +388,26 @@ describe("admin api", () => {
         rssFallbackFeedLimit: 25,
         redditCrawlEnabled: false,
         redditCrawlUserAgent: "RedqueenX/0.1.0",
-        redditCrawlSubreddits: ["cybersecurity", "netsec", "blueteamsec", "osint", "privacy"],
+        redditCrawlSubreddits: [
+          "cybersecurity",
+          "netsec",
+          "blueteamsec",
+          "osint",
+          "privacy",
+          "hacking",
+          "AskNetsec",
+          "redteamsec",
+          "ReverseEngineering",
+          "malware",
+          "computerforensics",
+          "bugbounty",
+          "websecurity",
+          "exploitdev",
+          "netsecstudents",
+          "blackhat",
+          "HowToHack"
+        ],
+        redditCrawlIncludeGeneralSearch: false,
         redditCrawlLimitPerKeyword: 10,
         redditCrawlSort: "relevance",
         redditCrawlTimeRange: "month",
@@ -967,6 +986,7 @@ describe("admin api", () => {
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT"');
     expect(adminPage.body).toContain('name="REDDIT_CRAWL_ENABLED"');
     expect(adminPage.body).toContain('name="REDDIT_CRAWL_SUBREDDITS"');
+    expect(adminPage.body).toContain('name="REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH"');
     expect(adminPage.body).toContain('name="REDDIT_CRAWL_MIN_SCORE"');
     expect(adminPage.body).toContain('name="relaxMinimumPopularityForHandleSearch"');
     expect(adminPage.body).toContain('name="SEARCH_WITHOUT_API_AUTO_IGNORE_ALERT"');
@@ -1681,7 +1701,9 @@ describe("admin api", () => {
       X_KEYWORDS_PER_QUERY: "5",
       REDDIT_CRAWL_ENABLED: "false",
       REDDIT_CRAWL_USER_AGENT: "RedqueenX/0.1.0",
-      REDDIT_CRAWL_SUBREDDITS: "cybersecurity,netsec,blueteamsec,osint,privacy",
+      REDDIT_CRAWL_SUBREDDITS:
+        "cybersecurity,netsec,blueteamsec,osint,privacy,hacking,AskNetsec,redteamsec,ReverseEngineering,malware,computerforensics,bugbounty,websecurity,exploitdev,netsecstudents,blackhat,HowToHack",
+      REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH: "false",
       REDDIT_CRAWL_LIMIT_PER_KEYWORD: "10",
       REDDIT_CRAWL_SORT: "relevance",
       REDDIT_CRAWL_TIME_RANGE: "month",
@@ -1704,6 +1726,7 @@ describe("admin api", () => {
           STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS: "12",
           REDDIT_CRAWL_ENABLED: "true",
           REDDIT_CRAWL_SUBREDDITS: "netsec,osint",
+          REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH: "true",
           REDDIT_CRAWL_LIMIT_PER_KEYWORD: "7",
           REDDIT_CRAWL_SORT: "top",
           REDDIT_CRAWL_TIME_RANGE: "week",
@@ -1723,6 +1746,7 @@ describe("admin api", () => {
     expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS).toBe("12");
     expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_ENABLED).toBe("true");
     expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_SUBREDDITS).toBe("netsec,osint");
+    expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH).toBe("true");
     expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_LIMIT_PER_KEYWORD).toBe("7");
     expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_SORT).toBe("top");
     expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_TIME_RANGE).toBe("week");
@@ -1953,6 +1977,7 @@ describe("admin api", () => {
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT=25");
     expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_ENABLED=true");
     expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_SUBREDDITS=netsec,osint");
+    expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH=true");
     expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_LIMIT_PER_KEYWORD=7");
     expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_SORT=top");
     expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_TIME_RANGE=week");

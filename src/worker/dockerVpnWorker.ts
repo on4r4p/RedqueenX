@@ -768,6 +768,7 @@ function dockerRuntimeEnvValues(config: AppConfig): NodeJS.ProcessEnv {
     REDDIT_CRAWL_ENABLED: String(config.redditCrawlEnabled),
     REDDIT_CRAWL_USER_AGENT: config.redditCrawlUserAgent,
     REDDIT_CRAWL_SUBREDDITS: config.redditCrawlSubreddits.join(","),
+    REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH: String(config.redditCrawlIncludeGeneralSearch),
     REDDIT_CRAWL_LIMIT_PER_KEYWORD: String(config.redditCrawlLimitPerKeyword),
     REDDIT_CRAWL_SORT: config.redditCrawlSort,
     REDDIT_CRAWL_TIME_RANGE: config.redditCrawlTimeRange,

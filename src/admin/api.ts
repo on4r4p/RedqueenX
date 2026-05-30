@@ -351,6 +351,7 @@ const xApiUpdateSchema = z.object({
       "REDDIT_CRAWL_ENABLED",
       "REDDIT_CRAWL_USER_AGENT",
       "REDDIT_CRAWL_SUBREDDITS",
+      "REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH",
       "REDDIT_CRAWL_LIMIT_PER_KEYWORD",
       "REDDIT_CRAWL_SORT",
       "REDDIT_CRAWL_TIME_RANGE",
@@ -483,6 +484,7 @@ export interface AdminApiOptions {
     | "redditCrawlEnabled"
     | "redditCrawlUserAgent"
     | "redditCrawlSubreddits"
+    | "redditCrawlIncludeGeneralSearch"
     | "redditCrawlLimitPerKeyword"
     | "redditCrawlSort"
     | "redditCrawlTimeRange"
@@ -3305,6 +3307,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       redditCrawlEnabled: options.config.redditCrawlEnabled,
       redditCrawlUserAgent: options.config.redditCrawlUserAgent,
       redditCrawlSubreddits: options.config.redditCrawlSubreddits,
+      redditCrawlIncludeGeneralSearch: options.config.redditCrawlIncludeGeneralSearch,
       redditCrawlLimitPerKeyword: options.config.redditCrawlLimitPerKeyword,
       redditCrawlSort: options.config.redditCrawlSort,
       redditCrawlTimeRange: options.config.redditCrawlTimeRange,
@@ -6237,6 +6240,7 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
         enabled: config.redditCrawlEnabled,
         userAgent: config.redditCrawlUserAgent,
         subreddits: config.redditCrawlSubreddits,
+        includeGeneralSearch: config.redditCrawlIncludeGeneralSearch,
         limitPerKeyword: config.redditCrawlLimitPerKeyword,
         sort: config.redditCrawlSort,
         timeRange: config.redditCrawlTimeRange,
@@ -7924,7 +7928,8 @@ function xApiEnvValuesToConfig(
       configKey === "vpnDiagnosticStrict" ||
       configKey === "vpnDiagnosticPlaywright" ||
       configKey === "playwrightDisableSandbox" ||
-      configKey === "redditCrawlEnabled"
+      configKey === "redditCrawlEnabled" ||
+      configKey === "redditCrawlIncludeGeneralSearch"
     ) {
       config[configKey] = value === "true";
     } else if (configKey === "searchWithoutApiMouseProfile") {
@@ -9031,6 +9036,7 @@ type XApiEnvKey =
   | "REDDIT_CRAWL_ENABLED"
   | "REDDIT_CRAWL_USER_AGENT"
   | "REDDIT_CRAWL_SUBREDDITS"
+  | "REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH"
   | "REDDIT_CRAWL_LIMIT_PER_KEYWORD"
   | "REDDIT_CRAWL_SORT"
   | "REDDIT_CRAWL_TIME_RANGE"
@@ -9127,6 +9133,7 @@ const xApiEnvMap: Array<[XApiEnvKey, keyof XApiRuntimeConfig]> = [
   ["REDDIT_CRAWL_ENABLED", "redditCrawlEnabled"],
   ["REDDIT_CRAWL_USER_AGENT", "redditCrawlUserAgent"],
   ["REDDIT_CRAWL_SUBREDDITS", "redditCrawlSubreddits"],
+  ["REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH", "redditCrawlIncludeGeneralSearch"],
   ["REDDIT_CRAWL_LIMIT_PER_KEYWORD", "redditCrawlLimitPerKeyword"],
   ["REDDIT_CRAWL_SORT", "redditCrawlSort"],
   ["REDDIT_CRAWL_TIME_RANGE", "redditCrawlTimeRange"],

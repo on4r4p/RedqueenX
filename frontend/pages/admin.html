@@ -859,7 +859,12 @@
                   <label>
                     <span>Subreddits</span>
                     <input name="REDDIT_CRAWL_SUBREDDITS" type="text"
-                      placeholder="cybersecurity,netsec,blueteamsec,osint,privacy" />
+                      placeholder="cybersecurity,netsec,blueteamsec,osint,privacy,hacking,AskNetsec,redteamsec,ReverseEngineering,malware,computerforensics,bugbounty,websecurity,exploitdev,netsecstudents,blackhat,HowToHack" />
+                  </label>
+                  <label class="switch-field">
+                    <span>Search all Reddit too</span>
+                    <input name="REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH" type="checkbox" />
+                    <span class="switch-control"></span>
                   </label>
                   <label>
                     <span>Posts per keyword</span>
@@ -1446,6 +1451,13 @@
                 <label class="wide-field">
                   <span>REDDIT_CRAWL_SUBREDDITS</span>
                   <input name="REDDIT_CRAWL_SUBREDDITS" type="text" autocomplete="off" />
+                </label>
+                <label>
+                  <span>REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH</span>
+                  <select name="REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH">
+                    <option value="false">false</option>
+                    <option value="true">true</option>
+                  </select>
                 </label>
                 <label>
                   <span>REDDIT_CRAWL_LIMIT_PER_KEYWORD</span>

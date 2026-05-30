@@ -225,6 +225,7 @@ export const xApiConfigSchema = z.object({
   redditCrawlEnabled: booleanSettingSchema,
   redditCrawlUserAgent: z.string().trim().min(1),
   redditCrawlSubreddits: z.array(z.string().trim().min(1)),
+  redditCrawlIncludeGeneralSearch: booleanSettingSchema,
   redditCrawlLimitPerKeyword: z.coerce.number().int().min(1).max(100),
   redditCrawlSort: z.enum(["relevance", "hot", "top", "new", "comments"]),
   redditCrawlTimeRange: z.enum(["hour", "day", "week", "month", "year", "all"]),

@@ -3,6 +3,7 @@ import { ListService } from "./admin/listService";
 import type { CurrentSessionLevel } from "./admin/currentSessionService";
 import type { TimelineItemService } from "./admin/timelineItemService";
 import { RssClient, type RssItem } from "./rss-client";
+import type { ListEntry } from "./types";
 
 export interface RssFallbackResult {
   feeds: number;
@@ -21,7 +22,7 @@ export interface RssFallbackOptions {
 }
 
 export async function runRssFallback(options: RssFallbackOptions): Promise<RssFallbackResult> {
-  const feeds = options.lists.activeValues("rss_feed").slice(0, options.feedLimit);
+  const feeds = activePrioritizedRssFeeds(options.lists).slice(0, options.feedLimit);
   if (!feeds.length) {
     await options.record("prob", "rss.fallback.empty", "No RSS feeds available for fallback", {
       runId: options.runId,
@@ -73,6 +74,50 @@ export async function runRssFallback(options: RssFallbackOptions): Promise<RssFa
   });
 
   return { feeds: feeds.length, savedItems, failedFeeds };
+}
+
+export function prioritizeLikelyRssFeeds(feeds: string[]): string[] {
+  return feeds
+    .map((feed, index) => ({ feed, index, score: rssFeedScore(feed, null) }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .map(({ feed }) => feed);
+}
+
+function activePrioritizedRssFeeds(lists: ListService): string[] {
+  return lists
+    .list("rss_feed")
+    .filter((entry) => !entry.isDeleted && !entry.isEmpty)
+    .map((entry, index) => ({
+      feed: entry.rawValue,
+      index,
+      score: rssFeedScore(entry.rawValue, entry)
+    }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .map(({ feed }) => feed);
+}
+
+function rssFeedScore(feed: string, entry: Pick<ListEntry, "sourceFile"> | null): number {
+  let url: URL;
+  try {
+    url = new URL(feed);
+  } catch {
+    return 0;
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  const pathname = url.pathname.toLowerCase();
+  const sourceFile = entry?.sourceFile?.toLowerCase() ?? "";
+  let score = 0;
+  if (sourceFile === "manual:hacking-rss") score += 24;
+  if (sourceFile.endsWith("rq.rss")) score += 12;
+  if (url.protocol === "https:") score += 2;
+  if (hostname === "rss.packetstormsecurity.com" || hostname.startsWith("feeds.") || hostname.startsWith("rss.")) score += 8;
+  if (pathname.includes("/feed") || pathname.includes("/rss") || pathname.includes("/atom")) score += 8;
+  if (pathname.endsWith(".xml") || pathname.endsWith(".rss") || pathname.endsWith(".atom")) score += 8;
+  if (hostname.includes("feedburner.com")) score += 8;
+  if (hostname === "go.theregister.co.uk" || pathname.includes("feed-sponsor")) score -= 8;
+  if (pathname.includes("/news/view/") || pathname.includes("/files/") || pathname.includes("/archive/")) score -= 6;
+  return score;
 }
 
 function saveRssItem(lists: ListService, timelineItems: TimelineItemService | undefined, feed: string, item: RssItem, importedAt: string): void {
