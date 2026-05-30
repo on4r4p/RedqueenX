@@ -1359,9 +1359,58 @@ function renderLogSnippets(samples) {
     .join("");
 }
 
+function renderSystemHealthBox(title, content) {
+  const body = Array.isArray(content) ? content.filter(Boolean).join("") : content;
+  if (!body) return "";
+  return `<section class="system-health-box"><h3>${escapeHtml(title)}</h3>${body}</section>`;
+}
+
+function renderSystemLogBox(title, samples) {
+  return renderSystemHealthBox(title, renderLogSnippets(samples));
+}
+
+function renderSecurityIpCards(rows) {
+  if (!rows.length) {
+    return '<div class="empty-state">No data.</div>';
+  }
+
+  return `<div class="security-ip-grid">${rows
+    .map(
+      (entry) => `<article class="security-ip-card">
+        <header>
+          <strong>${escapeHtml(entry.ip || "-")}</strong>
+          <span>${escapeHtml(entry.observations)} obs.</span>
+        </header>
+        <dl>
+          <div>
+            <dt>Actions</dt>
+            <dd>${escapeHtml(entry.actions || "-")}</dd>
+          </div>
+          <div>
+            <dt>Sources</dt>
+            <dd>${escapeHtml(entry.sources || "-")}</dd>
+          </div>
+          <div>
+            <dt>First seen</dt>
+            <dd>${escapeHtml(entry.firstSeen || "-")}</dd>
+          </div>
+          <div>
+            <dt>Last seen</dt>
+            <dd>${escapeHtml(entry.lastSeen || "-")}</dd>
+          </div>
+          <div>
+            <dt>Last detail</dt>
+            <dd>${escapeHtml(entry.lastDetail || "-")}</dd>
+          </div>
+        </dl>
+      </article>`
+    )
+    .join("")}</div>`;
+}
+
 function renderSecurityHistory(history) {
   if (!history?.available) {
-    return renderAvailabilityNote(history, "Persisted security history");
+    return renderSystemHealthBox("Persisted security IP trace", renderAvailabilityNote(history, "Persisted security history"));
   }
   const rows = (history.ips || []).map((entry) => ({
     ip: entry.ip,
@@ -1372,21 +1421,14 @@ function renderSecurityHistory(history) {
     observations: entry.observations ?? 0,
     lastDetail: entry.lastDetail || ""
   }));
-  return [
-    `<h3>Persisted security IP trace</h3>`,
+  const paths = [
     history.path ? `<div class="system-path">History: <code>${escapeHtml(history.path)}</code></div>` : "",
-    history.eventsPath ? `<div class="system-path">Events: <code>${escapeHtml(history.eventsPath)}</code></div>` : "",
-    renderDatabaseTable(rows, [
-      { key: "ip", label: "IP" },
-      { key: "actions", label: "Actions" },
-      { key: "sources", label: "Sources" },
-      { key: "firstSeen", label: "First seen" },
-      { key: "lastSeen", label: "Last seen" },
-      { key: "observations", label: "Obs." },
-      { key: "lastDetail", label: "Last detail" }
-    ]),
-    renderLogSnippets(history.samples)
-  ].join("");
+    history.eventsPath ? `<div class="system-path">Events: <code>${escapeHtml(history.eventsPath)}</code></div>` : ""
+  ].filter(Boolean);
+  return renderSystemHealthBox("Persisted security IP trace", [
+    paths.length ? `<div class="system-paths">${paths.join("")}</div>` : "",
+    renderSecurityIpCards(rows)
+  ]);
 }
 
 function systemHealthReportAge(data) {
@@ -1439,27 +1481,44 @@ async function refreshSystemHealth() {
 
   if (systemHealthSsh) {
     systemHealthSsh.innerHTML = [
-      renderAvailabilityNote(data.ssh, "SSH logs"),
       data.ssh?.available
-        ? `<h3>SSH login IPs</h3>${renderIpTable(data.ssh.loginIps)}<h3>SSH failed source IPs</h3>${renderIpTable(data.ssh.topIps)}${renderLogSnippets(data.ssh.samples)}`
-        : "",
-      renderAvailabilityNote(data.fail2ban, "fail2ban"),
+        ? [
+            renderSystemHealthBox("SSH login IPs", renderIpTable(data.ssh.loginIps)),
+            renderSystemHealthBox("SSH failed source IPs", renderIpTable(data.ssh.topIps)),
+            renderSystemLogBox("SSH log samples", data.ssh.samples)
+          ].join("")
+        : renderSystemHealthBox("SSH logs", renderAvailabilityNote(data.ssh, "SSH logs")),
       data.fail2ban?.available
-        ? `<h3>fail2ban sshd</h3>${renderDatabaseTable([data.fail2ban.sshd || {}], [
-            { key: "currentlyBanned", label: "Currently banned" },
-            { key: "totalBanned", label: "Total banned" }
-          ])}<h3>Jail status</h3>${renderDatabaseTable(data.fail2ban.jailStats || [], [
-            { key: "jail", label: "Jail" },
-            { key: "currentlyBanned", label: "Current" },
-            { key: "totalBanned", label: "Total" },
-            { key: "bannedIps", label: "Banned IPs" },
-            { key: "error", label: "Note" }
-          ])}<h3>Current banned IPs</h3>${renderStringList(data.fail2ban.sshd?.bannedIps || [])}<h3>Ban event IPs</h3>${renderIpTable(data.fail2ban.banLogIps)}<h3>Jails</h3>${renderStringList(data.fail2ban.jails || [])}${renderLogSnippets(data.fail2ban.samples)}`
-        : "",
-      renderAvailabilityNote(data.firewall, "Firewall"),
+        ? [
+            renderSystemHealthBox(
+              "fail2ban sshd",
+              renderDatabaseTable([data.fail2ban.sshd || {}], [
+                { key: "currentlyBanned", label: "Currently banned" },
+                { key: "totalBanned", label: "Total banned" }
+              ])
+            ),
+            renderSystemHealthBox(
+              "Jail status",
+              renderDatabaseTable(data.fail2ban.jailStats || [], [
+                { key: "jail", label: "Jail" },
+                { key: "currentlyBanned", label: "Current" },
+                { key: "totalBanned", label: "Total" },
+                { key: "bannedIps", label: "Banned IPs" },
+                { key: "error", label: "Note" }
+              ])
+            ),
+            renderSystemHealthBox("Current banned IPs", renderStringList(data.fail2ban.sshd?.bannedIps || [])),
+            renderSystemHealthBox("Ban event IPs", renderIpTable(data.fail2ban.banLogIps)),
+            renderSystemHealthBox("Jails", renderStringList(data.fail2ban.jails || [])),
+            renderSystemLogBox("fail2ban log samples", data.fail2ban.samples)
+          ].join("")
+        : renderSystemHealthBox("fail2ban", renderAvailabilityNote(data.fail2ban, "fail2ban")),
       data.firewall?.available
-        ? `<h3>Firewall dropped IPs</h3>${renderIpTable(data.firewall.droppedIps)}${renderLogSnippets(data.firewall.samples)}`
-        : "",
+        ? [
+            renderSystemHealthBox("Firewall dropped IPs", renderIpTable(data.firewall.droppedIps)),
+            renderSystemLogBox("Firewall log samples", data.firewall.samples)
+          ].join("")
+        : renderSystemHealthBox("Firewall", renderAvailabilityNote(data.firewall, "Firewall")),
       renderSecurityHistory(data.history)
     ].join("");
   }
