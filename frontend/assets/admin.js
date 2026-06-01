@@ -546,7 +546,7 @@ const adminTooltipByName = {
   enableMaximumMentions: "Enable or disable the maximum mention rejection check.",
   maximumTweetsByUser: "Maximum accepted tweets allowed from the same author in one scoring window.",
   enableMaximumTweetsByUser: "Enable or disable the per-author tweet limit rejection check.",
-  similarTweetTextThreshold: "Reject a tweet when its token similarity with an already accepted tweet reaches this value. Default 0.52 catches close paraphrases.",
+  similarTweetTextThreshold: "Reject a tweet when its token similarity with an already accepted tweet reaches this value. Lower is stricter. Default 0.52 catches close paraphrases.",
   enableSimilarTweetText: "Enable or disable near-duplicate tweet text rejection.",
   whitelist: "IPv4 addresses or CIDR ranges allowed to access RedqueenX over HTTPS. Your current IP is kept allowed automatically unless blacklisted.",
   blacklist: "IPv4 addresses or CIDR ranges denied access to RedqueenX over HTTPS. Blacklist wins over whitelist.",
@@ -4253,7 +4253,7 @@ const scoringPresets = {
     enableMaximumMentions: true,
     maximumMentions: 6,
     enableSimilarTweetText: true,
-    similarTweetTextThreshold: 0.84
+    similarTweetTextThreshold: 0.52
   },
   balanced: {
     enableMinimumTweetScore: true,
@@ -4265,7 +4265,7 @@ const scoringPresets = {
     enableMaximumMentions: true,
     maximumMentions: 10,
     enableSimilarTweetText: true,
-    similarTweetTextThreshold: 0.9
+    similarTweetTextThreshold: 0.68
   },
   permissive: {
     enableMinimumTweetScore: true,
@@ -4277,7 +4277,7 @@ const scoringPresets = {
     enableMaximumMentions: false,
     maximumMentions: 20,
     enableSimilarTweetText: true,
-    similarTweetTextThreshold: 0.95
+    similarTweetTextThreshold: 0.84
   }
 };
 

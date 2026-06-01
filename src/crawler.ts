@@ -3,6 +3,7 @@ import {
   DEFAULT_SCORING_CONFIG,
   effectiveMinimumPopularityThresholds,
   findSimilarSentText,
+  isDuplicateTextExactMatch,
   isAllowedLanguage,
   normalizeLanguageCode,
   scoreTweet,
@@ -71,10 +72,11 @@ export class Crawler {
   explainTweetsForHydration(keyword: string, tweets: TweetCandidate[]): TweetPrefilterResult[] {
     const scoreLists = this.buildScoreLists(keyword);
     const config = this.getScoringConfig();
-    return tweets.map((tweet) => ({
-      tweet,
-      decision: explainTweetPrefilter(tweet, keyword, scoreLists, config)
-    }));
+    return tweets.map((tweet) => {
+      const decision = explainTweetPrefilter(tweet, keyword, scoreLists, config);
+      rememberSeenTweet(scoreLists, tweet);
+      return { tweet, decision };
+    });
   }
 
   scoreTweets(keyword: string, tweets: TweetCandidate[]): CrawlResult[] {
@@ -83,13 +85,12 @@ export class Crawler {
     return tweets.map((tweet) => {
       const config = this.getScoringConfig();
       const decision = this.applyLuckFactor(scoreTweet(tweet, scoreLists, config), config);
+      rememberSeenTweet(scoreLists, tweet);
       if (decision.accepted) {
         const userHandle = normalizedTweetUserHandle(tweet);
         const importedAt = new Date().toISOString();
         this.lists.add("tweet_sent", tweet.id, `runtime:x-search:${keyword}`, null, importedAt);
         this.lists.add("text_sent", tweet.text, `runtime:x-search:${keyword}`, null, importedAt);
-        scoreLists.sentTweetIds.push(tweet.id);
-        scoreLists.sentTexts.push(tweet.text);
         const nextUserTweetCount = (scoreLists.tweetsByUser?.[userHandle] ?? 0) + 1;
         this.acceptedTweetsByUser.set(userHandle, nextUserTweetCount);
         scoreLists.tweetsByUser = {
@@ -187,7 +188,7 @@ export function explainTweetPrefilter(
   if (lists.sentTweetIds.includes(tweet.id)) {
     reasons.push("tweet_id_already_seen");
   }
-  const exactSentTextMatch = lists.sentTexts.some((sentText) => normalizeSearchText(sentText) === normalizedText);
+  const exactSentTextMatch = lists.sentTexts.some((sentText) => isDuplicateTextExactMatch(tweet.text, sentText));
   if (exactSentTextMatch) {
     reasons.push("tweet_text_already_seen");
   } else if (config.enableSimilarTweetText) {
@@ -247,6 +248,15 @@ export function explainTweetPrefilter(
     accepted: reasons.length === 0,
     reasons
   };
+}
+
+function rememberSeenTweet(lists: ScoreLists, tweet: TweetCandidate): void {
+  if (!lists.sentTweetIds.includes(tweet.id)) {
+    lists.sentTweetIds.push(tweet.id);
+  }
+  if (!lists.sentTexts.some((sentText) => isDuplicateTextExactMatch(tweet.text, sentText))) {
+    lists.sentTexts.push(tweet.text);
+  }
 }
 
 function extractQueryTerms(query: string): string[] {

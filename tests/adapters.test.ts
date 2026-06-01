@@ -248,6 +248,55 @@ describe("rss and crawler adapters", () => {
     expect(lists.activeValues("tweet_sent")).toEqual([]);
   });
 
+  it("rejects repeated accepted-looking tweets in the same scoring batch", async () => {
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+    lists.add("keyword", "warberrypi");
+
+    const xClient: XSearchClient = {
+      countRecent: vi.fn().mockResolvedValue(2),
+      lookupTweetsDetailed: vi.fn().mockResolvedValue([]),
+      searchRecent: vi.fn().mockResolvedValue([
+        {
+          id: "warberrypi-1",
+          text: "Tool review: WarBerryPi hardware implant for pentesting or red teaming with detailed usage notes",
+          lang: "en",
+          retweetCount: 1,
+          favoriteCount: 1,
+          user: {
+            screenName: "LSELabs",
+            followersCount: 1000
+          }
+        },
+        {
+          id: "warberrypi-2",
+          text: "Tool review: WarBerryPi hardware implant for pentesting or red teaming with detailed usage notes https://linuxsecurity.expert/tools/warberrypi/",
+          lang: "en",
+          retweetCount: 1,
+          favoriteCount: 1,
+          user: {
+            screenName: "LSELabs",
+            followersCount: 1000
+          }
+        }
+      ])
+    };
+    const crawler = new Crawler(lists, xClient, () => ({
+      ...DEFAULT_SCORING_CONFIG,
+      minimumTweetLength: 0,
+      minimumTweetRetweets: 0,
+      minimumUserFollowers: 0,
+      enableMinimumTweetScore: false
+    }));
+
+    const results = await crawler.crawlKeyword("warberrypi");
+
+    expect(results.map((result) => result.decision.accepted)).toEqual([true, false]);
+    expect(results[1].decision.reasons).toContain("tweet_text_already_seen");
+    expect(lists.activeValues("tweet_sent")).toEqual(["warberrypi-1"]);
+    database.close();
+  });
+
   it("keeps profile-dependent rejects for detailed hydration", () => {
     const database = openMemoryDatabase();
     const lists = new ListService(database);
@@ -316,6 +365,48 @@ describe("rss and crawler adapters", () => {
       accepted: false,
       reasons: ["banned_word:blockedterm"]
     });
+    database.close();
+  });
+
+  it("marks repeated browser-visible text as duplicate during prefilter", () => {
+    const database = openMemoryDatabase();
+    const lists = new ListService(database);
+    lists.add("keyword", "warberrypi");
+    lists.add("banned_word", "review");
+
+    const xClient: XSearchClient = {
+      countRecent: vi.fn().mockResolvedValue(1),
+      lookupTweetsDetailed: vi.fn().mockResolvedValue([]),
+      searchRecent: vi.fn().mockResolvedValue([])
+    };
+    const crawler = new Crawler(lists, xClient, () => ({
+      ...DEFAULT_SCORING_CONFIG,
+      minimumTweetLength: 0,
+      minimumTweetRetweets: 0,
+      maximumTweetAgeDays: 9999
+    }));
+
+    const results = crawler.explainTweetsForHydration("warberrypi", [
+      {
+        id: "visible-1",
+        text: "Tool review: WarBerryPi (hardware implant for pentesting or red teaming) by @sec_groundzero #pentesting #wifi",
+        lang: "en",
+        user: {
+          screenName: "LSELabs"
+        }
+      },
+      {
+        id: "visible-2",
+        text: "Tool review: WarBerryPi (hardware implant for pentesting or red teaming) by @sec_groundzero #pentesting #wifi https://linuxsecurity.expert/tools/warberrypi/ Tweet link hidden",
+        lang: "en",
+        user: {
+          screenName: "LSELabs"
+        }
+      }
+    ]);
+
+    expect(results[0].decision.reasons).toEqual(["banned_word:review"]);
+    expect(results[1].decision.reasons).toEqual(["tweet_text_already_seen", "banned_word:review"]);
     database.close();
   });
 

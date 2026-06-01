@@ -223,6 +223,35 @@ describe("scoreTweet", () => {
     expect(decision.reasons).toEqual(expect.arrayContaining([expect.stringMatching(/^tweet_text_too_similar:/)]));
   });
 
+  it("rejects duplicate text even when only URL noise differs", () => {
+    const previousText =
+      "Tool review: WarBerryPi (hardware implant for pentesting or red teaming) by @sec_groundzero #pentesting #wifi https://linuxsecurity.expert/tools/warberrypi/ Tweet link hidden";
+    const tweet: TweetCandidate = {
+      id: "warberrypi-repost",
+      text: "Tool review: WarBerryPi (hardware implant for pentesting or red teaming) by @sec_groundzero #pentesting #wifi",
+      lang: "en",
+      retweetCount: 10,
+      favoriteCount: 10,
+      user: {
+        screenName: "LSELabs",
+        followersCount: 1000
+      }
+    };
+
+    const decision = scoreTweet(tweet, {
+      keywords: ["warberrypi"],
+      following: [],
+      friends: [],
+      bannedUsers: [],
+      bannedWords: [],
+      sentTweetIds: [],
+      sentTexts: [previousText]
+    });
+
+    expect(decision.accepted).toBe(false);
+    expect(decision.reasons).toContain("tweet_text_already_seen");
+  });
+
   it("does not require a handle search keyword to appear in tweet text", () => {
     const tweet: TweetCandidate = {
       id: "handle-1",

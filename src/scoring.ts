@@ -105,7 +105,7 @@ export function scoreTweet(tweet: TweetCandidate, lists: ScoreLists, config: Sco
     reasons.push("tweet_id_already_seen");
   }
 
-  const exactSentTextMatch = lists.sentTexts.some((sentText) => normalizeSearchText(sentText) === normalizedText);
+  const exactSentTextMatch = lists.sentTexts.some((sentText) => isDuplicateTextExactMatch(tweet.text, sentText));
   if (exactSentTextMatch) {
     reasons.push("tweet_text_already_seen");
   } else if (config.enableSimilarTweetText) {
@@ -379,8 +379,8 @@ export function findSimilarSentText(text: string, sentTexts: string[], threshold
 }
 
 export function tweetTextSimilarity(left: string, right: string): number {
-  const leftText = normalizeSearchText(left);
-  const rightText = normalizeSearchText(right);
+  const leftText = normalizeDuplicateText(left);
+  const rightText = normalizeDuplicateText(right);
   if (!leftText || !rightText) return 0;
   if (leftText === rightText) return 1;
   if (hasLongSharedWindow(leftText, rightText)) return 1;
@@ -402,6 +402,25 @@ export function tweetTextSimilarity(left: string, right: string): number {
   return Math.max(dice, overlap);
 }
 
+export function isDuplicateTextExactMatch(left: string, right: string): boolean {
+  const leftText = normalizeSearchText(left);
+  const rightText = normalizeSearchText(right);
+  if (!leftText || !rightText) return false;
+  if (leftText === rightText) return true;
+
+  const leftDuplicateText = normalizeDuplicateText(left);
+  const rightDuplicateText = normalizeDuplicateText(right);
+  if (!leftDuplicateText || !rightDuplicateText || leftDuplicateText !== rightDuplicateText) {
+    return false;
+  }
+
+  return meaningfulTokenSet(leftDuplicateText).size >= 5;
+}
+
+export function normalizeDuplicateText(value: string): string {
+  return normalizeSearchText(stripDuplicateTextNoise(stripDiacritics(value)));
+}
+
 function normalizeSimilarityThreshold(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_SCORING_CONFIG.similarTweetTextThreshold;
   return Math.max(0, Math.min(1, value));
@@ -419,6 +438,21 @@ function hasLongSharedWindow(left: string, right: string): boolean {
     }
   }
   return false;
+}
+
+function stripDiacritics(value: string): string {
+  return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function stripDuplicateTextNoise(value: string): string {
+  return value
+    .replace(/\bhttps?:\/\/\S+/gi, " ")
+    .replace(/\bwww\.\S+/gi, " ")
+    .replace(/\bpic\.twitter\.com\/\S+/gi, " ")
+    .replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/\S*)?/gi, " ")
+    .replace(/\b(?:tweet|x)\s+link\s+hidden\b/gi, " ")
+    .replace(/\b(?:url|urls|media)\s*:?\s*\d+\s+hidden\b/gi, " ")
+    .replace(/\b(?:url|urls|media)\s+hidden\b/gi, " ");
 }
 
 function meaningfulTokenSet(text: string): Set<string> {
