@@ -11,6 +11,7 @@ const restoreArchiveTimelineButton = document.getElementById("restore-archive-ti
 const timelineDefaultPageSize = 50;
 const timelineMaxPageSize = 200;
 const redditTimelineTextMaxCharacters = 700;
+const xExternalLinkWarningStorageKey = "redqueenx.skipXExternalLinkWarning";
 const timelineQueryLimit = readOptionalBoundedQueryInt("limit", 1, timelineMaxPageSize);
 const defaultTimelineSources = ["tweet", "rss", "reddit"];
 const timelineState = {
@@ -164,6 +165,94 @@ function isXUrl(value) {
   } catch {
     return false;
   }
+}
+
+function isXExternalLinkWarningSkipped() {
+  try {
+    return localStorage.getItem(xExternalLinkWarningStorageKey) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function skipXExternalLinkWarning() {
+  try {
+    localStorage.setItem(xExternalLinkWarningStorageKey, "1");
+  } catch {
+    // Storage can be unavailable in private or locked-down browser contexts.
+  }
+}
+
+function confirmXExternalLinkOpening() {
+  if (isXExternalLinkWarningSkipped()) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    const previousFocus =
+      document.activeElement && typeof document.activeElement.focus === "function" ? document.activeElement : null;
+    const modal = document.createElement("div");
+    modal.className = "external-link-warning-modal";
+    modal.innerHTML = `<div class="external-link-warning-dialog" role="dialog" aria-modal="true" aria-labelledby="external-link-warning-title" aria-describedby="external-link-warning-message">
+      <h2 id="external-link-warning-title">Open X link?</h2>
+      <p id="external-link-warning-message">Warning: opening this link leaves RedqueenX and may expose this browser/network IP to X.</p>
+      <label class="external-link-warning-check">
+        <input type="checkbox" data-external-link-warning-skip />
+        <span>Don't ask again</span>
+      </label>
+      <div class="external-link-warning-actions">
+        <button type="button" data-external-link-warning-cancel>Cancel</button>
+        <button type="button" class="external-link-warning-ok" data-external-link-warning-confirm>OK</button>
+      </div>
+    </div>`;
+    document.body.append(modal);
+
+    const skipInput = modal.querySelector("[data-external-link-warning-skip]");
+    const cancelButton = modal.querySelector("[data-external-link-warning-cancel]");
+    const confirmButton = modal.querySelector("[data-external-link-warning-confirm]");
+
+    const close = (confirmed) => {
+      document.removeEventListener("keydown", handleKeydown);
+      modal.remove();
+      if (confirmed && skipInput?.checked) {
+        skipXExternalLinkWarning();
+      }
+      previousFocus?.focus({ preventScroll: true });
+      resolve(confirmed);
+    };
+
+    const keepFocusInDialog = (event) => {
+      const focusable = Array.from(modal.querySelectorAll("button, input")).filter((element) => !element.disabled);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    function handleKeydown(event) {
+      if (event.key === "Escape") {
+        close(false);
+      } else if (event.key === "Tab") {
+        keepFocusInDialog(event);
+      }
+    }
+
+    cancelButton?.addEventListener("click", () => close(false));
+    confirmButton?.addEventListener("click", () => close(true));
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) {
+        close(false);
+      }
+    });
+    document.addEventListener("keydown", handleKeydown);
+    cancelButton?.focus();
+  });
 }
 
 function formatDate(value) {
@@ -1173,9 +1262,7 @@ timeline.addEventListener("click", async (event) => {
       window.open(url, "_blank", "noopener,noreferrer");
       return;
     }
-    const confirmed = window.confirm(
-      "Warning: opening this link leaves RedqueenX and may expose this browser/network IP to X.\n\nContinue?"
-    );
+    const confirmed = await confirmXExternalLinkOpening();
     if (confirmed) {
       window.open(url, "_blank", "noopener,noreferrer");
     } else {
