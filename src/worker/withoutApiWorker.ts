@@ -871,6 +871,8 @@ async function runBrowserRedditCrawl(input: {
     const crawler = new RedditCrawler({
       enabled: input.config.redditCrawlEnabled,
       userAgent: input.config.redditCrawlUserAgent,
+      clientId: input.config.redditCrawlClientId,
+      clientSecret: input.config.redditCrawlClientSecret,
       subreddits: input.config.redditCrawlSubreddits,
       includeGeneralSearch: input.config.redditCrawlIncludeGeneralSearch,
       limitPerKeyword: input.config.redditCrawlLimitPerKeyword,

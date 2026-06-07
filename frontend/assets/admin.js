@@ -9,7 +9,9 @@ const systemHealthSummary = document.getElementById("system-health-summary");
 const systemHealthServices = document.getElementById("system-health-services");
 const systemHealthSsh = document.getElementById("system-health-ssh");
 const systemHealthWeb = document.getElementById("system-health-web");
-const systemHealthRuntime = document.getElementById("system-health-runtime");
+const systemHealthWebhook = document.getElementById("system-health-webhook");
+const systemHealthDockerServices = document.getElementById("system-health-docker-services");
+const systemHealthDockerLogs = document.getElementById("system-health-docker-logs");
 const runStatusLine = document.getElementById("run-status-line");
 const rawTimelineLinks = Array.from(document.querySelectorAll("[data-raw-timeline-link]"));
 const xSessionAlertHeader = document.getElementById("x-session-alert-header");
@@ -195,6 +197,7 @@ const databaseState = {
 
 let pendingImports = [];
 let sessionRefreshTimer = null;
+let systemHealthRefreshTimer = null;
 let openXSessionAlerts = [];
 let recentXSessionAlerts = [];
 let selectedXSessionAlertId = null;
@@ -371,6 +374,8 @@ const generalSettingsFields = [
   "SEARCH_WITHOUT_API_SCROLLS_MAX",
   "REDDIT_CRAWL_ENABLED",
   "REDDIT_CRAWL_USER_AGENT",
+  "REDDIT_CRAWL_CLIENT_ID",
+  "REDDIT_CRAWL_CLIENT_SECRET",
   "REDDIT_CRAWL_SUBREDDITS",
   "REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH",
   "REDDIT_CRAWL_LIMIT_PER_KEYWORD",
@@ -463,6 +468,8 @@ const envFields = [
   "RSS_FALLBACK_FEED_LIMIT",
   "REDDIT_CRAWL_ENABLED",
   "REDDIT_CRAWL_USER_AGENT",
+  "REDDIT_CRAWL_CLIENT_ID",
+  "REDDIT_CRAWL_CLIENT_SECRET",
   "REDDIT_CRAWL_SUBREDDITS",
   "REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH",
   "REDDIT_CRAWL_LIMIT_PER_KEYWORD",
@@ -575,7 +582,9 @@ const adminTooltipByName = {
   SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT:
     "Target percentage of @user keywords in each session. The planner adapts when one keyword type runs out, so runs do not stop just because the ratio cannot be met exactly.",
   REDDIT_CRAWL_ENABLED: "Search Reddit for normal, non-@user keywords after each X keyword search.",
-  REDDIT_CRAWL_USER_AGENT: "User-Agent sent to Reddit's public JSON endpoint.",
+  REDDIT_CRAWL_USER_AGENT: "User-Agent sent to Reddit's public JSON or OAuth endpoint.",
+  REDDIT_CRAWL_CLIENT_ID: "Optional Reddit app client ID used for OAuth search when public search.json is blocked.",
+  REDDIT_CRAWL_CLIENT_SECRET: "Optional Reddit app client secret used with REDDIT_CRAWL_CLIENT_ID.",
   REDDIT_CRAWL_SUBREDDITS: "Comma-separated subreddits to search. Leave empty to search all Reddit.",
   REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH: "Also run one all-Reddit search after the configured subreddit search.",
   REDDIT_CRAWL_LIMIT_PER_KEYWORD: "Maximum Reddit posts saved for one keyword.",
@@ -1295,8 +1304,9 @@ function formatDurationSeconds(value) {
   return `${days}d ${hours % 24}h`;
 }
 
-function renderMetric(label, value, text = false) {
-  return `<div class="metric"><span>${escapeHtml(label)}</span><strong${text ? ' class="metric-text"' : ""}>${escapeHtml(value)}</strong></div>`;
+function renderMetric(label, value, text = false, className = "") {
+  const metricClass = ["metric", className].filter(Boolean).join(" ");
+  return `<div class="${escapeAttribute(metricClass)}"><span>${escapeHtml(label)}</span><strong${text ? ' class="metric-text"' : ""}>${escapeHtml(value)}</strong></div>`;
 }
 
 function databaseTableUrl(tableName, suffix = "") {
@@ -1443,6 +1453,21 @@ function systemHealthReportAge(data) {
   return Math.max(0, Math.round((Date.now() - generatedAt) / 1000));
 }
 
+function systemHealthSourceLabel(data) {
+  if (data.environment?.source === "host-collector") return "VPS host collector";
+  if (data.environment?.source === "container-fallback") return "container fallback";
+  if (data.environment?.source === "live-host") return "live host commands";
+  return data.environment?.source || "unknown";
+}
+
+function systemHealthCollectorState(data) {
+  if (data.environment?.source === "container-fallback") return "host collector missing";
+  if (data.reportStale) return "stale snapshot";
+  if (data.environment?.source === "host-collector") return "fresh snapshot";
+  if (data.environment?.source === "live-host") return "live";
+  return "unknown";
+}
+
 async function refreshSystemHealth() {
   if (!systemHealthSummary) return;
   systemHealthSummary.innerHTML = '<div class="empty-state">Loading system health...</div>';
@@ -1463,6 +1488,13 @@ async function refreshSystemHealth() {
 
   systemHealthSummary.innerHTML = [
     renderMetric("Runtime", data.environment?.inDocker ? "Docker container" : "host/local", true),
+    renderMetric("Data source", systemHealthSourceLabel(data), true),
+    renderMetric(
+      "Collector state",
+      systemHealthCollectorState(data),
+      true,
+      data.reportStale || data.environment?.source === "container-fallback" ? "is-warning" : ""
+    ),
     renderMetric("Host", data.environment?.host || "-", true),
     renderMetric("Report age", reportAge === null ? "-" : formatDurationSeconds(reportAge), true),
     renderMetric("SSH accepted logins", data.ssh?.available ? data.ssh.acceptedLogins ?? 0 : "unavailable", true),
@@ -1538,22 +1570,46 @@ async function refreshSystemHealth() {
     ].join("");
   }
 
-  if (systemHealthRuntime) {
-    systemHealthRuntime.innerHTML = [
+  if (systemHealthWebhook) {
+    systemHealthWebhook.innerHTML = [
       renderAvailabilityNote(data.webhook, "Webhook logs"),
       data.webhook?.available
-        ? `<h3>Webhook</h3>${renderDatabaseTable([data.webhook], [
-            { key: "posts", label: "POSTs" },
-            { key: "invalidSignatures", label: "Invalid signatures" },
-            { key: "errors", label: "Errors" }
-          ])}<h3>Webhook IPs</h3>${renderIpTable(data.webhook.topIps)}${renderLogSnippets(data.webhook.samples)}`
-        : "",
+        ? [
+            renderSystemHealthBox(
+              "Webhook totals",
+              renderDatabaseTable([data.webhook], [
+                { key: "posts", label: "POSTs" },
+                { key: "invalidSignatures", label: "Invalid signatures" },
+                { key: "errors", label: "Errors" }
+              ])
+            ),
+            renderSystemHealthBox("Webhook IPs", renderIpTable(data.webhook.topIps)),
+            renderSystemLogBox("Webhook log samples", data.webhook.samples)
+          ].join("")
+        : ""
+    ].join("");
+  }
+
+  if (systemHealthDockerServices) {
+    systemHealthDockerServices.innerHTML = [
       renderAvailabilityNote(data.docker, "Docker compose"),
       data.docker?.available
-        ? `<h3>Docker compose services</h3>${renderDatabaseTable(data.docker.services || [], [
+        ? renderDatabaseTable(data.docker.services || [], [
             { key: "name", label: "Container" },
             { key: "status", label: "Status" }
-          ])}<h3>Docker log IPs</h3>${renderIpTable(data.docker.logIps)}${renderLogSnippets(data.docker.samples)}`
+          ])
+        : ""
+    ].join("");
+  }
+
+  if (systemHealthDockerLogs) {
+    systemHealthDockerLogs.innerHTML = [
+      renderAvailabilityNote(data.docker, "Docker compose"),
+      data.docker?.available
+        ? [
+            renderSystemHealthBox("Docker log IPs", renderIpTable(data.docker.logIps)),
+            renderSystemLogBox("Docker log samples", data.docker.samples)
+          ].join("")
         : ""
     ].join("");
   }
@@ -3746,6 +3802,20 @@ function updateSessionPolling() {
       refreshCurrentSession().catch((error) => setStatus(error.message));
       refreshSessionKeywords().catch((error) => setStatus(error.message));
     }, 2000);
+  }
+  updateSystemHealthPolling();
+}
+
+function updateSystemHealthPolling() {
+  if (systemHealthRefreshTimer) {
+    clearInterval(systemHealthRefreshTimer);
+    systemHealthRefreshTimer = null;
+  }
+
+  if (activeAdminSection() === "system") {
+    systemHealthRefreshTimer = setInterval(() => {
+      refreshSystemHealth().catch((error) => setStatus(error.message));
+    }, 60000);
   }
 }
 

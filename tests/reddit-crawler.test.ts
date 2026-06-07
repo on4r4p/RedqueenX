@@ -167,4 +167,86 @@ describe("RedditCrawler", () => {
     expect(requestedUrls[1].searchParams.get("restrict_sr")).toBeNull();
     expect(posts.map((post) => post.id)).toEqual(["subreddit", "global"]);
   });
+
+  it("uses Reddit OAuth when client credentials are configured", async () => {
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/access_token") {
+        return {
+          ok: true,
+          json: async () => ({
+            access_token: "reddit-token",
+            expires_in: 3600
+          })
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          data: {
+            children: [
+              {
+                data: {
+                  id: "oauth-post",
+                  subreddit: "netsec",
+                  title: "OAuth exploit discussion",
+                  permalink: "/r/netsec/comments/oauth/oauth_exploit_discussion/",
+                  score: 9
+                }
+              }
+            ]
+          }
+        }),
+        init
+      };
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const crawler = new RedditCrawler({
+      enabled: true,
+      userAgent: "RedqueenX test",
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      subreddits: ["netsec"],
+      includeGeneralSearch: false,
+      limitPerKeyword: 10,
+      sort: "new",
+      timeRange: "week",
+      minScore: 1
+    });
+
+    const posts = await crawler.searchKeyword("exploit");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://www.reddit.com/api/v1/access_token");
+    const searchUrl = new URL(String(fetchMock.mock.calls[1]?.[0]));
+    expect(searchUrl.origin).toBe("https://oauth.reddit.com");
+    expect(searchUrl.pathname).toBe("/r/netsec/search");
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      headers: expect.objectContaining({
+        authorization: "Bearer reddit-token"
+      })
+    });
+    expect(posts.map((post) => post.id)).toEqual(["oauth-post"]);
+  });
+
+  it("explains public Reddit 403 failures", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () => "<html>blocked</html>"
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const crawler = new RedditCrawler({
+      enabled: true,
+      userAgent: "RedqueenX test",
+      subreddits: ["netsec"],
+      includeGeneralSearch: false,
+      limitPerKeyword: 10,
+      sort: "new",
+      timeRange: "week",
+      minScore: 1
+    });
+
+    await expect(crawler.searchKeyword("exploit")).rejects.toThrow(/configure REDDIT_CRAWL_CLIENT_ID/);
+  });
 });

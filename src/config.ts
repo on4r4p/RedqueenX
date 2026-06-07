@@ -203,6 +203,8 @@ const envSchema = z.object({
     .default("false")
     .transform((value) => value === "true"),
   REDDIT_CRAWL_USER_AGENT: z.string().default("RedqueenX/0.1.0"),
+  REDDIT_CRAWL_CLIENT_ID: z.string().default(""),
+  REDDIT_CRAWL_CLIENT_SECRET: z.string().default(""),
   REDDIT_CRAWL_SUBREDDITS: z.string().default(defaultRedditCrawlSubreddits),
   REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH: z
     .enum(["true", "false"])
@@ -334,6 +336,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     rssFallbackFeedLimit: parsed.RSS_FALLBACK_FEED_LIMIT,
     redditCrawlEnabled: parsed.REDDIT_CRAWL_ENABLED,
     redditCrawlUserAgent: parsed.REDDIT_CRAWL_USER_AGENT,
+    redditCrawlClientId: parsed.REDDIT_CRAWL_CLIENT_ID,
+    redditCrawlClientSecret: parsed.REDDIT_CRAWL_CLIENT_SECRET,
     redditCrawlSubreddits: parseCsvList(parsed.REDDIT_CRAWL_SUBREDDITS),
     redditCrawlIncludeGeneralSearch: parsed.REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH,
     redditCrawlLimitPerKeyword: parsed.REDDIT_CRAWL_LIMIT_PER_KEYWORD,

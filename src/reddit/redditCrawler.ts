@@ -4,6 +4,8 @@ import type { TweetMedia } from "../types";
 export interface RedditCrawlerConfig {
   enabled: boolean;
   userAgent: string;
+  clientId?: string;
+  clientSecret?: string;
   subreddits: string[];
   includeGeneralSearch: boolean;
   limitPerKeyword: number;
@@ -36,12 +38,19 @@ type RedditListing = {
   };
 };
 
+type RedditAccessToken = {
+  value: string;
+  expiresAtMs: number;
+};
+
 export function isTopicKeyword(keyword: string): boolean {
   const trimmed = keyword.trim();
   return trimmed.length > 0 && !isHandleSearchKeyword(trimmed);
 }
 
 export class RedditCrawler {
+  private accessToken: RedditAccessToken | null = null;
+
   constructor(private readonly config: RedditCrawlerConfig) {}
 
   async searchKeyword(keyword: string): Promise<RedditPost[]> {
@@ -51,19 +60,10 @@ export class RedditCrawler {
     }
 
     const postsById = new Map<string, RedditPost>();
+    const auth = await this.requestAuth();
     for (const subreddits of redditSearchScopes(this.config)) {
-      const url = redditSearchUrl(normalizedKeyword, this.config, subreddits);
-      const response = await fetch(url, {
-        headers: {
-          "user-agent": this.config.userAgent,
-          accept: "application/json"
-        }
-      });
-      if (!response.ok) {
-        throw new Error(`Reddit search failed with HTTP ${response.status}`);
-      }
-
-      const listing = (await response.json()) as RedditListing;
+      const url = redditSearchUrl(normalizedKeyword, this.config, subreddits, auth.oauth);
+      const listing = await fetchRedditListing(url, auth.headers, auth.oauth);
       for (const post of (listing.data?.children ?? [])
         .map((child) => mapRedditChild(normalizedKeyword, child.data))
         .filter((post): post is RedditPost => Boolean(post))
@@ -76,6 +76,64 @@ export class RedditCrawler {
 
     return Array.from(postsById.values()).slice(0, this.config.limitPerKeyword);
   }
+
+  private async requestAuth(): Promise<{ oauth: boolean; headers: Record<string, string> }> {
+    const clientId = this.config.clientId?.trim() || "";
+    const clientSecret = this.config.clientSecret?.trim() || "";
+    const headers = {
+      "user-agent": this.config.userAgent,
+      accept: "application/json"
+    };
+
+    if (!clientId && !clientSecret) {
+      return { oauth: false, headers };
+    }
+    if (!clientId || !clientSecret) {
+      throw new Error("Both REDDIT_CRAWL_CLIENT_ID and REDDIT_CRAWL_CLIENT_SECRET are required for Reddit OAuth.");
+    }
+
+    const token = await this.getAccessToken(clientId, clientSecret);
+    return {
+      oauth: true,
+      headers: {
+        ...headers,
+        authorization: `Bearer ${token}`
+      }
+    };
+  }
+
+  private async getAccessToken(clientId: string, clientSecret: string): Promise<string> {
+    if (this.accessToken && this.accessToken.expiresAtMs > Date.now() + 60_000) {
+      return this.accessToken.value;
+    }
+
+    const response = await fetch("https://www.reddit.com/api/v1/access_token", {
+      method: "POST",
+      headers: {
+        authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+        "content-type": "application/x-www-form-urlencoded",
+        "user-agent": this.config.userAgent,
+        accept: "application/json"
+      },
+      body: new URLSearchParams({ grant_type: "client_credentials" })
+    });
+    if (!response.ok) {
+      throw new Error(`Reddit OAuth token request failed with HTTP ${response.status}${await responseErrorPreview(response)}`);
+    }
+
+    const payload = await parseJsonResponse(response, "Reddit OAuth token response");
+    const accessToken = stringValue(payload.access_token);
+    if (!accessToken) {
+      throw new Error("Reddit OAuth token response did not include an access_token.");
+    }
+
+    const expiresIn = Math.max(60, numberValue(payload.expires_in) || 3600);
+    this.accessToken = {
+      value: accessToken,
+      expiresAtMs: Date.now() + expiresIn * 1000
+    };
+    return accessToken;
+  }
 }
 
 function redditSearchScopes(config: RedditCrawlerConfig): string[][] {
@@ -86,9 +144,11 @@ function redditSearchScopes(config: RedditCrawlerConfig): string[][] {
   return scopes;
 }
 
-function redditSearchUrl(keyword: string, config: RedditCrawlerConfig, subreddits: string[]): string {
+function redditSearchUrl(keyword: string, config: RedditCrawlerConfig, subreddits: string[], oauth: boolean): string {
   const subredditPath = subreddits.length > 0 ? `/r/${subreddits.map(encodeURIComponent).join("+")}` : "";
-  const url = new URL(`https://www.reddit.com${subredditPath}/search.json`);
+  const host = oauth ? "https://oauth.reddit.com" : "https://www.reddit.com";
+  const endpoint = oauth ? "search" : "search.json";
+  const url = new URL(`${host}${subredditPath}/${endpoint}`);
   url.searchParams.set("q", keyword);
   url.searchParams.set("limit", String(config.limitPerKeyword));
   url.searchParams.set("sort", config.sort);
@@ -97,6 +157,37 @@ function redditSearchUrl(keyword: string, config: RedditCrawlerConfig, subreddit
     url.searchParams.set("restrict_sr", "1");
   }
   return url.toString();
+}
+
+async function fetchRedditListing(url: string, headers: Record<string, string>, oauth: boolean): Promise<RedditListing> {
+  const response = await fetch(url, { headers });
+  if (!response.ok) {
+    const mode = oauth ? "OAuth" : "public JSON";
+    const advice = oauth
+      ? ""
+      : " Reddit is blocking unauthenticated search JSON; configure REDDIT_CRAWL_CLIENT_ID and REDDIT_CRAWL_CLIENT_SECRET for OAuth.";
+    throw new Error(`Reddit ${mode} search failed with HTTP ${response.status}.${advice}${await responseErrorPreview(response)}`);
+  }
+
+  return parseJsonResponse(response, oauth ? "Reddit OAuth search response" : "Reddit public JSON search response") as Promise<RedditListing>;
+}
+
+async function parseJsonResponse(response: Response, label: string): Promise<Record<string, unknown>> {
+  try {
+    const payload = (await response.json()) as unknown;
+    return objectValue(payload) || {};
+  } catch {
+    throw new Error(`${label} was not valid JSON.`);
+  }
+}
+
+async function responseErrorPreview(response: Response): Promise<string> {
+  try {
+    const preview = (await response.text()).replace(/\s+/g, " ").trim().slice(0, 180);
+    return preview ? ` Response preview: ${preview}` : "";
+  } catch {
+    return "";
+  }
 }
 
 function mapRedditChild(keyword: string, data: Record<string, unknown> | undefined): RedditPost | null {

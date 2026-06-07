@@ -350,6 +350,8 @@ const xApiUpdateSchema = z.object({
       "PLAYWRIGHT_DISABLE_SANDBOX",
       "REDDIT_CRAWL_ENABLED",
       "REDDIT_CRAWL_USER_AGENT",
+      "REDDIT_CRAWL_CLIENT_ID",
+      "REDDIT_CRAWL_CLIENT_SECRET",
       "REDDIT_CRAWL_SUBREDDITS",
       "REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH",
       "REDDIT_CRAWL_LIMIT_PER_KEYWORD",
@@ -483,6 +485,8 @@ export interface AdminApiOptions {
     | "rssFallbackFeedLimit"
     | "redditCrawlEnabled"
     | "redditCrawlUserAgent"
+    | "redditCrawlClientId"
+    | "redditCrawlClientSecret"
     | "redditCrawlSubreddits"
     | "redditCrawlIncludeGeneralSearch"
     | "redditCrawlLimitPerKeyword"
@@ -3306,6 +3310,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       xCostCountCallUsd: options.config.xCostCountCallUsd,
       redditCrawlEnabled: options.config.redditCrawlEnabled,
       redditCrawlUserAgent: options.config.redditCrawlUserAgent,
+      redditCrawlClientId: options.config.redditCrawlClientId,
+      redditCrawlClientSecret: options.config.redditCrawlClientSecret,
       redditCrawlSubreddits: options.config.redditCrawlSubreddits,
       redditCrawlIncludeGeneralSearch: options.config.redditCrawlIncludeGeneralSearch,
       redditCrawlLimitPerKeyword: options.config.redditCrawlLimitPerKeyword,
@@ -6239,6 +6245,8 @@ export function createAdminApi(options: AdminApiOptions): FastifyInstance {
       const crawler = new RedditCrawler({
         enabled: config.redditCrawlEnabled,
         userAgent: config.redditCrawlUserAgent,
+        clientId: config.redditCrawlClientId,
+        clientSecret: config.redditCrawlClientSecret,
         subreddits: config.redditCrawlSubreddits,
         includeGeneralSearch: config.redditCrawlIncludeGeneralSearch,
         limitPerKeyword: config.redditCrawlLimitPerKeyword,
@@ -7965,7 +7973,9 @@ function xApiEnvValuesToConfig(
       configKey === "vpnRemoteHost" ||
       configKey === "vpnConfig" ||
       configKey === "playwrightChromiumExecutablePath" ||
-      configKey === "redditCrawlUserAgent"
+      configKey === "redditCrawlUserAgent" ||
+      configKey === "redditCrawlClientId" ||
+      configKey === "redditCrawlClientSecret"
     ) {
       config[configKey] = value;
     } else {
@@ -8523,7 +8533,9 @@ async function fail2banHealth() {
     bannedIps: [] as string[],
     error: undefined
   };
-  if (!summary.available && !sshd.available) {
+  const summaryOk = summary.available && !summary.error;
+  const anyJailOk = jailStatsWithSamples.some((jail) => jail.available);
+  if (!summaryOk && !anyJailOk) {
     return {
       available: false,
       jails: [] as string[],
@@ -8549,7 +8561,7 @@ async function fail2banHealth() {
       logSnippet("fail2ban ban event sample", banLines, 40, banLog.error),
       ...jailStatsWithSamples.map((jail) => jail.sample)
     ],
-    error: !sshd.available ? sshd.error : undefined
+    error: !summaryOk ? summary.error : !sshd.available ? sshd.error : undefined
   };
 }
 
@@ -9035,6 +9047,8 @@ type XApiEnvKey =
   | "PLAYWRIGHT_DISABLE_SANDBOX"
   | "REDDIT_CRAWL_ENABLED"
   | "REDDIT_CRAWL_USER_AGENT"
+  | "REDDIT_CRAWL_CLIENT_ID"
+  | "REDDIT_CRAWL_CLIENT_SECRET"
   | "REDDIT_CRAWL_SUBREDDITS"
   | "REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH"
   | "REDDIT_CRAWL_LIMIT_PER_KEYWORD"
@@ -9132,6 +9146,8 @@ const xApiEnvMap: Array<[XApiEnvKey, keyof XApiRuntimeConfig]> = [
   ["PLAYWRIGHT_DISABLE_SANDBOX", "playwrightDisableSandbox"],
   ["REDDIT_CRAWL_ENABLED", "redditCrawlEnabled"],
   ["REDDIT_CRAWL_USER_AGENT", "redditCrawlUserAgent"],
+  ["REDDIT_CRAWL_CLIENT_ID", "redditCrawlClientId"],
+  ["REDDIT_CRAWL_CLIENT_SECRET", "redditCrawlClientSecret"],
   ["REDDIT_CRAWL_SUBREDDITS", "redditCrawlSubreddits"],
   ["REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH", "redditCrawlIncludeGeneralSearch"],
   ["REDDIT_CRAWL_LIMIT_PER_KEYWORD", "redditCrawlLimitPerKeyword"],

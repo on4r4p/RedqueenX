@@ -767,6 +767,8 @@ function dockerRuntimeEnvValues(config: AppConfig): NodeJS.ProcessEnv {
     SEARCH_WITHOUT_API_MEDIA_CACHE_FETCH_DELAY_MAX_MS: String(config.searchWithoutApiMediaCacheFetchDelayMaxMs),
     REDDIT_CRAWL_ENABLED: String(config.redditCrawlEnabled),
     REDDIT_CRAWL_USER_AGENT: config.redditCrawlUserAgent,
+    REDDIT_CRAWL_CLIENT_ID: config.redditCrawlClientId,
+    REDDIT_CRAWL_CLIENT_SECRET: config.redditCrawlClientSecret,
     REDDIT_CRAWL_SUBREDDITS: config.redditCrawlSubreddits.join(","),
     REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH: String(config.redditCrawlIncludeGeneralSearch),
     REDDIT_CRAWL_LIMIT_PER_KEYWORD: String(config.redditCrawlLimitPerKeyword),

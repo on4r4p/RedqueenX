@@ -128,7 +128,9 @@ function fail2banHealth() {
     totalBanned: 0,
     bannedIps: []
   };
-  if (!summary.available && !sshd.available) {
+  const summaryOk = summary.available && !summary.error;
+  const anyJailOk = jailStats.some((jail) => jail.available);
+  if (!summaryOk && !anyJailOk) {
     return {
       available: false,
       jails: [],
@@ -154,7 +156,7 @@ function fail2banHealth() {
       logSnippet("fail2ban ban event sample", banLines, 40, banLog.error),
       ...jailStats.map((jail) => jail.sample)
     ],
-    error: !sshd.available ? sshd.error : undefined
+    error: !summaryOk ? summary.error : !sshd.available ? sshd.error : undefined
   };
 }
 

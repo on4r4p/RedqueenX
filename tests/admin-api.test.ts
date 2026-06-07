@@ -388,6 +388,8 @@ describe("admin api", () => {
         rssFallbackFeedLimit: 25,
         redditCrawlEnabled: false,
         redditCrawlUserAgent: "RedqueenX/0.1.0",
+        redditCrawlClientId: "",
+        redditCrawlClientSecret: "",
         redditCrawlSubreddits: [
           "cybersecurity",
           "netsec",
@@ -1701,6 +1703,8 @@ describe("admin api", () => {
       X_KEYWORDS_PER_QUERY: "5",
       REDDIT_CRAWL_ENABLED: "false",
       REDDIT_CRAWL_USER_AGENT: "RedqueenX/0.1.0",
+      REDDIT_CRAWL_CLIENT_ID: "",
+      REDDIT_CRAWL_CLIENT_SECRET: "",
       REDDIT_CRAWL_SUBREDDITS:
         "cybersecurity,netsec,blueteamsec,osint,privacy,hacking,AskNetsec,redteamsec,ReverseEngineering,malware,computerforensics,bugbounty,websecurity,exploitdev,netsecstudents,blackhat,HowToHack",
       REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH: "false",
@@ -1725,6 +1729,8 @@ describe("admin api", () => {
           STALE_KEYWORD_USER_MAX_RETRIES: "5",
           STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS: "12",
           REDDIT_CRAWL_ENABLED: "true",
+          REDDIT_CRAWL_CLIENT_ID: "reddit-client",
+          REDDIT_CRAWL_CLIENT_SECRET: "reddit-secret",
           REDDIT_CRAWL_SUBREDDITS: "netsec,osint",
           REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH: "true",
           REDDIT_CRAWL_LIMIT_PER_KEYWORD: "7",
@@ -1745,6 +1751,8 @@ describe("admin api", () => {
     expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_MAX_RETRIES).toBe("5");
     expect(generalRuntimeUpdate.json().values.STALE_KEYWORD_USER_AUTO_RESTART_DELAY_SECONDS).toBe("12");
     expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_ENABLED).toBe("true");
+    expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_CLIENT_ID).toBe("reddit-client");
+    expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_CLIENT_SECRET).toBe("reddit-secret");
     expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_SUBREDDITS).toBe("netsec,osint");
     expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH).toBe("true");
     expect(generalRuntimeUpdate.json().values.REDDIT_CRAWL_LIMIT_PER_KEYWORD).toBe("7");
@@ -1976,6 +1984,8 @@ describe("admin api", () => {
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_RANDOMIZE_KEYWORD_ORDER=true");
     expect(envAfterSearchWithoutApiEnable).toContain("SEARCH_WITHOUT_API_USER_KEYWORD_PERCENT=25");
     expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_ENABLED=true");
+    expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_CLIENT_ID=reddit-client");
+    expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_CLIENT_SECRET=reddit-secret");
     expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_SUBREDDITS=netsec,osint");
     expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_INCLUDE_GENERAL_SEARCH=true");
     expect(envAfterSearchWithoutApiEnable).toContain("REDDIT_CRAWL_LIMIT_PER_KEYWORD=7");

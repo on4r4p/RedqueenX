@@ -316,8 +316,16 @@
               <div id="system-health-web" class="database-scroll"></div>
             </section>
             <section class="panel">
-              <h2>Webhook and Docker</h2>
-              <div id="system-health-runtime" class="database-scroll"></div>
+              <h2>Webhook</h2>
+              <div id="system-health-webhook" class="system-health-stack"></div>
+            </section>
+            <section class="panel">
+              <h2>Docker services</h2>
+              <div id="system-health-docker-services" class="database-scroll"></div>
+            </section>
+            <section class="panel">
+              <h2>Docker logs</h2>
+              <div id="system-health-docker-logs" class="system-health-stack"></div>
             </section>
           </section>
         </section>
@@ -855,6 +863,14 @@
                   <label>
                     <span>User agent</span>
                     <input name="REDDIT_CRAWL_USER_AGENT" type="text" placeholder="RedqueenX/0.1.0" />
+                  </label>
+                  <label>
+                    <span>OAuth client ID</span>
+                    <input name="REDDIT_CRAWL_CLIENT_ID" type="text" autocomplete="off" />
+                  </label>
+                  <label>
+                    <span>OAuth client secret</span>
+                    <input name="REDDIT_CRAWL_CLIENT_SECRET" type="password" autocomplete="off" />
                   </label>
                   <label>
                     <span>Subreddits</span>
@@ -1447,6 +1463,14 @@
                 <label>
                   <span>REDDIT_CRAWL_USER_AGENT</span>
                   <input name="REDDIT_CRAWL_USER_AGENT" type="text" autocomplete="off" />
+                </label>
+                <label>
+                  <span>REDDIT_CRAWL_CLIENT_ID</span>
+                  <input name="REDDIT_CRAWL_CLIENT_ID" type="text" autocomplete="off" />
+                </label>
+                <label>
+                  <span>REDDIT_CRAWL_CLIENT_SECRET</span>
+                  <input name="REDDIT_CRAWL_CLIENT_SECRET" type="password" autocomplete="off" />
                 </label>
                 <label class="wide-field">
                   <span>REDDIT_CRAWL_SUBREDDITS</span>

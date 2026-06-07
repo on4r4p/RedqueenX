@@ -224,6 +224,8 @@ export const xApiConfigSchema = z.object({
   xCostCountCallUsd: z.coerce.number().min(0),
   redditCrawlEnabled: booleanSettingSchema,
   redditCrawlUserAgent: z.string().trim().min(1),
+  redditCrawlClientId: z.string().trim(),
+  redditCrawlClientSecret: z.string().trim(),
   redditCrawlSubreddits: z.array(z.string().trim().min(1)),
   redditCrawlIncludeGeneralSearch: booleanSettingSchema,
   redditCrawlLimitPerKeyword: z.coerce.number().int().min(1).max(100),
