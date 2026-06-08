@@ -8,6 +8,8 @@ const systemHealthUpdated = document.getElementById("system-health-updated");
 const systemHealthSummary = document.getElementById("system-health-summary");
 const systemHealthServices = document.getElementById("system-health-services");
 const systemHealthSsh = document.getElementById("system-health-ssh");
+const systemHealthFail2ban = document.getElementById("system-health-fail2ban");
+const systemHealthFirewall = document.getElementById("system-health-firewall");
 const systemHealthWeb = document.getElementById("system-health-web");
 const systemHealthWebhook = document.getElementById("system-health-webhook");
 const systemHealthDockerServices = document.getElementById("system-health-docker-services");
@@ -1349,8 +1351,12 @@ function renderAvailabilityNote(block, label) {
   return `<div class="empty-state">${escapeHtml(label)} unavailable in this runtime.${escapeHtml(error)}</div>`;
 }
 
+function renderSystemTable(rows, columns) {
+  return `<div class="system-table-scroll">${renderDatabaseTable(rows || [], columns)}</div>`;
+}
+
 function renderIpTable(rows) {
-  return renderDatabaseTable(rows || [], [
+  return renderSystemTable(rows || [], [
     { key: "ip", label: "IP" },
     { key: "count", label: "Count" }
   ]);
@@ -1358,67 +1364,49 @@ function renderIpTable(rows) {
 
 function renderStringList(values) {
   const rows = (values || []).map((value) => ({ value }));
-  return renderDatabaseTable(rows, [{ key: "value", label: "Value" }]);
+  return renderSystemTable(rows, [{ key: "value", label: "Value" }]);
 }
 
 function renderLogSnippets(samples) {
   const visibleSamples = (samples || []).filter((sample) => (sample.lines || []).length || sample.error);
   if (!visibleSamples.length) return "";
-  return visibleSamples
-    .map((sample) => {
-      const lines = (sample.lines || []).length ? sample.lines.join("\n") : sample.error || "No log line.";
-      return `<details class="system-log-snippet" open><summary>${escapeHtml(sample.label || "Log sample")}</summary><pre>${escapeHtml(lines)}</pre></details>`;
-    })
-    .join("");
+  const rows = visibleSamples.flatMap((sample) => {
+    const lines = (sample.lines || []).length ? sample.lines : [sample.error || "No log line."];
+    return lines.map((line) => ({
+      sample: sample.label || "Log sample",
+      line
+    }));
+  });
+  return renderSystemTable(rows, [
+    { key: "sample", label: "Sample" },
+    { key: "line", label: "Line" }
+  ]);
 }
 
 function renderSystemHealthBox(title, content) {
   const body = Array.isArray(content) ? content.filter(Boolean).join("") : content;
   if (!body) return "";
-  return `<section class="system-health-box"><h3>${escapeHtml(title)}</h3>${body}</section>`;
+  return `<section class="system-health-section"><h3>${escapeHtml(title)}</h3>${body}</section>`;
 }
 
 function renderSystemLogBox(title, samples) {
   return renderSystemHealthBox(title, renderLogSnippets(samples));
 }
 
-function renderSecurityIpCards(rows) {
+function renderSecurityIpTable(rows) {
   if (!rows.length) {
     return '<div class="empty-state">No data.</div>';
   }
 
-  return `<div class="security-ip-grid">${rows
-    .map(
-      (entry) => `<article class="security-ip-card">
-        <header>
-          <strong>${escapeHtml(entry.ip || "-")}</strong>
-          <span>${escapeHtml(entry.observations)} obs.</span>
-        </header>
-        <dl>
-          <div>
-            <dt>Actions</dt>
-            <dd>${escapeHtml(entry.actions || "-")}</dd>
-          </div>
-          <div>
-            <dt>Sources</dt>
-            <dd>${escapeHtml(entry.sources || "-")}</dd>
-          </div>
-          <div>
-            <dt>First seen</dt>
-            <dd>${escapeHtml(entry.firstSeen || "-")}</dd>
-          </div>
-          <div>
-            <dt>Last seen</dt>
-            <dd>${escapeHtml(entry.lastSeen || "-")}</dd>
-          </div>
-          <div>
-            <dt>Last detail</dt>
-            <dd>${escapeHtml(entry.lastDetail || "-")}</dd>
-          </div>
-        </dl>
-      </article>`
-    )
-    .join("")}</div>`;
+  return renderSystemTable(rows, [
+    { key: "ip", label: "IP" },
+    { key: "actions", label: "Actions" },
+    { key: "sources", label: "Sources" },
+    { key: "firstSeen", label: "First seen" },
+    { key: "lastSeen", label: "Last seen" },
+    { key: "observations", label: "Obs." },
+    { key: "lastDetail", label: "Last detail" }
+  ]);
 }
 
 function renderSecurityHistory(history) {
@@ -1440,7 +1428,7 @@ function renderSecurityHistory(history) {
   ].filter(Boolean);
   return renderSystemHealthBox("Persisted security IP trace", [
     paths.length ? `<div class="system-paths">${paths.join("")}</div>` : "",
-    renderSecurityIpCards(rows)
+    renderSecurityIpTable(rows)
   ]);
 }
 
@@ -1507,7 +1495,7 @@ async function refreshSystemHealth() {
   ].join("");
 
   if (systemHealthServices) {
-    systemHealthServices.innerHTML = renderDatabaseTable(data.services || [], [
+    systemHealthServices.innerHTML = renderSystemTable(data.services || [], [
       { key: "name", label: "Service" },
       { key: "status", label: "Status" },
       { key: "error", label: "Note" }
@@ -1522,19 +1510,24 @@ async function refreshSystemHealth() {
             renderSystemHealthBox("SSH failed source IPs", renderIpTable(data.ssh.topIps)),
             renderSystemLogBox("SSH log samples", data.ssh.samples)
           ].join("")
-        : renderSystemHealthBox("SSH logs", renderAvailabilityNote(data.ssh, "SSH logs")),
+        : renderSystemHealthBox("SSH logs", renderAvailabilityNote(data.ssh, "SSH logs"))
+    ].join("");
+  }
+
+  if (systemHealthFail2ban) {
+    systemHealthFail2ban.innerHTML = [
       data.fail2ban?.available
         ? [
             renderSystemHealthBox(
               "fail2ban sshd",
-              renderDatabaseTable([data.fail2ban.sshd || {}], [
+              renderSystemTable([data.fail2ban.sshd || {}], [
                 { key: "currentlyBanned", label: "Currently banned" },
                 { key: "totalBanned", label: "Total banned" }
               ])
             ),
             renderSystemHealthBox(
               "Jail status",
-              renderDatabaseTable(data.fail2ban.jailStats || [], [
+              renderSystemTable(data.fail2ban.jailStats || [], [
                 { key: "jail", label: "Jail" },
                 { key: "currentlyBanned", label: "Current" },
                 { key: "totalBanned", label: "Total" },
@@ -1547,7 +1540,12 @@ async function refreshSystemHealth() {
             renderSystemHealthBox("Jails", renderStringList(data.fail2ban.jails || [])),
             renderSystemLogBox("fail2ban log samples", data.fail2ban.samples)
           ].join("")
-        : renderSystemHealthBox("fail2ban", renderAvailabilityNote(data.fail2ban, "fail2ban")),
+        : renderSystemHealthBox("fail2ban", renderAvailabilityNote(data.fail2ban, "fail2ban"))
+    ].join("");
+  }
+
+  if (systemHealthFirewall) {
+    systemHealthFirewall.innerHTML = [
       data.firewall?.available
         ? [
             renderSystemHealthBox("Firewall dropped IPs", renderIpTable(data.firewall.droppedIps)),
@@ -1562,10 +1560,18 @@ async function refreshSystemHealth() {
     systemHealthWeb.innerHTML = [
       renderAvailabilityNote(data.caddy, "Caddy logs"),
       data.caddy?.available
-        ? `<h3>Scanner IPs</h3>${renderIpTable(data.caddy.topIps)}<h3>Suspicious HTTP status counts</h3>${renderDatabaseTable(data.caddy.statusCounts || [], [
-            { key: "status", label: "Status" },
-            { key: "count", label: "Count" }
-          ])}<h3>Suspicious status IPs</h3>${renderIpTable(data.caddy.statusIps)}${renderLogSnippets(data.caddy.samples)}`
+        ? [
+            renderSystemHealthBox("Scanner IPs", renderIpTable(data.caddy.topIps)),
+            renderSystemHealthBox(
+              "Suspicious HTTP status counts",
+              renderSystemTable(data.caddy.statusCounts || [], [
+                { key: "status", label: "Status" },
+                { key: "count", label: "Count" }
+              ])
+            ),
+            renderSystemHealthBox("Suspicious status IPs", renderIpTable(data.caddy.statusIps)),
+            renderSystemLogBox("Caddy log samples", data.caddy.samples)
+          ].join("")
         : ""
     ].join("");
   }
@@ -1577,7 +1583,7 @@ async function refreshSystemHealth() {
         ? [
             renderSystemHealthBox(
               "Webhook totals",
-              renderDatabaseTable([data.webhook], [
+              renderSystemTable([data.webhook], [
                 { key: "posts", label: "POSTs" },
                 { key: "invalidSignatures", label: "Invalid signatures" },
                 { key: "errors", label: "Errors" }
@@ -1594,7 +1600,7 @@ async function refreshSystemHealth() {
     systemHealthDockerServices.innerHTML = [
       renderAvailabilityNote(data.docker, "Docker compose"),
       data.docker?.available
-        ? renderDatabaseTable(data.docker.services || [], [
+        ? renderSystemTable(data.docker.services || [], [
             { key: "name", label: "Container" },
             { key: "status", label: "Status" }
           ])
